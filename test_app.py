@@ -4,9 +4,12 @@ Model app-nya ASINKRON sejak 28 Aug 2026: POST -> 302 ke /job/<id>, kerjanya di
 thread, lalu /job/<id>/download. Jadi tes ini POST, ambil job id dari header
 Location, tunggu state 'done'/'failed', baru unduh.
 """
+import csv
 import io
 import time
 from pathlib import Path
+
+from openpyxl import load_workbook
 
 import app as A
 from app import JOBS, TOOLS, app
@@ -34,9 +37,12 @@ def kirim(nama_file, fh, **tambahan):
     raise AssertionError("job tidak pernah selesai")
 
 
-assert c.get("/").status_code == 200
-assert b"Generate D&amp;W" in c.get("/").data
-assert len(TOOLS) == 1, "harus satu menu saja"
+landing = c.get("/")
+assert landing.status_code == 200
+assert set(TOOLS) == {"dw", "segregate"}
+assert b"Dupoin DPM Tools" in landing.data
+assert b"Generate D&amp;W" in landing.data
+assert b"Deal Segregator" in landing.data
 assert c.get("/tool/mtoatd").status_code == 404, "menu yang tidak ada harus 404"
 assert c.get("/tool/hitung").status_code == 404, "menu lama sudah dihapus"
 assert c.get("/tool/../../etc/passwd").status_code == 404
@@ -46,6 +52,69 @@ halaman = c.get("/tool/dw")
 assert halaman.status_code == 200
 assert b'name="bulan"' in halaman.data and b'name="tahun"' in halaman.data, \
     "dropdown bulan laporan hilang dari halaman upload"
+assert b'name="saldo_jw"' in halaman.data
+assert b"multiple" not in halaman.data
+
+halaman_segregate = c.get("/tool/segregate")
+assert halaman_segregate.status_code == 200
+assert b'name="file"' in halaman_segregate.data
+assert b"multiple" in halaman_segregate.data
+assert b'name="bulan"' not in halaman_segregate.data
+assert b'name="saldo_jw"' not in halaman_segregate.data
+assert b"Download the template" not in halaman_segregate.data
+
+assert c.post("/tool/segregate", data={},
+              content_type="multipart/form-data").status_code == 400
+assert c.post(
+    "/tool/segregate",
+    data={"file": [(io.BytesIO(b"x"), "a.txt")]},
+    content_type="multipart/form-data",
+).status_code == 400
+
+
+def deals_csv():
+    """Small portable Deals History fixture with one duplicate Deal ID."""
+    text = io.StringIO(newline="")
+    writer = csv.writer(text)
+    writer.writerow(["Deal", "Login", "Group", "Country", "Time", "Type", "Entry",
+                     "Symbol", "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"])
+    writer.writerow(["1", "100", r"real\DPMKT-15", "MY", "2026.07.01 01:02:03",
+                     "buy", "out", "EURUSD", "1.25", "-1", "-0.1", "-0.2", "10", "USD"])
+    return text.getvalue().encode()
+
+
+def kirim_segregate(files):
+    r = c.post("/tool/segregate", data={"file": files},
+               content_type="multipart/form-data")
+    assert r.status_code == 302, (r.status_code, r.data[:500])
+    job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
+    for _ in range(100):
+        info = A._read_state(job_id)
+        if info and info["state"] in ("done", "failed"):
+            return job_id, info
+        time.sleep(0.05)
+    raise AssertionError("Deal Segregator job did not finish")
+
+
+job_id, info = kirim_segregate([(io.BytesIO(deals_csv()), "deals.csv")])
+assert info["state"] == "done", info
+assert info["name"].endswith("-hasil.xlsx"), info["name"]
+r = c.get(f"/job/{job_id}/download")
+assert r.status_code == 200
+assert r.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+wb = load_workbook(io.BytesIO(r.data), read_only=True, data_only=True)
+try:
+    assert wb.sheetnames == ["Daily", "Monthly Summary", "Verifikasi"]
+finally:
+    wb.close()
+
+job_id, info = kirim_segregate([
+    (io.BytesIO(deals_csv()), "same.csv"),
+    (io.BytesIO(deals_csv()), "same.csv"),
+])
+assert info["state"] == "done", info
+assert "dipakai: 1" in (info["log"] or ""), info["log"]
+c.get(f"/job/{job_id}/download")
 
 # --- yang harus DITOLAK sebelum job dibuat ---------------------------------
 assert c.post("/tool/dw", data={"file": (io.BytesIO(b"x"), "a.txt"), **BULAN}
