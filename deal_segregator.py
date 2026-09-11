@@ -34,6 +34,7 @@ otomatis dari file, jadi export UTF-8/koma biasa dan file .xlsx juga tetap terba
 import argparse
 import csv
 import datetime
+import math
 import sys
 from pathlib import Path
 
@@ -73,11 +74,14 @@ def _baca_csv(path: Path):
     with open(path, encoding=enc, newline="") as f:
         awal = f.readline()
         pemisah = _deteksi_pemisah(awal)
-        f.seek(0)
-        r = csv.reader(f, delimiter=pemisah)
-        header = next(r)
-        rows = [row for row in r if any((c or "").strip() for c in row)]
-    return header, rows
+    def rows():
+        with open(path, encoding=enc, newline="") as f:
+            r = csv.reader(f, delimiter=pemisah)
+            next(r)
+            for nomor, row in enumerate(r, start=2):
+                if any((c or "").strip() for c in row):
+                    yield nomor, row
+    return next(csv.reader([awal], delimiter=pemisah)), rows()
 
 
 def _baca_xlsx(path: Path):
@@ -85,9 +89,14 @@ def _baca_xlsx(path: Path):
     ws = wb.active
     it = ws.iter_rows(values_only=True)
     header = [(_teks(v)) for v in next(it)]
-    rows = [list(row) for row in it if any(v is not None and _teks(v) != "" for v in row)]
-    wb.close()
-    return header, rows
+    def rows():
+        try:
+            for nomor, row in enumerate(it, start=2):
+                if any(v is not None and _teks(v) != "" for v in row):
+                    yield nomor, list(row)
+        finally:
+            wb.close()
+    return header, rows()
 
 
 def baca_file(path: Path):
@@ -119,16 +128,15 @@ def _teks(v) -> str:
     return str(v).strip()
 
 
-def _angka(v):
-    if isinstance(v, (int, float)):
-        return float(v)
-    v = _teks(v)
-    if v == "":
-        return 0.0
+def _angka(v, path: Path, nomor: int, kolom: str):
+    teks = _teks(v)
     try:
-        return float(v)
+        angka = float(teks)
     except ValueError:
-        return v  # biarkan apa adanya kalau memang bukan angka
+        angka = math.nan
+    if not teks or not math.isfinite(angka):
+        sys.exit(f"BERHENTI: nilai {kolom} tidak valid di '{path.name}', baris {nomor}: {teks!r}")
+    return angka
 
 
 def desk_dari_group(group: str) -> str:
@@ -138,21 +146,22 @@ def desk_dari_group(group: str) -> str:
     return g
 
 
-def tanggal_dari_waktu(waktu):
+def tanggal_dari_waktu(waktu, path=None, nomor=None):
     """Terima string MT5 ('2026.07.31 01:10:35.454') ATAU objek datetime/date
     (kalau dibaca dari .xlsx yang selnya sudah bertipe tanggal). -> date.
-    Fallback: teks asli kalau formatnya tidak dikenal (supaya tidak pernah
-    crash, cuma tidak tersaring rapi)."""
+    Nilai kosong, format asing, dan tanggal mustahil ditolak."""
     if isinstance(waktu, datetime.datetime):
         return waktu.date()
     if isinstance(waktu, datetime.date):
         return waktu
-    bagian = _teks(waktu).split(" ", 1)[0]
-    try:
-        y, m, d = bagian.split(".")
-        return datetime.date(int(y), int(m), int(d))
-    except (ValueError, AttributeError):
-        return bagian or "(tanpa tanggal)"
+    teks = _teks(waktu)
+    for fmt in ("%Y.%m.%d %H:%M:%S.%f", "%Y.%m.%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(teks, fmt).date()
+        except ValueError:
+            pass
+    lokasi = f" di '{path.name}', baris {nomor}" if path is not None else ""
+    sys.exit(f"BERHENTI: nilai Time tidak valid{lokasi}: {teks!r}")
 
 
 def _kunci_tanggal(v):
@@ -164,13 +173,21 @@ def _kunci_tanggal(v):
 # --------------------------------------------------------------------- pipeline
 def _normalisasi_satu_file(path: Path, deal_id_terpakai: set):
     idx, rows = baca_file(path)
-    total = len(rows)
-    out_rows = [row for row in rows if _teks(row[idx["Entry"]]).lower() == ENTRY_DIPAKAI]
-    entry_in = sum(1 for row in rows if _teks(row[idx["Entry"]]).lower() == "in")
-    entry_lain = total - len(out_rows) - entry_in
-
-    baris, duplikat = [], 0
-    for row in out_rows:
+    total = entry_out = entry_in = entry_lain = duplikat = 0
+    baris = []
+    for nomor, row in rows:
+        total += 1
+        if len(row) != len(idx):
+            sys.exit(f"BERHENTI: jumlah kolom tidak valid di '{path.name}', baris {nomor}: "
+                     f"diharapkan {len(idx)} kolom, ditemukan {len(row)} kolom")
+        entry = _teks(row[idx["Entry"]]).lower()
+        if entry == "in":
+            entry_in += 1
+            continue
+        if entry != ENTRY_DIPAKAI:
+            entry_lain += 1
+            continue
+        entry_out += 1
         deal_id = _teks(row[idx["Deal"]])
         if deal_id and deal_id in deal_id_terpakai:
             duplikat += 1
@@ -183,17 +200,17 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set):
             # join di sini (mis. country = peta.get(login, _teks(row[idx["Country"]]))).
             "Country": _teks(row[idx["Country"]]),
             "Desk": desk_dari_group(_teks(row[idx["Group"]])),
-            "Date": tanggal_dari_waktu(row[idx["Time"]]),
+            "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
             "Type": _teks(row[idx["Type"]]),
             "Symbol": _teks(row[idx["Symbol"]]),
-            "Volume": _angka(row[idx["Volume"]]),
-            "Commission": _angka(row[idx["Commission"]]),
-            "Fee": _angka(row[idx["Fee"]]),
-            "Swap": _angka(row[idx["Swap"]]),
-            "Profit": _angka(row[idx["Profit"]]),
+            "Volume": _angka(row[idx["Volume"]], path, nomor, "Volume"),
+            "Commission": _angka(row[idx["Commission"]], path, nomor, "Commission"),
+            "Fee": _angka(row[idx["Fee"]], path, nomor, "Fee"),
+            "Swap": _angka(row[idx["Swap"]], path, nomor, "Swap"),
+            "Profit": _angka(row[idx["Profit"]], path, nomor, "Profit"),
             "Currency": _teks(row[idx["Currency"]]),
         })
-    return {"nama": path.name, "total": total, "out": len(out_rows), "in": entry_in,
+    return {"nama": path.name, "total": total, "out": entry_out, "in": entry_in,
             "lain": entry_lain, "duplikat": duplikat, "baris": baris}
 
 
@@ -324,7 +341,10 @@ def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
     _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy")
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path_out)
+    try:
+        wb.save(path_out)
+    finally:
+        wb.close()
 
 
 def main():
