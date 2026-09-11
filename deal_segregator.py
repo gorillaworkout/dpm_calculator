@@ -81,7 +81,7 @@ def _baca_csv(path: Path):
             for nomor, row in enumerate(r, start=2):
                 if any((c or "").strip() for c in row):
                     yield nomor, row
-    return next(csv.reader([awal], delimiter=pemisah)), rows()
+    return next(csv.reader([awal], delimiter=pemisah)), rows(), None
 
 
 def _baca_xlsx(path: Path):
@@ -96,19 +96,21 @@ def _baca_xlsx(path: Path):
                     yield nomor, list(row)
         finally:
             wb.close()
-    return header, rows()
+    return header, rows(), wb.close
 
 
 def baca_file(path: Path):
     """Baca satu file export Deals History (.csv atau .xlsx/.xlsm). -> (idx, rows)."""
     suffix = path.suffix.lower()
     if suffix in (".xlsx", ".xlsm"):
-        header, rows = _baca_xlsx(path)
+        header, rows, close = _baca_xlsx(path)
     else:
-        header, rows = _baca_csv(path)
+        header, rows, close = _baca_csv(path)
     idx = {name: i for i, name in enumerate(header)}
     hilang = [k for k in KOLOM_WAJIB if k not in idx]
     if hilang:
+        if close:
+            close()
         sys.exit(
             f"BERHENTI: kolom wajib tidak ditemukan di '{path.name}': {hilang}\n"
             f"Header yang terbaca ({len(header)} kolom): {header}\n"
