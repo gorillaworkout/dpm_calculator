@@ -3,8 +3,9 @@ import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
+import deal_segregator
 from deal_segregator import proses
 
 
@@ -119,5 +120,30 @@ expect_error([row("1", time="2026.07.01 25:00:00")], "bad.csv", "baris 2", "Time
 expect_error([row("1", time="2026.07.01 garbage")], "bad.csv", "baris 2", "Time")
 expect_error([row("1", time="yesterday")], "bad.csv", "baris 2", "Time")
 expect_error([["1", "100"]], "bad.csv", "baris 2", "14 kolom", "2 kolom")
+
+# A rejected XLSX must not retain an open read-only workbook.
+with TemporaryDirectory() as tmp:
+    src = Path(tmp) / "missing-columns.xlsx"
+    workbook = Workbook()
+    workbook.active.append(["Deal"])
+    workbook.save(src)
+    workbook.close()
+    real_load_workbook = deal_segregator.load_workbook
+    opened = []
+    def tracking_load_workbook(*args, **kwargs):
+        opened_workbook = real_load_workbook(*args, **kwargs)
+        opened.append(opened_workbook)
+        return opened_workbook
+    deal_segregator.load_workbook = tracking_load_workbook
+    try:
+        try:
+            proses([src], Path(tmp) / "out.xlsx")
+        except SystemExit:
+            pass
+        else:
+            raise AssertionError("missing columns were accepted")
+        assert opened and opened[0]._archive.fp is None
+    finally:
+        deal_segregator.load_workbook = real_load_workbook
 
 print("OK deal segregator engine")
