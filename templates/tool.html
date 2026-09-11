@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ tool[0] }} · dw-calculator{% endblock %}
+{% block title %}{{ tool[0] }} · Dupoin DPM Tools{% endblock %}
 {% block body %}
 <h1>{{ tool[0] }}</h1>
 <p class="lede">{{ tool[1] }}</p>
@@ -7,10 +7,12 @@
 <div class="card">
   <form method="post" enctype="multipart/form-data"
         onsubmit="this.b.disabled=true;this.b.textContent='Working…'">
-    <label for="f">D&amp;W workbook (.xlsx)</label>
-    <input id="f" type="file" name="file" accept=".xlsx,.xlsm" required>
-    <p class="hint">{{ hint or "Must contain the transaction sheets plus D&amp;W FEE and Xero." }}
-      Don't have one? <a href="/template">Download the template</a>.</p>
+    <label for="f">{{ "D&W workbook (.xlsx)" if slug == "dw" else "Deals History files (.csv, .xlsx, .xlsm)" }}</label>
+    <input id="f" type="file" name="file"
+           accept="{{ '.xlsx,.xlsm' if slug == 'dw' else '.csv,.xlsx,.xlsm' }}"
+           {{ 'multiple' if slug == 'segregate' }} required>
+    <p class="hint">{{ hint or "Must contain the transaction sheets plus D&W FEE and Xero." }}
+      {% if slug == "dw" %}Don't have one? <a href="/template">Download the template</a>.{% endif %}</p>
 
     {% if bulan_opsi %}
     <label for="bulan">Report month</label>
@@ -49,7 +51,7 @@
     <button name="b" type="submit">Run &amp; download result</button>
   </form>
 
-  <script>
+  {% if slug == "dw" %}<script>
     // Label saldo pembuka mengikuti bulan SEBELUM bulan laporan yang dipilih.
     (function () {
       var M = {{ nama_bulan|tojson }};
@@ -66,7 +68,7 @@
       t.addEventListener('change', upd);
       upd();
     })();
-  </script>
+  </script>{% endif %}
 
   {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
   {% if log %}

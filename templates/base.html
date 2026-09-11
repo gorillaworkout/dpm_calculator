@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>{% block title %}dw-calculator{% endblock %}</title>
+<title>{% block title %}Dupoin DPM Tools{% endblock %}</title>
 <style>
 :root{
   --bg:#0a0d14; --panel:#111624; --panel-2:#161d30; --line:#222b42;
@@ -156,8 +156,8 @@ pre{
 </head>
 <body>
 <aside class="side">
-  <a class="logo" href="/"><span class="mark">DW</span>
-    <span class="brand">dw-calculator<small>DPM Malaysia</small></span></a>
+  <a class="logo" href="/"><span class="mark">DPM</span>
+    <span class="brand">Dupoin DPM Tools<small>DPM Malaysia</small></span></a>
   <div class="navwrap">
     <div class="navlabel">Tools</div>
     <nav>
@@ -171,8 +171,8 @@ pre{
       {% endfor %}
     </nav>
   </div>
-  <div class="sidefoot">Your original file is never modified — the result is always a new file.<br>
-    <a href="/template">Download Template D&amp;W.xlsx</a></div>
+  <div class="sidefoot">Your original file is never modified — the result is always a new file.
+    {% if request.path == '/tool/dw' %}<br><a href="/template">Download Template D&amp;W.xlsx</a>{% endif %}</div>
 </aside>
 <main><div class="inner{% block wide %}{% endblock %}">{% block body %}{% endblock %}</div></main>
 </body>

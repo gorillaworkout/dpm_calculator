@@ -74,6 +74,9 @@ TOOLS = {
            "Missing Data, Legend. Fee rates and Xero rates are always read from the file "
            "you upload, never stored here.",
            ("isi_template.py", "hitung_dw.py"), True),
+    "segregate": ("Deal Segregator", "Combine one or more MT5 Deals History files into "
+                  "daily and monthly summaries with verification totals.",
+                  ("deal_segregator.py",), True),
 }
 
 app = Flask(__name__)
@@ -152,6 +155,7 @@ HINT = {
           "rates. Sheets 'Fund Transfer Table', 'Opening Balance', 'J Wallet' and "
           "'Payment Channel Balance' are used when present, so that Channel Balance and "
           "J Wallet come out complete.",
+    "segregate": "Choose one or more MT5 Deals History files. CSV, XLSX and XLSM are accepted.",
 }
 
 
@@ -252,6 +256,25 @@ DOC = {
         "catatan": [CATATAN_MISSING, CATATAN_ASLI],
         "catatan_penting": True,
     },
+    "segregate": {
+        "judul": "Deal Segregator — daily and monthly trading summaries",
+        "ringkas": "Upload one or more MT5 Deals History exports. They are combined, filtered, "
+                   "deduplicated and returned as one workbook.",
+        "siapkan": [
+            "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
+            "Each file must contain Deal, Login, Group, Country, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns.",
+        ],
+        "langkah": [
+            "Rows from every file are pooled. Only <code>Entry = out</code> rows are kept.",
+            "Repeated non-empty Deal IDs are removed, then Daily and Monthly Summary totals are grouped by account, country, desk, period, type, symbol and currency.",
+            "Country is copied exactly as supplied. No lookup or enrichment is performed.",
+        ],
+        "hasil": "One <code>.xlsx</code> workbook with three sheets:",
+        "sheets": [("Daily", "Daily aggregates and financial totals."),
+                   ("Monthly Summary", "Monthly aggregates and financial totals."),
+                   ("Verifikasi", "Input, filtering, duplicate and output checks.")],
+        "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.", CATATAN_ASLI],
+    },
 }
 
 
@@ -269,16 +292,16 @@ def index():
 def tool(slug):
     if slug not in TOOLS or not TOOLS[slug][3]:
         abort(404)
+    pilihan = _pilihan_bulan() if slug == "dw" else {}
     return render_template("tool.html", slug=slug, tool=TOOLS[slug],
-                           hint=HINT.get(slug), doc=DOC.get(slug),
-                           **_pilihan_bulan())
+                           hint=HINT.get(slug), doc=DOC.get(slug), **pilihan)
 
 
 @app.post("/tool/<slug>")
 def run(slug):
     if slug not in TOOLS or not TOOLS[slug][3]:
         abort(404)
-    pilihan = _pilihan_bulan()
+    pilihan = _pilihan_bulan() if slug == "dw" else {}
     # Keep what the user picked, so a validation error does not reset the form.
     if (request.form.get("bulan") or "").isdigit():
         pilihan["bulan_default"] = int(request.form["bulan"])
@@ -290,26 +313,43 @@ def run(slug):
                                hint=HINT.get(slug), doc=DOC.get(slug),
                                error=pesan, **pilihan), 400
 
-    up = request.files.get("file")
-    if not up or not up.filename.lower().endswith((".xlsx", ".xlsm")):
-        return _gagal("Please choose an .xlsx file first.")
-
-    periode, salah = _baca_periode(request.form)
-    if salah:
-        return _gagal(salah)
-
-    saldo_jw = (request.form.get("saldo_jw") or "").strip()
-    pilihan["saldo_default"] = saldo_jw
-    if saldo_jw and not SALDO_POLA.match(saldo_jw):
-        return _gagal("The opening balance must be a number, for example 377233.36 "
-                      "or 377,233.36. Leave it empty to start from zero.")
+    uploads = [u for u in request.files.getlist("file") if u and u.filename]
+    if slug == "segregate":
+        if not uploads:
+            return _gagal("Please choose at least one .csv or .xlsx file first.")
+        invalid = [u.filename for u in uploads
+                   if not u.filename.lower().endswith((".csv", ".xlsx", ".xlsm"))]
+        if invalid:
+            return _gagal(f"These files are not .csv/.xlsx and were rejected: {', '.join(invalid)}")
+        periode = saldo_jw = None
+    else:
+        up = uploads[0] if uploads else None
+        if not up or not up.filename.lower().endswith((".xlsx", ".xlsm")):
+            return _gagal("Please choose an .xlsx file first.")
+        periode, salah = _baca_periode(request.form)
+        if salah:
+            return _gagal(salah)
+        saldo_jw = (request.form.get("saldo_jw") or "").strip()
+        pilihan["saldo_default"] = saldo_jw
+        if saldo_jw and not SALDO_POLA.match(saldo_jw):
+            return _gagal("The opening balance must be a number, for example 377233.36 "
+                          "or 377,233.36. Leave it empty to start from zero.")
 
     job = JOBS / uuid.uuid4().hex
     job.mkdir()
     _sweep_old_jobs()
-    src = job / secure_filename(up.filename)
-    up.save(src)
-    dst = src.with_name(f"{src.stem}-hasil.xlsx")
+    sources = []
+    for index, upload in enumerate(uploads, start=1):
+        safe = secure_filename(upload.filename) or f"upload-{index}"
+        src = job / safe
+        suffix = 2
+        while src.exists():
+            src = job / f"{Path(safe).stem}-{suffix}{Path(safe).suffix}"
+            suffix += 1
+        upload.save(src)
+        sources.append(src)
+    src = sources[0]
+    dst = src.with_name(f"{src.stem}-hasil.xlsx") if slug == "dw" else job / "hasil.xlsx"
 
     # Asynchronous on purpose. A 38 MB workbook takes several minutes, and any
     # proxy in front of this app (Cloudflare caps at 100s) would kill a request
@@ -319,12 +359,18 @@ def run(slug):
     job_id = job.name
     # The month goes in the download name on purpose: two runs of the same
     # upload for different months would otherwise be indistinguishable on disk.
-    _write_state(job_id, state="running",
-                 name=f"{Path(up.filename).stem} - {_label_periode(periode)}-hasil.xlsx",
+    if slug == "dw":
+        download_name = f"{Path(uploads[0].filename).stem} - {_label_periode(periode)}-hasil.xlsx"
+    else:
+        stems = [Path(upload.filename).stem for upload in uploads]
+        label = " - ".join(stems) if len(stems) <= 3 else f"{len(stems)} files"
+        download_name = f"{label}-hasil.xlsx"
+    _write_state(job_id, state="running", name=download_name,
                  started=time.time(), error=None, log=None, path=None, slug=slug,
                  periode=periode, saldo_jw=saldo_jw or None)
     threading.Thread(target=_process_job,
-                     args=(job_id, slug, job, src, dst, periode, saldo_jw),
+                     args=(job_id, slug, job, sources if slug == "segregate" else src,
+                           dst, periode, saldo_jw),
                      daemon=True).start()
     return redirect(url_for("job_status", job_id=job_id))
 
@@ -339,7 +385,9 @@ def _process_job(job_id, slug, job, src, dst, periode=None, saldo_jw=None):
     try:
         for i, script in enumerate(langkah):
             keluar = dst if i == len(langkah) - 1 else job / f"step{i}.xlsx"
-            perintah = [sys.executable, str(BASE / script), str(masuk), "-o", str(keluar)]
+            inputs = masuk if isinstance(masuk, (list, tuple)) else [masuk]
+            perintah = [sys.executable, str(BASE / script), *(str(p) for p in inputs),
+                        "-o", str(keluar)]
             flag = PERIODE_ARG.get(script)
             if periode and flag:
                 perintah += [flag, periode]
@@ -374,11 +422,12 @@ def job_status(job_id):
     if info["state"] == "failed":
         # Keep the directory: a refresh on the error page must still show the
         # error, not a bare 404. The sweeper removes it later.
+        pilihan = _pilihan_bulan() if slug == "dw" else {}
         return render_template("tool.html", slug=slug, tool=TOOLS[slug],
                                hint=HINT.get(slug), doc=DOC.get(slug),
                                error=info["error"],
                                log=info["log"] or "Failed with no message.",
-                               **_pilihan_bulan()), 422
+                               **pilihan), 422
     elapsed = int(time.time() - info["started"])
     return render_template("job.html", job_id=job_id, info=info, elapsed=elapsed,
                            tool=TOOLS[slug])

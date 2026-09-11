@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block wide %} wide{% endblock %}
 {% block body %}
-<h1>Dupoin <span>D&amp;W</span> Calculator</h1>
-<p class="lede">Upload your D&amp;W workbook. The calculator fills in Handling Fee, Xero Rate,
-Xero USD and Forex Gain/Loss, then builds the full report. Your original file is never
-modified &mdash; the result is always a new file you download.</p>
+<h1>Dupoin <span>DPM</span> Tools</h1>
+<p class="lede">Two reporting tools for the DPM Malaysia team. Pick the one you need, upload
+your file, and download the finished workbook. Your original files are never modified
+&mdash; the result is always a new file you download.</p>
 
 <div class="grid">
   {% for slug, (nama, desc, _script, siap) in tools.items() %}
@@ -22,14 +22,11 @@ modified &mdash; the result is always a new file you download.</p>
   {% endfor %}
 </div>
 
-<h2 style="margin:44px 0 8px; font-size:20px; letter-spacing:-.4px">One page, one run</h2>
-<p class="lede">There is nothing to choose. Open <strong>Generate D&amp;W</strong>, upload
-the workbook, and every sheet is produced in a single pass &mdash; whether you are giving it
-a raw back-office export or a Template D&amp;W you filled in yourself. Both are accepted.</p>
-
-<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">The four calculated columns</h2>
-<p class="lede">These are written to the right of sheets <code>D</code> and <code>W</code>.
-Re-running overwrites them &mdash; they never stack up or duplicate.</p>
+<h2 style="margin:44px 0 8px; font-size:20px; letter-spacing:-.4px">Generate D&amp;W</h2>
+<p class="lede">Upload your D&amp;W workbook and choose the report month. The calculator fills
+in Handling Fee, Xero Rate, Xero USD and Forex Gain/Loss, then builds all 14 report sheets in
+a single pass &mdash; whether you give it a raw back-office export or a Template D&amp;W you
+filled in yourself.</p>
 
 <div class="card">
   <table style="width:100%; border-collapse:collapse; font-size:13.5px">
@@ -54,16 +51,37 @@ Re-running overwrites them &mdash; they never stack up or duplicate.</p>
   </table>
 </div>
 
-<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Rates are never stored here</h2>
-<p class="lede">Fee rates and Xero rates are read from the file you upload, every single
-run. Nothing is cached or remembered between uploads, so when a rate changes you simply
-upload a workbook containing the new one &mdash; there is no setting to update and no
-template to rebuild first.</p>
-
-<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Always check “Missing Data” first</h2>
-<p class="lede" style="margin-bottom:0">Every result contains a <code>Missing Data</code> sheet.
-If a rate or fee could not be found, the affected cells are left <strong>red</strong> and
-nothing is calculated for them &mdash; the report will look complete but the totals will be
-short. Open that sheet before circulating any numbers. When it reports “None” on every
+<p class="lede" style="margin-top:16px">Fee rates and Xero rates are read from the file you
+upload on every run &mdash; nothing is cached between uploads. Always open the
+<code>Missing Data</code> sheet first: if a rate could not be found, those cells stay
+<strong>red</strong> and their totals are short. When it reports &ldquo;None&rdquo; on every
 line, the run is clean.</p>
+
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Deal Segregator</h2>
+<p class="lede">Upload one or more MT5 Deals History exports &mdash; for example one file per
+month. Only closing trades (<code>Entry = out</code>) are kept, repeated Deal IDs across files
+are counted once, and the rows are grouped by account, country, desk, type, symbol and
+currency.</p>
+
+<div class="card">
+  <table style="width:100%; border-collapse:collapse; font-size:13.5px">
+    <tbody>
+      <tr>
+        <td style="padding:9px 0; width:170px; color:var(--ink); font-weight:600"><code>Daily</code></td>
+        <td style="padding:9px 0; color:var(--mute)">Day-by-day totals for Volume, Commission, Fee, Swap and Profit</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600"><code>Monthly Summary</code></td>
+        <td style="padding:9px 0; color:var(--mute)">The same figures rolled up per month, without the daily detail</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600"><code>Verifikasi</code></td>
+        <td style="padding:9px 0; color:var(--mute)">Row counts per file, rows dropped, duplicates removed and overall totals</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="lede" style="margin:16px 0 0">Both tools return one workbook, downloaded straight to
+your browser. Nothing is stored on the server after you download it.</p>
 {% endblock %}
