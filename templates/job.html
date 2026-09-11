@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Processing · dw-calculator{% endblock %}
+{% block body %}
+{% if info.state == 'collected' %}
+<h1>Download finished</h1>
+<p class="lede">This file has already been downloaded and removed from the server.
+Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
+
+<div class="card">
+  <p style="margin:0 0 14px; color:var(--mute); font-size:13.5px">Results are deleted the
+    moment they reach you, so nothing large is left sitting on the server. If you need the
+    file again, run the workbook through once more.</p>
+  <a class="dl" href="/tool/dw">Start a new job</a>
+</div>
+
+{% elif info.state == 'done' %}
+<h1>Your file is ready</h1>
+<p class="lede">The download starts automatically. Keep this tab open until your browser
+shows the file in its download list.</p>
+
+<div class="card">
+  <p style="margin:0 0 4px; color:var(--mute); font-size:13.5px">File</p>
+  <p style="margin:0 0 18px; font-weight:600">{{ info.name }}</p>
+  <div style="display:flex; align-items:center; gap:12px">
+    <div class="spin" aria-hidden="true"></div>
+    <p style="margin:0; color:var(--mute); font-size:13.5px" id="msg">Starting download&hellip;</p>
+  </div>
+  <p class="hint" style="margin-top:16px">Download did not start?
+    <a href="/job/{{ job_id }}/download" id="manual">Click here</a>. The file is removed
+    from the server once delivered, so save it before closing this tab.</p>
+</div>
+
+<style>
+  .spin {
+    flex: 0 0 20px; height: 20px; border-radius: 50%;
+    border: 3px solid #22305a; border-top-color: var(--accent-2);
+    animation: sp .9s linear infinite;
+  }
+  @keyframes sp { to { transform: rotate(360deg) } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none } }
+</style>
+<script>
+  // Navigating to the download URL keeps this page intact (the response is an
+  // attachment), so the user still sees the confirmation text afterwards.
+  window.location.href = '/job/{{ job_id }}/download';
+  setTimeout(function () {
+    document.getElementById('msg').textContent =
+      'Download started — check your Downloads folder.';
+  }, 2500);
+</script>
+
+{% else %}
+<h1>Processing&hellip;</h1>
+<p class="lede">Your workbook is being calculated on the server. Large files
+(20&ndash;40&nbsp;MB) can take a few minutes &mdash; this page refreshes itself, so just
+leave it open.</p>
+
+<div class="card">
+  <div style="display:flex; align-items:center; gap:14px">
+    <div class="spin" aria-hidden="true"></div>
+    <div>
+      <p style="margin:0; font-weight:600">Working on {{ info.name }}</p>
+      <p style="margin:4px 0 0; color:var(--mute); font-size:13.5px">
+        Elapsed: <span id="t">{{ elapsed }}</span>s &middot; checking again every 5s
+      </p>
+    </div>
+  </div>
+  <div style="height:6px; margin-top:20px; border-radius:99px; background:#0c1120; overflow:hidden">
+    <div class="bar"></div>
+  </div>
+  <p class="hint" style="margin-top:16px">Do not close this tab &mdash; the download link
+    appears here when the calculation finishes.</p>
+</div>
+
+<style>
+  .spin {
+    flex: 0 0 26px; height: 26px; border-radius: 50%;
+    border: 3px solid #22305a; border-top-color: var(--accent);
+    animation: sp .9s linear infinite;
+  }
+  @keyframes sp { to { transform: rotate(360deg) } }
+  .bar {
+    height: 100%; width: 35%; border-radius: 99px;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    animation: slide 1.6s ease-in-out infinite;
+  }
+  @keyframes slide {
+    0%   { transform: translateX(-100%) }
+    100% { transform: translateX(300%) }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .spin, .bar { animation: none }
+  }
+</style>
+<script>
+  // Poll rather than hold the request open: any proxy in front of this app
+  // (Cloudflare cuts at 100s) would otherwise abort a long upload with a 524.
+  var t = {{ elapsed }};
+  setInterval(function () { document.getElementById('t').textContent = ++t; }, 1000);
+  setTimeout(function () { location.reload(); }, 5000);
+</script>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{% block title %}dw-calculator{% endblock %}</title>
+<style>
+:root{
+  --bg:#0a0d14; --panel:#111624; --panel-2:#161d30; --line:#222b42;
+  --ink:#e8edf7; --mute:#8d9ab5; --accent:#4f7cff; --accent-2:#22d3a6;
+  --radius:14px; --side:268px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--ink);
+  font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:grid; grid-template-columns:var(--side) minmax(0,1fr);
+}
+
+/* ---------- sidebar ---------- */
+.side{
+  position:sticky; top:0; height:100dvh; overflow-y:auto; padding:26px 18px;
+  background:linear-gradient(180deg,#0c1120,#0a0d14);
+  border-right:1px solid var(--line); display:flex; flex-direction:column; gap:26px;
+}
+.logo{display:flex; align-items:center; gap:12px; text-decoration:none; color:inherit}
+.mark{
+  flex:0 0 40px; height:40px; border-radius:11px; display:grid; place-items:center;
+  font-weight:800; font-size:15px; letter-spacing:-.5px; color:#fff;
+  background:linear-gradient(140deg,var(--accent),#8b5cf6 55%,var(--accent-2));
+  box-shadow:0 8px 22px -8px rgba(79,124,255,.75);
+}
+.brand{font-weight:700; letter-spacing:-.2px; line-height:1.25}
+.brand small{display:block; color:var(--mute); font-weight:400; font-size:10.5px; letter-spacing:.09em; text-transform:uppercase}
+.navlabel{font-size:10.5px; font-weight:700; letter-spacing:.11em; text-transform:uppercase; color:var(--mute); padding:0 10px 8px}
+nav{display:flex; flex-direction:column; gap:4px}
+nav a,nav span{
+  display:flex; align-items:center; gap:10px; padding:11px 12px; border-radius:10px;
+  text-decoration:none; color:#a7b3cc; font-size:14px; font-weight:500;
+  border:1px solid transparent; transition:background .15s ease,color .15s ease;
+}
+nav a:hover{background:#141b2e; color:var(--ink)}
+nav a.on{
+  color:var(--ink); font-weight:600; background:linear-gradient(140deg,rgba(79,124,255,.20),rgba(34,211,166,.10));
+  border-color:rgba(79,124,255,.42);
+}
+nav span{opacity:.55; cursor:default}
+.dot{flex:0 0 6px; height:6px; border-radius:50%; background:#3d486b; transition:background .15s ease}
+nav a.on .dot{background:var(--accent); box-shadow:0 0 0 3px rgba(79,124,255,.20)}
+.sidefoot{margin-top:auto; font-size:12px; color:var(--mute); padding:0 10px}
+.sidefoot a{color:#7aa2ff; text-decoration:none}
+.sidefoot a:hover{text-decoration:underline}
+
+/* ---------- panel kanan ---------- */
+main{min-width:0; padding:44px 40px 72px; position:relative}
+main::before{
+  content:""; position:absolute; inset:0 0 auto; height:420px; pointer-events:none;
+  background:radial-gradient(620px 320px at 22% -10%,rgba(79,124,255,.16),transparent 65%),
+             radial-gradient(520px 300px at 92% -4%,rgba(34,211,166,.10),transparent 62%);
+}
+.inner{position:relative; max-width:760px}
+.inner.wide{max-width:1000px}
+h1{font-size:clamp(26px,4vw,38px); line-height:1.15; letter-spacing:-1px; margin:0 0 12px}
+h1 span{background:linear-gradient(100deg,var(--accent),var(--accent-2)); -webkit-background-clip:text; background-clip:text; color:transparent}
+.lede{color:var(--mute); max-width:62ch; margin:0 0 30px}
+.grid{display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.card{
+  display:block; text-decoration:none; color:inherit; padding:22px;
+  background:linear-gradient(180deg,var(--panel),var(--panel-2));
+  border:1px solid var(--line); border-radius:var(--radius);
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset,0 18px 34px -26px #000;
+  transition:transform .18s ease,border-color .18s ease;
+}
+a.card:hover{transform:translateY(-3px); border-color:#31406a}
+a.card:focus-visible,nav a:focus-visible{outline:2px solid var(--accent); outline-offset:3px}
+.card h3{margin:0 0 6px; font-size:17px; letter-spacing:-.3px}
+.card p{margin:0; color:var(--mute); font-size:13.5px}
+.tag{
+  display:inline-block; margin-bottom:12px; padding:3px 9px; border-radius:999px;
+  font-size:10.5px; font-weight:700; letter-spacing:.09em; text-transform:uppercase;
+  color:var(--accent-2); background:rgba(34,211,166,.11); border:1px solid rgba(34,211,166,.28);
+}
+.tag.soon{color:var(--mute); background:rgba(141,154,181,.09); border-color:#2a3350}
+.card.soon{opacity:.72}
+label{display:block; margin:18px 0 7px; font-size:12.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--mute)}
+label .opt{text-transform:none; letter-spacing:0; font-weight:400}
+input[type=file],input[type=text],select{
+  width:100%; padding:12px 13px; color:var(--ink); font:inherit; font-size:14px;
+  background:#0c1120; border:1px solid var(--line); border-radius:10px;
+}
+select{appearance:none; cursor:pointer; padding-right:34px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--mute) 50%),
+                   linear-gradient(135deg,var(--mute) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 55%, calc(100% - 13px) 55%;
+  background-size:5px 5px,5px 5px; background-repeat:no-repeat}
+select:focus-visible{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
+.periode{display:grid; grid-template-columns:1.6fr 1fr; gap:10px}
+@media (max-width:520px){.periode{grid-template-columns:1fr}}
+input[type=file]::file-selector-button{
+  margin-right:12px; padding:7px 13px; border:0; border-radius:8px; cursor:pointer;
+  font:inherit; font-weight:600; color:#fff;
+  background:linear-gradient(140deg,var(--accent),#6d5cf6);
+}
+input:focus-visible{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
+button{
+  margin-top:24px; width:100%; padding:14px; border:0; border-radius:11px; cursor:pointer;
+  font:inherit; font-weight:700; font-size:15px; color:#fff;
+  background:linear-gradient(140deg,var(--accent),#6d5cf6);
+  box-shadow:0 14px 26px -14px rgba(79,124,255,.9);
+}
+button:hover{filter:brightness(1.08)}
+button:active{transform:translateY(1px)}
+button[disabled]{opacity:.6; cursor:progress}
+.hint{color:var(--mute); font-size:12.5px; margin:7px 0 0}
+.note{padding:14px 16px; border-radius:11px; font-size:14px; margin:22px 0 0; border:1px solid}
+.note.ok{color:#8ff0d0; background:rgba(34,211,166,.09); border-color:rgba(34,211,166,.32)}
+.note.bad{color:#ffb4b4; background:rgba(255,107,107,.09); border-color:rgba(255,107,107,.3)}
+pre{
+  margin:14px 0 0; padding:15px; max-height:340px; overflow:auto; white-space:pre-wrap;
+  background:#080b14; border:1px solid var(--line); border-radius:11px;
+  color:var(--mute); font:12.5px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.dl{
+  display:inline-block; margin-top:14px; padding:12px 20px; border-radius:10px;
+  text-decoration:none; font-weight:700; color:#04150f;
+  background:linear-gradient(140deg,var(--accent-2),#5ce3b8);
+}
+
+/* ---------- mobile: sidebar jadi bar atas + nav scroll horizontal ---------- */
+@media (max-width:860px){
+  body{display:block}
+  .side{
+    position:sticky; top:0; z-index:9; height:auto; padding:12px 16px;
+    flex-direction:row; align-items:center; gap:14px; overflow:visible;
+    border-right:0; border-bottom:1px solid var(--line);
+    background:rgba(10,13,20,.92); backdrop-filter:blur(12px);
+  }
+  .navlabel,.sidefoot{display:none}
+  .navwrap{flex:1; min-width:0}
+  nav{
+    flex-direction:row; gap:8px; overflow-x:auto; padding-bottom:2px;
+    scrollbar-width:none; -webkit-overflow-scrolling:touch;
+  }
+  nav::-webkit-scrollbar{display:none}
+  nav a,nav span{padding:9px 13px; white-space:nowrap; font-size:13.5px; background:#111624; border:1px solid var(--line)}
+  nav a.on{border-color:rgba(79,124,255,.5)}
+  .brand{display:none}
+  main{padding:26px 18px 56px}
+  .grid{grid-template-columns:1fr}
+  button{padding:16px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<aside class="side">
+  <a class="logo" href="/"><span class="mark">DW</span>
+    <span class="brand">dw-calculator<small>DPM Malaysia</small></span></a>
+  <div class="navwrap">
+    <div class="navlabel">Tools</div>
+    <nav>
+      {% for slug, (nama, _d, _s, siap) in tools.items() %}
+        {% if siap %}
+          <a href="/tool/{{ slug }}" class="{{ 'on' if request.path == '/tool/' + slug }}"
+             {{ 'aria-current=page' if request.path == '/tool/' + slug }}><i class="dot"></i>{{ nama }}</a>
+        {% else %}
+          <span title="Not available yet"><i class="dot"></i>{{ nama }}</span>
+        {% endif %}
+      {% endfor %}
+    </nav>
+  </div>
+  <div class="sidefoot">Your original file is never modified — the result is always a new file.<br>
+    <a href="/template">Download Template D&amp;W.xlsx</a></div>
+</aside>
+<main><div class="inner{% block wide %}{% endblock %}">{% block body %}{% endblock %}</div></main>
+</body>
+</html>

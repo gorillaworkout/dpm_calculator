@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}{{ tool[0] }} · dw-calculator{% endblock %}
+{% block body %}
+<h1>{{ tool[0] }}</h1>
+<p class="lede">{{ tool[1] }}</p>
+
+<div class="card">
+  <form method="post" enctype="multipart/form-data"
+        onsubmit="this.b.disabled=true;this.b.textContent='Working…'">
+    <label for="f">D&amp;W workbook (.xlsx)</label>
+    <input id="f" type="file" name="file" accept=".xlsx,.xlsm" required>
+    <p class="hint">{{ hint or "Must contain the transaction sheets plus D&amp;W FEE and Xero." }}
+      Don't have one? <a href="/template">Download the template</a>.</p>
+
+    {% if bulan_opsi %}
+    <label for="bulan">Report month</label>
+    <div class="periode">
+      <select id="bulan" name="bulan" required>
+        {% for nomor, nama in bulan_opsi %}
+        <option value="{{ nomor }}"{{ ' selected' if nomor == bulan_default else '' }}>{{ nama }}</option>
+        {% endfor %}
+      </select>
+      <select id="tahun" name="tahun" required aria-label="Report year">
+        {% for th in tahun_opsi %}
+        <option value="{{ th }}"{{ ' selected' if th == tahun_default else '' }}>{{ th }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <p class="hint">Only rows dated inside this month are calculated. A back-office
+      export for June normally runs from late May to early July — those extra days
+      are dropped, in <code>D</code>, in <code>W</code> and in the
+      <code>Fund Transfer Table</code> alike. The date used is the one the report
+      itself uses: <strong>Paid Date</strong> for deposits,
+      <strong>Completed Date</strong> for withdrawals. What was dropped is listed
+      in section&nbsp;0 of the <code>Missing Data</code> sheet.</p>
+
+    <label for="saldo">J Wallet opening balance
+      <span class="opt">— closing balance from <b id="prevlbl">{{ saldo_label }}</b>, optional</span></label>
+    <input id="saldo" type="text" name="saldo_jw" inputmode="decimal"
+           value="{{ saldo_default }}" placeholder="e.g. 377233.36" autocomplete="off">
+    <p class="hint">The J Wallet ledger continues from this figure instead of starting at zero.
+      Enter the balance the wallet closed <b>{{ saldo_label }}</b> with. Both
+      <code>377233.36</code> and <code>377,233.36</code> are accepted.
+      Leave it empty if the workbook you upload already contains an
+      <code>Opening Balance</code> or <code>J Wallet</code> sheet — those are used
+      automatically. Channel balances are separate and still need those sheets.</p>
+    {% endif %}
+
+    <button name="b" type="submit">Run &amp; download result</button>
+  </form>
+
+  <script>
+    // Label saldo pembuka mengikuti bulan SEBELUM bulan laporan yang dipilih.
+    (function () {
+      var M = {{ nama_bulan|tojson }};
+      var b = document.getElementById('bulan'),
+          t = document.getElementById('tahun'),
+          l = document.getElementById('prevlbl');
+      if (!b || !t || !l) return;
+      function upd() {
+        var m = parseInt(b.value, 10), y = parseInt(t.value, 10);
+        if (m === 1) { m = 12; y -= 1; } else { m -= 1; }
+        l.textContent = M[m - 1] + ' ' + y;
+      }
+      b.addEventListener('change', upd);
+      t.addEventListener('change', upd);
+      upd();
+    })();
+  </script>
+
+  {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+  {% if log %}
+    <div class="note bad">{% if error %}{{ error }}{% else %}Failed — see the log below.{% endif %}</div>
+    <pre>{{ log }}</pre>
+  {% endif %}
+</div>
+
+{% if doc %}
+<h2 style="margin:40px 0 10px; font-size:20px; letter-spacing:-.4px">{{ doc.judul }}</h2>
+<p class="lede">{{ doc.ringkas }}</p>
+
+<div class="card" style="margin-bottom:16px">
+  <h3 style="margin:0 0 12px; font-size:15px">What you need to prepare</h3>
+  <ol style="margin:0; padding-left:20px; color:var(--mute); font-size:13.5px; line-height:1.9">
+    {% for s in doc.siapkan %}<li>{{ s|safe }}</li>{% endfor %}
+  </ol>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h3 style="margin:0 0 12px; font-size:15px">What happens when you press the button</h3>
+  <ol style="margin:0; padding-left:20px; color:var(--mute); font-size:13.5px; line-height:1.9">
+    {% for s in doc.langkah %}<li>{{ s|safe }}</li>{% endfor %}
+  </ol>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+  <h3 style="margin:0 0 12px; font-size:15px">What you get back</h3>
+  <p style="margin:0 0 10px; color:var(--mute); font-size:13.5px">{{ doc.hasil|safe }}</p>
+  {% if doc.sheets %}
+  <table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:6px">
+    <tbody>
+      {% for nama, apa in doc.sheets %}
+      <tr>
+        <td style="padding:7px 12px 7px 0; white-space:nowrap; color:var(--ink); font-weight:600; vertical-align:top; border-bottom:1px solid var(--line)"><code>{{ nama }}</code></td>
+        <td style="padding:7px 0; color:var(--mute); border-bottom:1px solid var(--line)">{{ apa }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>
+
+{% if doc.catatan %}
+<div class="note {{ 'bad' if doc.get('catatan_penting') else 'ok' }}" style="margin-top:0">
+  {% for c in doc.catatan %}<p style="margin:0 0 8px">{{ c|safe }}</p>{% endfor %}
+</div>
+{% endif %}
+
+{% if doc.kapan %}
+<div class="card" style="margin-top:16px">
+  <h3 style="margin:0 0 12px; font-size:15px">When to use this instead of another page</h3>
+  <p style="margin:0; color:var(--mute); font-size:13.5px">{{ doc.kapan|safe }}</p>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

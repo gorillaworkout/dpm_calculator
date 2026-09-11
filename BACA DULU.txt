@@ -1,0 +1,391 @@
+===========================================================
+  CARA PAKAI  (satu menu, tidak perlu Terminal)
+===========================================================
+
+1. Double-click "Buka Web App.command"
+   Browser terbuka sendiri di http://127.0.0.1:5000
+
+2. Pilih menu "Generate D&W"  (cuma ada satu menu)
+
+3. Upload file Excel D&W-mu
+
+4. PILIH BULAN LAPORANNYA  (wajib, ada dropdown-nya)
+
+5. Isi "J Wallet opening balance" kalau ada  (opsional)
+   Labelnya otomatis menyebut bulan sebelumnya. Isi saldo
+   PENUTUP J Wallet bulan itu, mis. pilih June -> isi saldo
+   penutup Mei. Tanpa ini J Wallet mulai dari NOL.
+
+Selesai. File hasil langsung terunduh.
+
+JANGAN TUTUP jendela Terminal-nya selama web app dipakai.
+Kalau sudah selesai, tekan Control+C di jendela itu.
+
+KALAU MAU DIPASANG DI SERVER (bukan di laptop):
+   app.run() itu server pengembangan. Pakai WSGI yang benar:
+      python3 -m pip install --user waitress
+      python3 -m waitress --host 127.0.0.1 --port 5000 app:app
+   Mode debug sudah MATI secara default. JANGAN dinyalakan
+   di server -- siapa pun yang memicu error bisa menjalankan
+   kode di server itu.
+
+File .py JANGAN di-double-click -- yang terbuka cuma
+codingannya. Pakai file .command / .app.
+
+
+===========================================================
+  BULAN LAPORAN  (wajib dipilih setiap upload)
+===========================================================
+
+Di halaman upload ada dropdown "Report month". WAJIB diisi.
+Default-nya bulan lalu, karena laporan bulanan selalu dibuat
+setelah bulannya lewat.
+
+KENAPA WAJIB:
+File ekspor back office SELALU punya EKOR. File "Juni" yang
+kamu unduh biasanya berisi 25 Mei s/d 5 Juli. Sebabnya ekspor
+disaring pakai Apply Date, sementara laporan ini memakai
+Paid Date (deposit) dan Completed Date (withdrawal).
+
+Kalau ekor itu ikut terhitung: MTOATD keluar 42 blok tanggal
+bukan 30, dan totalnya memuat uang bulan lain.
+
+APA YANG DILAKUKAN:
+Kalau kamu pilih Juni 2026, semua baris yang tanggalnya BUKAN
+Juni 2026 dibuang -- di sheet D, di sheet W, dan di Fund
+Transfer Table. Contoh nyata (file uji 38 MB):
+
+   sheet D  Mei  17.805 baris  dibuang
+   sheet D  Juli  7.177 baris  dibuang
+   sheet W  Mei  11.114 baris  dibuang
+   sheet W  Juli  4.804 baris  dibuang
+   -----------------------------------
+   40.901 baris dibuang, MTOATD jadi 30 hari (dari 42)
+
+Baris yang dibuang TETAP ADA di sheet D/W, cuma 4 kolom
+hitungannya dikosongkan dan diarsir ABU-ABU. Filter kolom itu
+"(Blanks)" kalau mau lihat baris mana saja yang tidak ikut.
+
+Rinciannya ada di sheet "Missing Data" bagian 0, dan aturannya
+dijelaskan di sheet "Legend" bagian "REPORT MONTH".
+
+SALAH PILIH BULAN:
+Kalau tidak ada satu pun baris yang cocok, tool BERHENTI dengan
+pesan yang menyebut bulan apa saja yang sebenarnya ada di file
+itu. Sengaja gagal -- file kosong yang kelihatan normal jauh
+lebih berbahaya daripada pesan error.
+
+LEWAT TERMINAL (kalau tidak pakai web app):
+   python3 isi_template.py "sumber.xlsx" --bulan 2026-06 -o kerja.xlsx
+   python3 hitung_dw.py    "kerja.xlsx"  --period 2026-06
+
+Kalau --period TIDAK diberikan, semua tanggal dihitung
+(perilaku lama), dan itu ditulis merah di sheet "Legend".
+
+
+===========================================================
+===========================================================
+  SALDO PEMBUKA J WALLET  (opsional tapi penting)
+===========================================================
+
+Saldo J Wallet TIDAK BISA dihitung dari transaksi -- dia
+saldo berjalan, jadi harus diberi titik mulai.
+
+Di halaman upload ada field "J Wallet opening balance".
+Labelnya ikut bulan yang dipilih: pilih June 2026, labelnya
+"closing balance from May 2026".
+
+Contoh nyata (data Juni 2026):
+   tanpa diisi     : mulai 55.000,00  -> tutup   532.872,17  (SALAH)
+   diisi 377233.36 : mulai 432.233,36 -> tutup   910.105,53  (BENAR)
+
+Format bebas: 377233.36 atau 377,233.36 atau 377.233,36
+semuanya dibaca 377233,36.
+
+KOSONGKAN kalau file yang diupload SUDAH punya sheet
+'Opening Balance' atau 'J Wallet' -- itu dipakai otomatis.
+
+File hasilnya menyimpan angka ini di sheet 'Opening Balance',
+jadi kalau file hasil itu diproses ulang, saldonya terbaca
+sendiri -- tidak perlu diketik dua kali.
+
+CATATAN: ini HANYA untuk J Wallet. Saldo per channel di
+'Payment Channel Balance' jumlahnya puluhan (per currency x
+channel), jadi tidak bisa lewat satu field -- itu tetap butuh
+sheet 'Opening Balance' / 'Payment Channel Balance' aslinya.
+
+Lewat Terminal:
+   python3 hitung_dw.py "kerja.xlsx" --period 2026-06 \
+       --jwallet-opening 377233.36
+
+
+===========================================================
+  EMPAT SHEET WAJIB, DUA OPSIONAL
+===========================================================
+
+WAJIB -- tanpa ini tool berhenti atau angkanya kosong:
+   D                    data deposit
+   W                    data withdrawal
+   Xero                 kurs harian
+   D&W FEE              tabel rate
+
+OPSIONAL -- tidak bisa dihitung dari D/W, harus ikut kalau
+mau sheet-nya lengkap:
+   Fund Transfer Table  mutasi dana antar channel
+                        -> tanpa ini: "J Wallet (calc)" kosong
+                           dan kolom "Fund transfer" di
+                           "Channel Balance" jadi 0
+   Opening Balance      saldo penutup bulan sebelumnya
+                        -> tanpa ini: kolom "Balance" mulai
+                           dari NOL, bukan saldo sebenarnya
+
+Kolom "Xero (USD)" di Fund Transfer Table TIDAK perlu diisi
+-- dihitung sendiri (jumlah / kurs Xero).
+
+Dengan empat sheet wajib saja, yang KELUAR LENGKAP:
+   D, W (+ 4 kolom hitungan), D&W Report, D&W Detail,
+   MTOATD, D&W FEE, Missing Data, Legend
+Yang tidak lengkap cuma Channel Balance (sebagian) dan
+J Wallet (kosong). Sebabnya selalu ditulis di sheet
+"Missing Data" bagian 3.
+
+
+===========================================================
+  RATE & KURS SELALU DARI FILE YANG KAMU UPLOAD
+===========================================================
+
+Tool ini TIDAK MENYIMPAN satu pun angka rate atau kurs.
+Semuanya dibaca dari file yang kamu upload, tiap kali
+dijalankan. Jadi kalau rate berubah bulan depan, cukup edit
+sheet "D&W FEE" di Excel-mu -- tidak perlu ubah apa pun di
+tool ini.
+
+   sheet "D&W FEE"  -> rate fee. Kalau file-mu punya sheet
+                       ini, INI yang dipakai.
+                       Kalau file-mu cuma punya
+                       "D&W TD FEE" + "D&W TD FEE -add.",
+                       keduanya digabung dan "-add." menimpa.
+   sheet "Xero"     -> kurs harian.
+
+Kalau file-mu tidak punya tabel fee atau tidak punya sheet
+"Xero", tool berhenti dan bilang apa yang kurang. Dia TIDAK
+akan memakai angka lama.
+
+CATATAN: sheet "D&W TD FEE -add." dari back office punya
+dua baris yang nilainya TERTUKAR (NGN/MNTX dan EGP/MNTX).
+Kalau tool mendeteksinya, baris itu ditandai MERAH di sheet
+"D&W FEE" hasil, dengan penjelasan angka yang benar.
+"Template D&W.xlsx" yang disertakan sudah dibetulkan.
+
+
+===========================================================
+  KALAU TIDAK MAU PAKAI WEB APP
+===========================================================
+
+Semuanya bisa di-double-click, tidak perlu ketik perintah:
+
+   Buka Web App.command   nyalakan web app (paling gampang)
+   Siapkan File.command   workbook mentah -> Template D&W terisi
+   Hitung DW.app          hitung file yang sudah siap
+   Hitung DW.command      sama, versi Terminal
+
+Cara pakai .command: double-click, lalu DRAG file Excel-nya
+ke jendela Terminal yang muncul, lalu tekan Enter.
+
+Kalau macOS menolak ("unidentified developer"):
+klik kanan file-nya > Open > Open. Cukup sekali.
+
+
+===========================================================
+  EMPAT SHEET YANG HARUS ADA ISINYA
+===========================================================
+
+Kalau kamu menempel data manual ke Template D&W, ada EMPAT
+sheet yang harus diisi, bukan dua:
+
+   D                    data deposit
+   W                    data withdrawal
+   Fund Transfer Table  pemindahan dana antar channel
+   Opening Balance      saldo penutup bulan sebelumnya
+
+Dua yang terakhir TIDAK bisa dihitung dari D/W -- itu export
+terpisah. Kalau kosong:
+   - sheet "J Wallet (calc)" kosong
+   - kolom Fund transfer di "Channel Balance" jadi 0
+   - kolom Balance mulai dari NOL, bukan saldo sebenarnya
+
+Sebabnya selalu ditulis di sheet "Missing Data" bagian 3,
+jadi tidak ada yang diam-diam kosong.
+
+Pakai menu "Generate D&W" atau "Siapkan File.command" dan
+keempatnya diisi otomatis dari workbook mentah.
+
+
+===========================================================
+  KALAU MAU TEMPEL MANUAL: PAKAI TEMPLATE
+===========================================================
+
+Buka "Template D&W.xlsx". Isinya:
+
+   Guide                penjelasan (English) - apa ditempel di mana
+   D                    header deposit, kosong -> tempel data di baris 2
+   W                    header withdrawal, kosong -> tempel data di baris 2
+   Xero                 kurs harian, sudah terisi
+   Fund Transfer Table  pemindahan dana antar channel
+   Opening Balance      saldo penutup hari terakhir bulan sebelumnya
+   D&W FEE              satu tabel fee, sudah tergabung
+
+Tempel data ke D dan W, simpan, lalu jalankan kalkulatornya.
+Empat kolom ungu dibiarkan kosong - itu yang diisi kalkulator.
+
+Kenapa template? Di file aslinya satu putaran butuh 314 detik dan
+PivotTable di file hasil jadi rusak. Dengan template: 1,5 detik,
+dan angkanya identik (12.000 nilai dibanding, 0 beda).
+
+Bikin ulang template dari workbook lain:
+   python3 buat_template.py "sumber.xlsx" -o "Template D&W.xlsx"
+
+
+===========================================================
+  DW CALCULATOR
+  Hitung Handling Fee, Xero Rate, Xero USD, Forex Gain/Loss
+  dan generate D&W Report dari sheet D + W
+===========================================================
+
+Paket ini untuk macOS.
+Yang menghitung adalah hitung_dw.py (Python, lintas-platform).
+File launcher-nya saja yang beda per OS:
+
+   Hitung DW.app       -> double-click (utama)
+   Hitung DW.command   -> cadangan, klik kanan > Open With > Terminal
+
+Paket ini khusus macOS. Semua .py-nya sendiri lintas-platform, jadi kalau
+nanti dipakai di server/website tinggal panggil hitung_dw.py langsung.
+
+
+===========================================================
+  macOS
+===========================================================
+
+SEKALI SAJA
+   Buka Terminal (Command+Space, ketik: terminal), jalankan:
+
+      python3 -m pip install --user openpyxl
+
+   Kalau python3 belum ada, macOS akan menawarkan memasang
+   Command Line Tools - terima saja. Atau download Python di
+   https://www.python.org/downloads/macos/
+
+MENJALANKAN
+   Double-click "Hitung DW.app", lalu pilih file Excel-nya.
+   Sebuah jendela Terminal akan terbuka dan menampilkan progress.
+   File hasil otomatis dibuka setelah selesai.
+
+   Kalau macOS menolak membuka ("unidentified developer"):
+   klik kanan "Hitung DW.app" > Open > Open. Cukup sekali.
+   Ini muncul karena file-nya datang dari ZIP.
+
+   Cara lain, lewat Terminal:
+      cd ~/Documents/Dupoin/dw-calculator
+      python3 hitung_dw.py ~/Downloads/"DPM-D&W.xlsx"
+
+
+===========================================================
+  HASILNYA
+===========================================================
+
+File baru berakhiran "-hasil.xlsx" di folder yang sama dengan
+file Excel-nya. File asli TIDAK diubah.
+
+SEKALI JALAN. Tidak ada tahap kedua - MTOATD ikut dihitung
+langsung dari sheet D + W.
+
+Urutan tab di file hasil (dari kiri):
+   J Wallet | Fund Transfer Table | Payment Channel Balance |
+   MTOATD | D&W Report | D&W Detail | D | W | Xero |
+   D&W TD FEE | Opening Balance | Guide | Missing Data | Legend
+
+HANYA baris berstatus "finish" yang dihitung. Withdrawal yang
+ditolak (refuse) ATAU yang kolom Status-nya kosong dibuang
+seluruhnya -- tidak masuk laporan mana pun. Jumlahnya selalu
+dilaporkan di Terminal, jadi tidak ada yang hilang diam-diam.
+
+Sheet di file hasil:
+   D / W            data aslimu + 4 kolom hitungan, ditandai warna
+   D&W Report       ringkasan Currency x Payment Gateway, bagian
+                    Deposit dan Withdrawal, sama seperti report
+                    D&W yang sudah beredar
+   D&W Detail       tabel datar gabungan semua sheet transaksi
+   Channel Balance  per tanggal x currency x channel + saldo berjalan
+   J Wallet (calc)  buku besar dompet USDT + saldo berjalan
+   MTOATD           rekonsiliasi harian MT4 / Wallet / CRM / TD,
+                    satu blok 51 baris per tanggal, plus blok
+                    akumulasi bulanan di sebelah kanan
+   Missing Data     rincian data yang belum ada + apa yang harus
+                    ditambahkan
+   Legend           penjelasan kolom & arti warna (English)
+
+ARTI WARNA
+   MERAH  = rate atau kurs belum ada. Sel sengaja DIKOSONGKAN
+            (bukan 0) supaya total tidak salah tanpa disadari.
+   KUNING = tanggalnya belum ada di sheet XERO, dipakai kurs
+            tanggal terdekat sebelumnya. Lihat sheet
+            "Missing Data" untuk selisih berapa harinya.
+            Di sheet Channel Balance, kolom "Withdrawal charges"
+            juga kuning: angkanya sudah dihitung, tapi di
+            beberapa channel laporan lama menunjukkan angka
+            lebih besar dan kelebihannya belum terjelaskan.
+   ABU-ABU  (sheet MTOATD) = baris itu memang TIDAK punya rumus
+            di laporan aslinya. Sengaja dikosongkan, bukan 0.
+            Isi sendiri kalau mau mencatat rinciannya.
+   KOSONG = normal, tidak ada masalah.
+
+
+===========================================================
+  FILE EXCEL-NYA HARUS PUNYA SHEET APA?
+===========================================================
+
+Sheet transaksi (nama bebas) - minimal satu.
+   Harus punya kolom: Currency, Transaction, Payment Gateway,
+   USD, + salah satu kolom tanggal (Paid Date / Completed Date
+   / Settlement Date / Apply Date).
+   Deposit vs withdrawal dibaca dari kolom "Source Name".
+
+D&W FEE  (wajib)
+   Boleh lebih dari satu sheet. Semua sheet yang namanya dimulai
+   "D&W FEE" / "D&W TD FEE" / "DW FEE" digabung otomatis, dan
+   sheet yang mengandung "-add" menimpa yang lain.
+   Baris header & urutan kolom dideteksi sendiri, jadi
+   "Currency | Payment Gateway | Deposit | Withdrawal" maupun
+   "No | Payment Gateway | Currency | Deposit | Withdrawal"
+   dua-duanya kebaca.
+
+   Rate boleh ditulis: 0.027 | 1.5%+50 | +8 | 0.45%,min 90
+
+XERO     (wajib)
+   Baris 1: Date + kode currency (VND, PHP, THB, ...)
+   Baris berikutnya: tanggal + kursnya (local per 1 USD)
+
+Kalau file datanya belum punya sheet D&W FEE / XERO, tunjuk
+file yang punya:
+
+   macOS:
+      python3 hitung_dw.py "data-baru.xlsx" \
+          --fee-from "DPM-D&W.xlsx" --xero-from "DPM-D&W.xlsx"
+   Windows:
+      py hitung_dw.py "data-baru.xlsx" ^
+          --fee-from "DPM-D&W.xlsx" --xero-from "DPM-D&W.xlsx"
+
+
+===========================================================
+  KALAU ADA MASALAH
+===========================================================
+
+"'pip' is not recognized ..."            -> pakai py -m pip (lihat LANGKAH 2)
+"Python tidak ditemukan sama sekali"     -> ulangi LANGKAH 1, buka CMD baru
+"Gagal simpan: ... dibuka di Excel"      -> tutup file Excel-nya dulu
+"Sheet 'D&W FEE' tidak ada"              -> pakai --fee-from
+"Sheet data tidak ketemu"                -> cek nama kolom sheet transaksi
+macOS "unidentified developer"           -> klik kanan > Open > Open
+
+Selebihnya baca README.md

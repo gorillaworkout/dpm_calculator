@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+<h1>Dupoin <span>D&amp;W</span> Calculator</h1>
+<p class="lede">Upload your D&amp;W workbook. The calculator fills in Handling Fee, Xero Rate,
+Xero USD and Forex Gain/Loss, then builds the full report. Your original file is never
+modified &mdash; the result is always a new file you download.</p>
+
+<div class="grid">
+  {% for slug, (nama, desc, _script, siap) in tools.items() %}
+    {% if siap %}
+      <a class="card" href="/tool/{{ slug }}">
+        <span class="tag">Ready</span>
+        <h3>{{ nama }}</h3><p>{{ desc }}</p>
+      </a>
+    {% else %}
+      <div class="card soon">
+        <span class="tag soon">Coming soon</span>
+        <h3>{{ nama }}</h3><p>{{ desc }}</p>
+      </div>
+    {% endif %}
+  {% endfor %}
+</div>
+
+<h2 style="margin:44px 0 8px; font-size:20px; letter-spacing:-.4px">One page, one run</h2>
+<p class="lede">There is nothing to choose. Open <strong>Generate D&amp;W</strong>, upload
+the workbook, and every sheet is produced in a single pass &mdash; whether you are giving it
+a raw back-office export or a Template D&amp;W you filled in yourself. Both are accepted.</p>
+
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">The four calculated columns</h2>
+<p class="lede">These are written to the right of sheets <code>D</code> and <code>W</code>.
+Re-running overwrites them &mdash; they never stack up or duplicate.</p>
+
+<div class="card">
+  <table style="width:100%; border-collapse:collapse; font-size:13.5px">
+    <tbody>
+      <tr>
+        <td style="padding:9px 0; width:170px; color:var(--ink); font-weight:600">Handling Fee</td>
+        <td style="padding:9px 0; color:var(--mute)">Transaction &times; the rate found in the fee table, using the Deposit or Withdrawal column as appropriate</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600">Xero Rate</td>
+        <td style="padding:9px 0; color:var(--mute)">The daily rate in sheet <code>Xero</code>, matched on Paid Date + Currency</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600">Xero USD</td>
+        <td style="padding:9px 0; color:var(--mute)">Transaction &divide; Xero Rate</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600">Forex Gain/Loss</td>
+        <td style="padding:9px 0; color:var(--mute)">Xero USD &minus; the existing USD column &mdash; the realised FX difference between CRM and Xero</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Rates are never stored here</h2>
+<p class="lede">Fee rates and Xero rates are read from the file you upload, every single
+run. Nothing is cached or remembered between uploads, so when a rate changes you simply
+upload a workbook containing the new one &mdash; there is no setting to update and no
+template to rebuild first.</p>
+
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Always check “Missing Data” first</h2>
+<p class="lede" style="margin-bottom:0">Every result contains a <code>Missing Data</code> sheet.
+If a rate or fee could not be found, the affected cells are left <strong>red</strong> and
+nothing is calculated for them &mdash; the report will look complete but the totals will be
+short. Open that sheet before circulating any numbers. When it reports “None” on every
+line, the run is clean.</p>
+{% endblock %}

@@ -1,0 +1,41 @@
+Script untuk MEMBUKTIKAN angka hasil kalkulator cocok dengan laporan
+Malaysia yang sudah beredar. Dipakai tiap kali rumus diubah.
+
+  cek_acuan_tim.py    <-- PATOKAN UTAMA sejak 7 Sep 2026
+                      10 angka yang tim Malaysia NYATAKAN BENAR
+                      (1 Jun VND + 17 Jun USDT). HARUS 10/10.
+                      Ini yang dipakai lulus/gagal.
+                        python3 cek_acuan_tim.py "hasil-juni.xlsx"
+
+  banding_mtoatd_juni.py  <-- sekarang untuk melihat POLA saja
+                      sheet 'MTOATD' hasil vs MTOATD JUNI SEBULAN PENUH
+                      dari tim Malaysia ('June 26 - MTOATD.xlsx', 30 blok)
+                      -> terakhir: COCOK 11.259, BEDA 1.341
+                      CATATAN: sheet acuannya punya sel yang SALAH,
+                      sudah dikoreksi tim. Jangan dipakai lulus/gagal.
+                      Sisi DEPOSIT dan MT4出金 HARUS 0 beda.
+                      Sisa selisihnya BEDA DATA rebate, bukan salah rumus.
+                      Jauh lebih kuat dari banding_mtoatd.py (cuma 1 hari).
+
+  banding_mtoatd.py   sheet 'MTOATD' hasil   vs  sheet "MTOATD (MAY'26)" sumber
+                      -> terakhir: 520 cocok, 23 beda (1 hari saja)
+  banding_pcb.py      sheet 'Channel Balance' vs blok-blok
+                      'Payment Channel Balance' sumber
+                      -> terakhir: 81 cocok, 18 beda (semua sudah terjelaskan:
+                         Withdrawal charges yang diketik manual di sheet mereka)
+
+Cara pakai:
+  python3 banding_mtoatd_juni.py "hasil-juni.xlsx" \
+      ~/Downloads/"June 26 - MTOATD.xlsx"
+
+  python3 banding_mtoatd.py "../D&W JUN 2026-hasil.xlsx" \
+      ~/Downloads/"22.08 Bayu - D&W-Dupoin Markets-JUN 2026v3.xlsx"
+  python3 banding_pcb.py    "../D&W JUN 2026-hasil.xlsx" \
+      ~/Downloads/"22.08 Bayu - D&W-Dupoin Markets-JUN 2026v3.xlsx"
+
+3 Sep 2026: perlakuan kolom M untuk USDT/USD di baris （原币种）sempat
+dikira keliru dan diubah jadi kolom P, lalu DIKEMBALIKAN setelah tim
+Malaysia menegaskan itu memang disengaja ("USDT & USD only has 'USD' to
+capture"). Angka kembali sama seperti sebelumnya.
+
+Kalau angka 'beda' NAIK setelah mengubah rumus, berarti ada yang rusak.

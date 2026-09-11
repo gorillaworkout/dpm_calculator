@@ -1,0 +1,27 @@
+# Private financial inputs, generated reports, templates
+*.xlsx
+*.xlsm
+*.csv
+*.zip
+*.pdf
+
+# Python/runtime
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local launchers and packaged apps
+*.app/
+*.command
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime jobs/logs
+*.log
+jobs/
