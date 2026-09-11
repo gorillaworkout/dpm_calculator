@@ -121,29 +121,38 @@ expect_error([row("1", time="2026.07.01 garbage")], "bad.csv", "baris 2", "Time"
 expect_error([row("1", time="yesterday")], "bad.csv", "baris 2", "Time")
 expect_error([["1", "100"]], "bad.csv", "baris 2", "14 kolom", "2 kolom")
 
-# A rejected XLSX must not retain an open read-only workbook.
-with TemporaryDirectory() as tmp:
-    src = Path(tmp) / "missing-columns.xlsx"
-    workbook = Workbook()
-    workbook.active.append(["Deal"])
-    workbook.save(src)
-    workbook.close()
-    real_load_workbook = deal_segregator.load_workbook
-    opened = []
-    def tracking_load_workbook(*args, **kwargs):
-        opened_workbook = real_load_workbook(*args, **kwargs)
-        opened.append(opened_workbook)
-        return opened_workbook
-    deal_segregator.load_workbook = tracking_load_workbook
-    try:
+def expect_rejected_xlsx_closed(filename, populate, *message_parts):
+    with TemporaryDirectory() as tmp:
+        src = Path(tmp) / filename
+        workbook = Workbook()
+        populate(workbook.active)
+        workbook.save(src)
+        workbook.close()
+        real_load_workbook = deal_segregator.load_workbook
+        opened = []
+        def tracking_load_workbook(*args, **kwargs):
+            opened_workbook = real_load_workbook(*args, **kwargs)
+            opened.append(opened_workbook)
+            return opened_workbook
+        deal_segregator.load_workbook = tracking_load_workbook
         try:
-            proses([src], Path(tmp) / "out.xlsx")
-        except SystemExit:
-            pass
-        else:
-            raise AssertionError("missing columns were accepted")
-        assert opened and opened[0]._archive.fp is None
-    finally:
-        deal_segregator.load_workbook = real_load_workbook
+            try:
+                proses([src], Path(tmp) / "out.xlsx")
+            except SystemExit as exc:
+                message = str(exc)
+                for part in message_parts:
+                    assert part in message, (part, message)
+            else:
+                raise AssertionError("invalid XLSX was accepted")
+            assert opened and opened[0]._archive.fp is None
+        finally:
+            deal_segregator.load_workbook = real_load_workbook
+
+
+# Rejected XLSX workbooks close during both header-validation and empty initialization.
+expect_rejected_xlsx_closed("missing-columns.xlsx", lambda ws: ws.append(["Deal"]),
+                            "missing-columns.xlsx", "kolom wajib")
+expect_rejected_xlsx_closed("empty.xlsx", lambda ws: None,
+                            "empty.xlsx", "header")
 
 print("OK deal segregator engine")
