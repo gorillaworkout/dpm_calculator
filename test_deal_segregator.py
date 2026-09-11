@@ -155,4 +155,27 @@ expect_rejected_xlsx_closed("missing-columns.xlsx", lambda ws: ws.append(["Deal"
 expect_rejected_xlsx_closed("empty.xlsx", lambda ws: None,
                             "empty.xlsx", "header")
 
+# Used normalized rows must be released while input is still consumed.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src = tmp / "many.csv"
+    write_csv(src, [row(str(i)) for i in range(200)])
+    real_angka = deal_segregator._angka
+    alive = peak = 0
+    class TrackedFloat(float):
+        def __new__(cls, value):
+            nonlocal_alive[0] += 1
+            nonlocal_alive[1] = max(nonlocal_alive[1], nonlocal_alive[0])
+            return super().__new__(cls, value)
+        def __del__(self):
+            nonlocal_alive[0] -= 1
+    nonlocal_alive = [alive, peak]
+    deal_segregator._angka = lambda *args: TrackedFloat(real_angka(*args))
+    try:
+        summary = proses([src], tmp / "out.xlsx")
+    finally:
+        deal_segregator._angka = real_angka
+    assert summary["dipakai"] == 200
+    assert nonlocal_alive[1] < 20, f"normalized rows retained: peak={nonlocal_alive[1]}"
+
 print("OK deal segregator engine")
