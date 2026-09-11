@@ -25,3 +25,6 @@ htmlcov/
 # Runtime jobs/logs
 *.log
 jobs/
+
+# Isolated feature worktrees
+.worktrees/
