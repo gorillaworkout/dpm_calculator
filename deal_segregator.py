@@ -85,10 +85,17 @@ def _baca_csv(path: Path):
 
 
 def _baca_xlsx(path: Path):
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    it = ws.iter_rows(values_only=True)
-    header = [(_teks(v)) for v in next(it)]
+    wb = None
+    try:
+        wb = load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        it = ws.iter_rows(values_only=True)
+        header = [_teks(v) for v in next(it)]
+    except Exception as exc:
+        if wb is not None:
+            wb.close()
+        detail = "file tidak memiliki header" if isinstance(exc, StopIteration) else str(exc)
+        sys.exit(f"BERHENTI: gagal membaca header di '{path.name}': {detail}")
     def rows():
         try:
             for nomor, row in enumerate(it, start=2):
@@ -173,10 +180,9 @@ def _kunci_tanggal(v):
 
 
 # --------------------------------------------------------------------- pipeline
-def _normalisasi_satu_file(path: Path, deal_id_terpakai: set):
+def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris):
     idx, rows = baca_file(path)
     total = entry_out = entry_in = entry_lain = duplikat = 0
-    baris = []
     for nomor, row in rows:
         total += 1
         if len(row) != len(idx):
@@ -196,7 +202,7 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set):
             continue
         if deal_id:
             deal_id_terpakai.add(deal_id)
-        baris.append({
+        pakai_baris({
             "Login": _teks(row[idx["Login"]]),
             # TODO: kalau tim Malaysia mengirim tabel referensi Login -> Country,
             # join di sini (mis. country = peta.get(login, _teks(row[idx["Country"]]))).
@@ -213,27 +219,26 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set):
             "Currency": _teks(row[idx["Currency"]]),
         })
     return {"nama": path.name, "total": total, "out": entry_out, "in": entry_in,
-            "lain": entry_lain, "duplikat": duplikat, "baris": baris}
+            "lain": entry_lain, "duplikat": duplikat}
 
 
-def _agregasi(baris, level):
-    """level: 'hari' (Date apa adanya) atau 'bulan' (dibulatkan ke tgl 1)."""
-    kelompok, urutan = {}, []
-    for b in baris:
-        tgl = b["Date"]
-        periode = tgl.replace(day=1) if (level == "bulan" and isinstance(tgl, datetime.date)) else tgl
-        kunci = (b["Login"], b["Country"], b["Desk"], periode, b["Type"], b["Symbol"], b["Currency"])
-        if kunci not in kelompok:
-            kelompok[kunci] = {"Login": b["Login"], "Country": b["Country"], "Desk": b["Desk"],
-                               "Periode": periode, "Type": b["Type"], "Symbol": b["Symbol"],
-                               "Deals": 0, "Volume": 0.0, "Commission": 0.0, "Fee": 0.0,
-                               "Swap": 0.0, "Profit": 0.0, "Currency": b["Currency"]}
-            urutan.append(kunci)
-        d = kelompok[kunci]
-        d["Deals"] += 1
-        for kol in KOLOM_JUMLAH:
-            if isinstance(b[kol], float):
-                d[kol] += b[kol]
+def _tambah_agregat(kelompok, b, level):
+    """Tambahkan satu baris ke agregat harian atau bulanan."""
+    tgl = b["Date"]
+    periode = tgl.replace(day=1) if level == "bulan" else tgl
+    kunci = (b["Login"], b["Country"], b["Desk"], periode, b["Type"], b["Symbol"], b["Currency"])
+    if kunci not in kelompok:
+        kelompok[kunci] = {"Login": b["Login"], "Country": b["Country"], "Desk": b["Desk"],
+                           "Periode": periode, "Type": b["Type"], "Symbol": b["Symbol"],
+                           "Deals": 0, "Volume": 0.0, "Commission": 0.0, "Fee": 0.0,
+                           "Swap": 0.0, "Profit": 0.0, "Currency": b["Currency"]}
+    d = kelompok[kunci]
+    d["Deals"] += 1
+    for kol in KOLOM_JUMLAH:
+        d[kol] += b[kol]
+
+
+def _hasil_agregat(kelompok):
 
     def kunci_urut(d):
         try:
@@ -243,7 +248,7 @@ def _agregasi(baris, level):
         return (login_num, d["Country"], d["Desk"], _kunci_tanggal(d["Periode"]),
                 d["Type"], d["Symbol"])
 
-    hasil = [kelompok[k] for k in urutan]
+    hasil = list(kelompok.values())
     hasil.sort(key=kunci_urut)
     return hasil
 
@@ -251,16 +256,29 @@ def _agregasi(baris, level):
 def proses(paths_in, path_out: Path) -> dict:
     """Jalankan Tahap 1 untuk file sumber dan tulis satu workbook .xlsx."""
     deal_id_terpakai = set()
-    per_file = [_normalisasi_satu_file(Path(p), deal_id_terpakai) for p in paths_in]
+    kelompok_harian, kelompok_bulanan = {}, {}
+    login_unik, desk_unik = set(), set()
+    dipakai = country_terisi = country_kosong = 0
+    jumlah_profit = 0.0
+
+    def pakai_baris(b):
+        nonlocal dipakai, country_terisi, country_kosong, jumlah_profit
+        dipakai += 1
+        login_unik.add(b["Login"])
+        desk_unik.add(b["Desk"])
+        country_terisi += bool(b["Country"])
+        country_kosong += not b["Country"]
+        jumlah_profit += b["Profit"]
+        _tambah_agregat(kelompok_harian, b, "hari")
+        _tambah_agregat(kelompok_bulanan, b, "bulan")
+
+    per_file = [_normalisasi_satu_file(Path(p), deal_id_terpakai, pakai_baris) for p in paths_in]
 
     total = sum(r["total"] for r in per_file)
     entry_in = sum(r["in"] for r in per_file)
     entry_lain = sum(r["lain"] for r in per_file)
     duplikat = sum(r["duplikat"] for r in per_file)
-    semua_baris = [b for r in per_file for b in r["baris"]]
-    dipakai = len(semua_baris)
-
-    if not semua_baris:
+    if not dipakai:
         sys.exit(
             "BERHENTI: tidak ada satu pun baris dengan Entry = 'out' ditemukan.\n"
             f"Dari {len(paths_in)} file, {total} baris total: {entry_in} 'in', "
@@ -268,8 +286,8 @@ def proses(paths_in, path_out: Path) -> dict:
             "Cek apakah file-file ini memang export Deals History yang benar."
         )
 
-    harian = _agregasi(semua_baris, "hari")
-    bulanan = _agregasi(semua_baris, "bulan")
+    harian = _hasil_agregat(kelompok_harian)
+    bulanan = _hasil_agregat(kelompok_bulanan)
 
     ringkasan = {"File yang diupload": len(paths_in)}
     for r in per_file:
@@ -277,26 +295,25 @@ def proses(paths_in, path_out: Path) -> dict:
                                           + (f", {r['duplikat']} duplikat dibuang" if r["duplikat"] else ""))
     ringkasan.update({
         "Total baris (semua file)": total,
-        "Entry = out (dipakai)": len(semua_baris) + duplikat,
+        "Entry = out (dipakai)": dipakai + duplikat,
         "Entry = in (dibuang)": entry_in,
         "Entry kosong/lainnya (dibuang)": entry_lain,
         "Duplikat antar-file (Deal ID sama, dibuang)": duplikat,
         "Baris unik dipakai": dipakai,
         "Baris pada Daily (Login+Date+Type+Symbol)": len(harian),
         "Baris pada Monthly Summary (Login+Month+Type+Symbol)": len(bulanan),
-        "Login unik": len({b["Login"] for b in semua_baris}),
-        "Country terisi": sum(1 for b in semua_baris if b["Country"]),
-        "Country kosong": sum(1 for b in semua_baris if not b["Country"]),
-        "Desk unik": len({b["Desk"] for b in semua_baris}),
-        "Jumlah Profit (semua baris out)": round(sum(b["Profit"] for b in semua_baris
-                                                      if isinstance(b["Profit"], float)), 2),
+        "Login unik": len(login_unik),
+        "Country terisi": country_terisi,
+        "Country kosong": country_kosong,
+        "Desk unik": len(desk_unik),
+        "Jumlah Profit (semua baris out)": round(jumlah_profit, 2),
     })
 
     _tulis_workbook(harian, bulanan, path_out, ringkasan)
 
     return {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai,
             "harian": len(harian), "bulanan": len(bulanan),
-            "login_unik": len({b["Login"] for b in semua_baris})}
+            "login_unik": len(login_unik)}
 
 
 # ------------------------------------------------------------------------ tulis

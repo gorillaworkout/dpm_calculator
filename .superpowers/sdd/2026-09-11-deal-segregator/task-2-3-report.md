@@ -87,3 +87,30 @@ Engine committed separately: `1d61669 feat: generate segregated deals workbook`.
 - Blank financial cells are treated as malformed, not zero. Silent zero substitution could corrupt totals.
 - Validation applies to used (`Entry = out`) rows. Discarded rows remain irrelevant to report calculations.
 - Existing external optional fixture remains untracked and is no longer required by core tests.
+
+## Remaining review findings (11 Sep 2026)
+
+### Empty XLSX — RED
+
+- Test commit: `0f48691 test: require empty xlsx closure`.
+- `python3 test_deal_segregator.py` → exit 1 at `next(it)` with uncaught `StopIteration`; the workbook was opened before the failing initialization and no closure path existed.
+
+### Empty XLSX — GREEN
+
+- `_baca_xlsx` now guards all workbook/header initialization exceptions, closes any opened workbook, and exits with a source-specific `BERHENTI: gagal membaca header di '<file>'` diagnostic.
+- Focused/full script after fix: `python3 test_deal_segregator.py` → exit 0, `OK deal segregator engine`.
+
+### Streaming aggregation — RED
+
+- Test commit: `e754ee1 test: require streaming deal aggregation`.
+- Behavioral lifetime instrumentation wraps five normalized financial values per used row. `python3 test_deal_segregator.py` → exit 1: `AssertionError: normalized rows retained: peak=1000` for 200 input rows.
+
+### Streaming aggregation — GREEN
+
+- Each valid unique `out` row now immediately updates Daily and Monthly dictionaries, Login/Desk sets, Country counters, used count, and Profit total.
+- Removed per-file normalized `baris` lists and flattened `semua_baris`; retained only aggregate dictionaries, verification sets/counters, Deal ID set, small per-file summaries, final sorted aggregate lists.
+- Dedupe order and semantics, summary labels/values, output ordering, diagnostics, CLI, styled normal workbook writer preserved. No `write_only` rewrite.
+- `python3 test_deal_segregator.py && python3 -m py_compile deal_segregator.py test_deal_segregator.py && git diff --check` → exit 0, `OK deal segregator engine`.
+- Real fixture parity → `{'file_masuk': 1, 'total': 418913, 'dipakai': 209838, 'harian': 9418, 'bulanan': 9418, 'login_unik': 5071}`.
+- An unrelated D&W workbook was initially probed as a fixture and correctly rejected for missing Deal History columns; the original zern fixture was then located from test history and passed exact parity.
+- No Flask files changed.
