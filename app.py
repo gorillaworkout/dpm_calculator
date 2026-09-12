@@ -80,7 +80,7 @@ TOOLS = {
 }
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024  # workbook D&W bisa >20 MB
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # multi-file Deals upload can exceed 200 MB
 
 
 # ----------------------------------------------------------------- report month
@@ -341,6 +341,8 @@ def run(slug):
     sources = []
     for index, upload in enumerate(uploads, start=1):
         safe = secure_filename(upload.filename) or f"upload-{index}"
+        if not Path(safe).suffix:
+            safe += Path(upload.filename).suffix.lower()
         src = job / safe
         suffix = 2
         while src.exists():

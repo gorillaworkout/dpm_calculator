@@ -4,8 +4,8 @@ Model app-nya ASINKRON sejak 28 Aug 2026: POST -> 302 ke /job/<id>, kerjanya di
 thread, lalu /job/<id>/download. Jadi tes ini POST, ambil job id dari header
 Location, tunggu state 'done'/'failed', baru unduh.
 """
-import csv
 import io
+import shutil
 import time
 from pathlib import Path
 
@@ -16,6 +16,10 @@ from app import JOBS, TOOLS, app
 
 c = app.test_client()
 HERE = Path(__file__).parent
+DEALS_FIXTURE = Path(
+    "/Users/bayudarmawan/Documents/Dupoin/zern/"
+    "31 Jul_Deals History 2026_08_07 12_07_27 (1).csv"
+)
 
 # Setiap upload WAJIB menyertakan bulan laporan (28 Aug 2026 -> 31 Aug 2026).
 BULAN = {"bulan": "6", "tahun": "2026"}
@@ -72,31 +76,43 @@ assert c.post(
 ).status_code == 400
 
 
-def deals_csv():
-    """Small portable Deals History fixture with one duplicate Deal ID."""
-    text = io.StringIO(newline="")
-    writer = csv.writer(text)
-    writer.writerow(["Deal", "Login", "Group", "Country", "Time", "Type", "Entry",
-                     "Symbol", "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"])
-    writer.writerow(["1", "100", r"real\DPMKT-15", "MY", "2026.07.01 01:02:03",
-                     "buy", "out", "EURUSD", "1.25", "-1", "-0.1", "-0.2", "10", "USD"])
-    return text.getvalue().encode()
-
-
 def kirim_segregate(files):
     r = c.post("/tool/segregate", data={"file": files},
                content_type="multipart/form-data")
     assert r.status_code == 302, (r.status_code, r.data[:500])
     job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
-    for _ in range(100):
+    for _ in range(600):
         info = A._read_state(job_id)
         if info and info["state"] in ("done", "failed"):
             return job_id, info
-        time.sleep(0.05)
+        time.sleep(0.5)
     raise AssertionError("Deal Segregator job did not finish")
 
 
-job_id, info = kirim_segregate([(io.BytesIO(deals_csv()), "deals.csv")])
+# Unicode-only stems are stripped by secure_filename; the validated suffix must survive.
+captured = {}
+unicode_job_id = None
+real_thread = A.threading.Thread
+class CapturingThread:
+    def __init__(self, target, args, **kwargs):
+        captured["sources"] = args[3]
+    def start(self):
+        pass
+A.threading.Thread = CapturingThread
+try:
+    r = c.post("/tool/segregate", data={"file": (io.BytesIO(b"x"), "交易.xlsx")},
+               content_type="multipart/form-data")
+    assert r.status_code == 302
+    unicode_job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
+    assert captured["sources"][0].suffix == ".xlsx", captured["sources"][0]
+finally:
+    A.threading.Thread = real_thread
+    if unicode_job_id:
+        shutil.rmtree(JOBS / unicode_job_id, ignore_errors=True)
+        A._state_path(unicode_job_id).unlink(missing_ok=True)
+
+assert DEALS_FIXTURE.is_file(), f"real Deals History fixture missing: {DEALS_FIXTURE}"
+job_id, info = kirim_segregate([(DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name)])
 assert info["state"] == "done", info
 assert info["name"].endswith("-hasil.xlsx"), info["name"]
 r = c.get(f"/job/{job_id}/download")
@@ -105,15 +121,17 @@ assert r.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetm
 wb = load_workbook(io.BytesIO(r.data), read_only=True, data_only=True)
 try:
     assert wb.sheetnames == ["Daily", "Monthly Summary", "Verifikasi"]
+    assert wb["Daily"].max_row - 1 == 9418
+    assert wb["Monthly Summary"].max_row - 1 == 9418
 finally:
     wb.close()
 
 job_id, info = kirim_segregate([
-    (io.BytesIO(deals_csv()), "same.csv"),
-    (io.BytesIO(deals_csv()), "same.csv"),
+    (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
+    (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
 ])
 assert info["state"] == "done", info
-assert "dipakai: 1" in (info["log"] or ""), info["log"]
+assert "dipakai: 209838" in (info["log"] or ""), info["log"]
 c.get(f"/job/{job_id}/download")
 
 # --- yang harus DITOLAK sebelum job dibuat ---------------------------------
