@@ -92,18 +92,19 @@ with TemporaryDirectory() as tmp:
             ("200", "SG", "DPMKT-20", datetime.datetime(2026, 8, 1), "sell", "XAUUSD", 1, 2, -4, -0.4, -0.5, 30, "USD"),
         ]
         verification = dict(values(wb["Verifikasi"])[2:])
-        assert verification["Total baris (semua file)"] == 7
-        assert verification["Entry = out (dipakai)"] == 6
-        assert verification["Entry = in (dibuang)"] == 1
-        assert verification["Duplikat antar-file (Deal ID sama, dibuang)"] == 1
-        assert verification["Baris unik dipakai"] == 5
-        assert verification["Baris pada Daily (Login+Date+Type+Symbol)"] == 4
-        assert verification["Baris pada Monthly Summary (Login+Month+Type+Symbol)"] == 3
-        assert verification["Login unik"] == 2
-        assert verification["Country terisi"] == 5
-        assert verification["Country kosong"] == 0
-        assert verification["Desk unik"] == 2
-        assert verification["Jumlah Profit (semua baris out)"] == 72
+        assert wb["Verifikasi"]["A1"].value == "Summary - Deal Segregator"
+        assert verification["Total source rows (all files)"] == 7
+        assert verification["Entry = out (before deduplication)"] == 6
+        assert verification["Entry = in (dropped)"] == 1
+        assert verification["Duplicate non-empty Deal IDs (dropped)"] == 1
+        assert verification["Unique rows kept"] == 5
+        assert verification["Daily output rows (Login+Date+Type+Symbol)"] == 4
+        assert verification["Monthly Summary output rows (Login+Month+Type+Symbol)"] == 3
+        assert verification["Unique logins"] == 2
+        assert verification["Rows with Country"] == 5
+        assert verification["Rows without Country"] == 0
+        assert verification["Unique desks"] == 2
+        assert verification["Total Profit (all kept rows)"] == 72
         assert summary == {"file_masuk": 2, "total": 7, "dipakai": 5,
                            "harian": 4, "bulanan": 3, "login_unik": 2}
     finally:
@@ -130,16 +131,16 @@ with TemporaryDirectory() as tmp:
         wb.close()
 
 # Trust-boundary diagnostics include source location and offending column.
-expect_error([row("1", volume="not-a-number")], "bad.csv", "baris 2", "Volume")
-expect_error([row("1", fee="")], "bad.csv", "baris 2", "Fee")
-expect_error([row("1", profit="NaN")], "bad.csv", "baris 2", "Profit", "NaN")
-expect_error([row("1", swap="inf")], "bad.csv", "baris 2", "Swap", "inf")
-expect_error([row("1", time="")], "bad.csv", "baris 2", "Time")
-expect_error([row("1", time="2026.02.30 00:00:00")], "bad.csv", "baris 2", "Time")
-expect_error([row("1", time="2026.07.01 25:00:00")], "bad.csv", "baris 2", "Time")
-expect_error([row("1", time="2026.07.01 garbage")], "bad.csv", "baris 2", "Time")
-expect_error([row("1", time="yesterday")], "bad.csv", "baris 2", "Time")
-expect_error([["1", "100"]], "bad.csv", "baris 2", "14 kolom", "2 kolom")
+expect_error([row("1", volume="not-a-number")], "STOP:", "bad.csv", "row 2", "Volume")
+expect_error([row("1", fee="")], "STOP:", "bad.csv", "row 2", "Fee")
+expect_error([row("1", profit="NaN")], "STOP:", "bad.csv", "row 2", "Profit", "NaN")
+expect_error([row("1", swap="inf")], "STOP:", "bad.csv", "row 2", "Swap", "inf")
+expect_error([row("1", time="")], "STOP:", "bad.csv", "row 2", "Time")
+expect_error([row("1", time="2026.02.30 00:00:00")], "STOP:", "bad.csv", "row 2", "Time")
+expect_error([row("1", time="2026.07.01 25:00:00")], "STOP:", "bad.csv", "row 2", "Time")
+expect_error([row("1", time="2026.07.01 garbage")], "STOP:", "bad.csv", "row 2", "Time")
+expect_error([row("1", time="yesterday")], "STOP:", "bad.csv", "row 2", "Time")
+expect_error([["1", "100"]], "STOP:", "bad.csv", "row 2", "expected 14 columns", "found 2 columns")
 
 def expect_rejected_xlsx_closed(filename, populate, *message_parts):
     with TemporaryDirectory() as tmp:
@@ -171,9 +172,9 @@ def expect_rejected_xlsx_closed(filename, populate, *message_parts):
 
 # Rejected XLSX workbooks close during both header-validation and empty initialization.
 expect_rejected_xlsx_closed("missing-columns.xlsx", lambda ws: ws.append(["Deal"]),
-                            "missing-columns.xlsx", "kolom wajib")
+                            "STOP:", "missing-columns.xlsx", "required columns")
 expect_rejected_xlsx_closed("empty.xlsx", lambda ws: None,
-                            "empty.xlsx", "header")
+                            "STOP:", "empty.xlsx", "header")
 
 # Used normalized rows must be released while input is still consumed.
 with TemporaryDirectory() as tmp:

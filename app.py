@@ -263,6 +263,9 @@ DOC = {
         "siapkan": [
             "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
             "Each file must contain Deal, Login, Group, Country, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns.",
+            "There is a <strong>200 MB total upload request limit</strong> per run. When your "
+            "files add up to more than that, split larger batches into several smaller runs "
+            "&mdash; duplicate Deal IDs are removed within each run.",
         ],
         "langkah": [
             "Rows from every file are pooled. Only <code>Entry = out</code> rows are kept.",
@@ -316,11 +319,12 @@ def run(slug):
     uploads = [u for u in request.files.getlist("file") if u and u.filename]
     if slug == "segregate":
         if not uploads:
-            return _gagal("Please choose at least one .csv or .xlsx file first.")
+            return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
         invalid = [u.filename for u in uploads
                    if not u.filename.lower().endswith((".csv", ".xlsx", ".xlsm"))]
         if invalid:
-            return _gagal(f"These files are not .csv/.xlsx and were rejected: {', '.join(invalid)}")
+            return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
+                          f"{', '.join(invalid)}")
         periode = saldo_jw = None
     else:
         up = uploads[0] if uploads else None

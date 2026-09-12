@@ -13,6 +13,39 @@ import hitung_dw as h
 from mtoatd_spec import Indeks, hitung
 
 
+def test_job_page_uses_shared_title_validated_slug_and_tool_specific_copy():
+    client = web.app.test_client()
+    job_id = uuid.uuid4().hex
+    web._write_state(job_id, state="running", name="deals-hasil.xlsx", started=0,
+                     error=None, log=None, path=None, slug="segregate")
+    try:
+        page = client.get(f"/job/{job_id}")
+        assert page.status_code == 200
+        assert b"Processing \xc2\xb7 Dupoin DPM Tools" in page.data
+        assert b"combined, filtered, and deduplicated" in page.data
+        assert b"return to this same job URL" in page.data
+
+        web._write_state(job_id, state="collected", name="deals-hasil.xlsx", started=0,
+                         path=None, slug="segregate")
+        page = client.get(f"/job/{job_id}")
+        assert b'href="/tool/segregate"' in page.data
+    finally:
+        web._state_path(job_id).unlink(missing_ok=True)
+
+
+def test_dw_job_processing_copy_remains_accurate():
+    client = web.app.test_client()
+    job_id = uuid.uuid4().hex
+    web._write_state(job_id, state="running", name="dw-hasil.xlsx", started=0,
+                     error=None, log=None, path=None, slug="dw")
+    try:
+        page = client.get(f"/job/{job_id}")
+        assert b"workbook is being calculated" in page.data
+        assert b"combined, filtered, and deduplicated" not in page.data
+    finally:
+        web._state_path(job_id).unlink(missing_ok=True)
+
+
 def test_cross_month_refuse_h1_is_relevant_to_report_period():
     h.PERIODE_FILTER = (2026, 6)
     assert h.refuse_h1_relevan(
@@ -96,3 +129,13 @@ def test_concurrent_download_has_one_winner_and_controlled_loser():
                 worker.terminate()
             worker.join()
         shutil.rmtree(jobs, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    # Tanpa pytest: file ini dijalankan langsung (python3 test_regressions.py),
+    # jadi test-nya harus dipanggil sendiri -- kalau tidak, exit 0 itu palsu.
+    tests = [v for k, v in sorted(globals().items())
+             if k.startswith("test_") and callable(v)]
+    for t in tests:
+        t()
+    print(f"OK {len(tests)} regressions")

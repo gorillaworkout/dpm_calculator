@@ -68,14 +68,19 @@ assert b"multiple" in halaman_segregate.data
 assert b'name="bulan"' not in halaman_segregate.data
 assert b'name="saldo_jw"' not in halaman_segregate.data
 assert b"Download the template" not in halaman_segregate.data
+assert b"200 MB total upload request limit" in halaman_segregate.data
+assert b"split larger batches" in halaman_segregate.data
 
-assert c.post("/tool/segregate", data={},
-              content_type="multipart/form-data").status_code == 400
-assert c.post(
+missing = c.post("/tool/segregate", data={}, content_type="multipart/form-data")
+assert missing.status_code == 400
+assert b".csv, .xlsx, or .xlsm" in missing.data
+invalid = c.post(
     "/tool/segregate",
     data={"file": [(io.BytesIO(b"x"), "a.txt")]},
     content_type="multipart/form-data",
-).status_code == 400
+)
+assert invalid.status_code == 400
+assert b".csv, .xlsx, or .xlsm" in invalid.data
 
 
 def kirim_segregate(files):
@@ -133,7 +138,7 @@ job_id, info = kirim_segregate([
     (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
 ])
 assert info["state"] == "done", info
-assert "dipakai: 209838" in (info["log"] or ""), info["log"]
+assert "kept: 209838" in (info["log"] or ""), info["log"]
 c.get(f"/job/{job_id}/download")
 
 # --- yang harus DITOLAK sebelum job dibuat ---------------------------------

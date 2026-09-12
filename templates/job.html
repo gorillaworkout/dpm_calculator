@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Processing · dw-calculator{% endblock %}
+{% block title %}Processing · Dupoin DPM Tools{% endblock %}
 {% block body %}
 {% if info.state == 'collected' %}
 <h1>Download finished</h1>
@@ -10,7 +10,7 @@ Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
   <p style="margin:0 0 14px; color:var(--mute); font-size:13.5px">Results are deleted the
     moment they reach you, so nothing large is left sitting on the server. If you need the
     file again, run the workbook through once more.</p>
-  <a class="dl" href="/tool/dw">Start a new job</a>
+  <a class="dl" href="{{ url_for('tool', slug=info.slug) }}">Start a new job</a>
 </div>
 
 {% elif info.state == 'done' %}
@@ -51,9 +51,15 @@ shows the file in its download list.</p>
 
 {% else %}
 <h1>Processing&hellip;</h1>
+{% if info.slug == 'segregate' %}
+<p class="lede">Your Deals History files are being combined, filtered, and deduplicated on
+the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
+can safely return to this same job URL later.</p>
+{% else %}
 <p class="lede">Your workbook is being calculated on the server. Large files
 (20&ndash;40&nbsp;MB) can take a few minutes &mdash; this page refreshes itself, so just
 leave it open.</p>
+{% endif %}
 
 <div class="card">
   <div style="display:flex; align-items:center; gap:14px">
@@ -68,8 +74,8 @@ leave it open.</p>
   <div style="height:6px; margin-top:20px; border-radius:99px; background:#0c1120; overflow:hidden">
     <div class="bar"></div>
   </div>
-  <p class="hint" style="margin-top:16px">Do not close this tab &mdash; the download link
-    appears here when the calculation finishes.</p>
+  <p class="hint" style="margin-top:16px">The download link appears here when the run
+    finishes. You can keep this tab open, or return to this same job URL later.</p>
 </div>
 
 <style>

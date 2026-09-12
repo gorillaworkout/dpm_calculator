@@ -51,6 +51,17 @@ KOLOM_HASIL = ["Login", "Country", "Desk", "{PERIODE}", "Type", "Symbol", "Deals
 KOLOM_JUMLAH = ["Volume", "Commission", "Fee", "Swap", "Profit"]
 KOLOM_TEKS = {"Login", "Country", "Desk", "Type", "Symbol", "Currency"}
 
+# Label Inggris untuk ringkasan yang DITAMPILKAN ke user (log job di web app).
+# Kunci dict hasil tetap dipakai internal oleh pemanggil lain.
+LABEL_RINGKASAN = {
+    "file_masuk": "files read",
+    "total": "source rows",
+    "dipakai": "kept",
+    "harian": "Daily rows",
+    "bulanan": "Monthly Summary rows",
+    "login_unik": "unique logins",
+}
+
 ENTRY_DIPAKAI = "out"
 
 
@@ -96,7 +107,7 @@ def _baca_xlsx(path: Path):
         if wb is not None:
             wb.close()
         detail = "file tidak memiliki header" if isinstance(exc, StopIteration) else str(exc)
-        sys.exit(f"BERHENTI: gagal membaca header di '{path.name}': {detail}")
+        sys.exit(f"STOP: could not read the header in '{path.name}': {detail}")
     def rows():
         try:
             for nomor, row in enumerate(it, start=2):
@@ -120,9 +131,9 @@ def baca_file(path: Path):
         if close:
             close()
         sys.exit(
-            f"BERHENTI: kolom wajib tidak ditemukan di '{path.name}': {hilang}\n"
-            f"Header yang terbaca ({len(header)} kolom): {header}\n"
-            "Pastikan file ini export 'Deals History' dari MT5, bukan file lain."
+            f"STOP: required columns are missing in '{path.name}': {hilang}\n"
+            f"Header that was read ({len(header)} columns): {header}\n"
+            "Make sure this file is a 'Deals History' export from MT5, not another file."
         )
     return idx, rows
 
@@ -145,7 +156,7 @@ def _angka(v, path: Path, nomor: int, kolom: str):
     except ValueError:
         angka = math.nan
     if not teks or not math.isfinite(angka):
-        sys.exit(f"BERHENTI: nilai {kolom} tidak valid di '{path.name}', baris {nomor}: {teks!r}")
+        sys.exit(f"STOP: invalid {kolom} value in '{path.name}', row {nomor}: {teks!r}")
     return angka
 
 
@@ -170,8 +181,8 @@ def tanggal_dari_waktu(waktu, path=None, nomor=None):
             return datetime.datetime.strptime(teks, fmt).date()
         except ValueError:
             pass
-    lokasi = f" di '{path.name}', baris {nomor}" if path is not None else ""
-    sys.exit(f"BERHENTI: nilai Time tidak valid{lokasi}: {teks!r}")
+    lokasi = f" in '{path.name}', row {nomor}" if path is not None else ""
+    sys.exit(f"STOP: invalid Time value{lokasi}: {teks!r}")
 
 
 def _kunci_tanggal(v):
@@ -187,8 +198,8 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris):
     for nomor, row in rows:
         total += 1
         if len(row) != len(idx):
-            sys.exit(f"BERHENTI: jumlah kolom tidak valid di '{path.name}', baris {nomor}: "
-                     f"diharapkan {len(idx)} kolom, ditemukan {len(row)} kolom")
+            sys.exit(f"STOP: invalid column count in '{path.name}', row {nomor}: "
+                     f"expected {len(idx)} columns, found {len(row)} columns")
         entry = _teks(row[idx["Entry"]]).lower()
         if entry == "in":
             entry_in += 1
@@ -281,33 +292,33 @@ def proses(paths_in, path_out: Path) -> dict:
     duplikat = sum(r["duplikat"] for r in per_file)
     if not dipakai:
         sys.exit(
-            "BERHENTI: tidak ada satu pun baris dengan Entry = 'out' ditemukan.\n"
-            f"Dari {len(paths_in)} file, {total} baris total: {entry_in} 'in', "
-            f"{entry_lain} lainnya/kosong.\n"
-            "Cek apakah file-file ini memang export Deals History yang benar."
+            "STOP: no row with Entry = 'out' was found.\n"
+            f"Across {len(paths_in)} file(s), {total} rows in total: {entry_in} 'in', "
+            f"{entry_lain} other/empty.\n"
+            "Check that these files are the correct Deals History exports."
         )
 
     harian = _hasil_agregat(kelompok_harian)
     bulanan = _hasil_agregat(kelompok_bulanan)
 
-    ringkasan = {"File yang diupload": len(paths_in)}
+    ringkasan = {"Uploaded files": len(paths_in)}
     for r in per_file:
-        ringkasan[f"  - {r['nama']}"] = (f"{r['total']} baris, {r['out']} 'out' dipakai"
-                                          + (f", {r['duplikat']} duplikat dibuang" if r["duplikat"] else ""))
+        ringkasan[f"  - {r['nama']}"] = (f"{r['total']} rows, {r['out']} 'out' kept"
+                                          + (f", {r['duplikat']} duplicates dropped" if r["duplikat"] else ""))
     ringkasan.update({
-        "Total baris (semua file)": total,
-        "Entry = out (dipakai)": dipakai + duplikat,
-        "Entry = in (dibuang)": entry_in,
-        "Entry kosong/lainnya (dibuang)": entry_lain,
-        "Duplikat antar-file (Deal ID sama, dibuang)": duplikat,
-        "Baris unik dipakai": dipakai,
-        "Baris pada Daily (Login+Date+Type+Symbol)": len(harian),
-        "Baris pada Monthly Summary (Login+Month+Type+Symbol)": len(bulanan),
-        "Login unik": len(login_unik),
-        "Country terisi": country_terisi,
-        "Country kosong": country_kosong,
-        "Desk unik": len(desk_unik),
-        "Jumlah Profit (semua baris out)": round(jumlah_profit, 2),
+        "Total source rows (all files)": total,
+        "Entry = out (before deduplication)": dipakai + duplikat,
+        "Entry = in (dropped)": entry_in,
+        "Entry empty/other (dropped)": entry_lain,
+        "Duplicate non-empty Deal IDs (dropped)": duplikat,
+        "Unique rows kept": dipakai,
+        "Daily output rows (Login+Date+Type+Symbol)": len(harian),
+        "Monthly Summary output rows (Login+Month+Type+Symbol)": len(bulanan),
+        "Unique logins": len(login_unik),
+        "Rows with Country": country_terisi,
+        "Rows without Country": country_kosong,
+        "Unique desks": len(desk_unik),
+        "Total Profit (all kept rows)": round(jumlah_profit, 2),
     })
 
     _tulis_workbook(harian, bulanan, path_out, ringkasan)
@@ -346,7 +357,7 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode):
 
 
 def _tulis_verifikasi(ws, ringkasan: dict):
-    ws.cell(row=1, column=1, value="Ringkasan - Deal Segregator").font = Font(bold=True, size=13)
+    ws.cell(row=1, column=1, value="Summary - Deal Segregator").font = Font(bold=True, size=13)
     for i, (label, val) in enumerate(ringkasan.items(), start=3):
         ws.cell(row=i, column=1, value=label)
         ws.cell(row=i, column=2, value=val)
@@ -370,21 +381,21 @@ def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Deal Segregator -- segregasi Deals History per Login")
-    ap.add_argument("input", nargs="+", help="satu atau lebih file Deals History (.csv atau .xlsx)")
-    ap.add_argument("-o", "--output", help="file .xlsx hasil (default: <input>-hasil.xlsx)")
+    ap = argparse.ArgumentParser(description="Deal Segregator -- segregate Deals History per Login")
+    ap.add_argument("input", nargs="+", help="one or more Deals History files (.csv, .xlsx or .xlsm)")
+    ap.add_argument("-o", "--output", help="result .xlsx file (default: <input>-hasil.xlsx)")
     args = ap.parse_args()
 
     paths_in = [Path(p) for p in args.input]
     for p in paths_in:
         if not p.is_file():
-            sys.exit(f"BERHENTI: file tidak ditemukan: {p}")
+            sys.exit(f"STOP: file not found: {p}")
     path_out = Path(args.output) if args.output else paths_in[0].with_name(f"{paths_in[0].stem}-hasil.xlsx")
 
     ringkasan = proses(paths_in, path_out)
-    print("=== STAGE 1 SELESAI ===")
+    print("=== STAGE 1 DONE ===")
     for k, v in ringkasan.items():
-        print(f"  {k}: {v}")
+        print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")
     print(f"Output: {path_out.resolve()}")
 
 
