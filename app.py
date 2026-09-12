@@ -447,15 +447,26 @@ def job_download(job_id):
                                tool=TOOLS[info["slug"]]), 410
     if info["state"] != "done" or not info["path"]:
         abort(404)
+    job = _job_dir(job_id)
     path = Path(info["path"])
-    if not path.is_file():
-        abort(404)
+    claimed = JOBS / f".{job_id}.download"
+    try:
+        os.rename(job, claimed)                 # atomic claim across Gunicorn workers
+    except OSError:
+        latest = _read_state(job_id)
+        if latest and latest["state"] == "collected":
+            return render_template("job.html", job_id=job_id, info=latest, elapsed=0,
+                                   tool=TOOLS[latest["slug"]]), 410
+        return "Download already in progress.", 409
 
     # Results can be 50 MB+, so nothing is kept on disk after delivery. Read into
-    # memory first, then delete the job directory and mark the job collected, so
-    # the file is gone the moment the response is handed to the client.
-    data = path.read_bytes()
-    shutil.rmtree(_job_dir(job_id), ignore_errors=True)
+    # memory first, then delete the claimed directory and mark the job collected.
+    try:
+        data = (claimed / path.relative_to(job)).read_bytes()
+    except OSError:
+        shutil.rmtree(claimed, ignore_errors=True)
+        return "Download is no longer available.", 410
+    shutil.rmtree(claimed, ignore_errors=True)
     _write_state(job_id, state="collected", path=None, collected=time.time())
     return send_file(io.BytesIO(data), as_attachment=True,
                      download_name=info["name"],

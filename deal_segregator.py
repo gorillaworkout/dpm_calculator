@@ -49,6 +49,7 @@ KOLOM_HASIL = ["Login", "Country", "Desk", "{PERIODE}", "Type", "Symbol", "Deals
                "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"]
 
 KOLOM_JUMLAH = ["Volume", "Commission", "Fee", "Swap", "Profit"]
+KOLOM_TEKS = {"Login", "Country", "Desk", "Type", "Symbol", "Currency"}
 
 ENTRY_DIPAKAI = "out"
 
@@ -333,6 +334,8 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode):
             nilai = d[key]
             if key in KOLOM_JUMLAH and isinstance(nilai, float):
                 nilai = round(nilai, 2)
+            elif key in KOLOM_TEKS and nilai.startswith(("=", "+", "-", "@")):
+                nilai = "'" + nilai
             ws.cell(row=i, column=j, value=nilai)
         if isinstance(d["Periode"], datetime.date):
             ws.cell(row=i, column=col_periode).number_format = fmt_periode

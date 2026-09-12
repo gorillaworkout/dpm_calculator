@@ -109,6 +109,26 @@ with TemporaryDirectory() as tmp:
     finally:
         wb.close()
 
+# Untrusted text must stay literal in Excel; typed dates/numbers must remain typed.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "formula.csv", tmp / "formula.xlsx"
+    write_csv(src, [row("formula", login="=1+1", country="+MY",
+                        group=r"real\-Desk", type_="@buy", symbol="=EURUSD",
+                        currency="+USD")])
+    proses([src], out)
+    wb = load_workbook(out, data_only=False)
+    try:
+        for sheet in ("Daily", "Monthly Summary"):
+            cells = list(wb[sheet][2])
+            assert [cells[i].value for i in (0, 1, 2, 4, 5, 12)] == [
+                "'=1+1", "'+MY", "'-Desk", "'@buy", "'=EURUSD", "'+USD",
+            ]
+            assert cells[3].is_date
+            assert all(c.data_type == "n" for c in cells[6:12])
+    finally:
+        wb.close()
+
 # Trust-boundary diagnostics include source location and offending column.
 expect_error([row("1", volume="not-a-number")], "bad.csv", "baris 2", "Volume")
 expect_error([row("1", fee="")], "bad.csv", "baris 2", "Fee")
