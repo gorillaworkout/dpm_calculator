@@ -80,7 +80,7 @@ TOOLS = {
 }
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024  # multi-file Deals upload can exceed 200 MB
+app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
 
 
 # ----------------------------------------------------------------- report month

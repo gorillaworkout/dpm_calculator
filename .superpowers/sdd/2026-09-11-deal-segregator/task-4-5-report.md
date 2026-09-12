@@ -95,3 +95,55 @@ git diff --check
 - The duplicate E2E transmits roughly 244 MB and performs two full aggregations, so it is resource-intensive.
 - The 500 MB Flask ceiling permits the required duplicate fixture while preserving a bounded request size.
 - No D&W calculation files changed. No push or deployment performed.
+
+## Important Security Fix Round
+
+### Change
+
+Restored the unauthenticated production request ceiling in `app.py` to `200 * 1024 * 1024`. The required duplicate real-fixture HTTP test now raises `app.config["MAX_CONTENT_LENGTH"]` to `500 * 1024 * 1024` in `test_app.py` before creating the test client. Production behavior remains bounded at 200 MB; only the test process accepts the approximately 244 MB multipart request.
+
+### Strict TDD Evidence
+
+RED added first:
+
+```python
+assert app.config["MAX_CONTENT_LENGTH"] == 200 * 1024 * 1024
+```
+
+Command and targeted failure:
+
+```text
+python3 test_app.py
+  exit 1 — AssertionError at test_app.py:17 because production still configured 500 MB
+```
+
+Minimal production fix changed only the default ceiling. GREEN:
+
+```text
+python3 test_app.py
+  exit 0 — OK 2 menu, 718,394 bytes hasil Jun 2026
+```
+
+The GREEN run includes the mandatory duplicate external-fixture HTTP upload and `dipakai: 209838` assertion.
+
+### Fix-round Verification
+
+```text
+python3 test_deal_segregator.py
+  exit 0 — OK deal segregator engine
+
+python3 test_regressions.py
+  exit 0 — no output
+
+python3 -m py_compile app.py deal_segregator.py test_app.py
+  exit 0 — no output
+
+git diff --check
+  exit 0 — no output
+```
+
+### Fix-round Concerns
+
+- `test_app.py` still requires the absolute external financial fixture and is intentionally resource-intensive.
+- The test-only 500 MB override must remain before `app.test_client()` creation and must not move into production configuration.
+- No D&W calculation files changed. No push or deployment performed.

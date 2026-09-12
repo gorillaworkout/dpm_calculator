@@ -14,6 +14,8 @@ from openpyxl import load_workbook
 import app as A
 from app import JOBS, TOOLS, app
 
+assert app.config["MAX_CONTENT_LENGTH"] == 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 c = app.test_client()
 HERE = Path(__file__).parent
 DEALS_FIXTURE = Path(
