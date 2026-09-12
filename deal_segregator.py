@@ -106,7 +106,7 @@ def _baca_xlsx(path: Path):
     except Exception as exc:
         if wb is not None:
             wb.close()
-        detail = "file tidak memiliki header" if isinstance(exc, StopIteration) else str(exc)
+        detail = "the file has no header row" if isinstance(exc, StopIteration) else str(exc)
         sys.exit(f"STOP: could not read the header in '{path.name}': {detail}")
     def rows():
         try:
@@ -343,11 +343,16 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode):
         for j, name in enumerate(kolom, start=1):
             key = "Periode" if name == kolom_periode else name
             nilai = d[key]
+            teks_tidak_aman = False
             if key in KOLOM_JUMLAH and isinstance(nilai, float):
                 nilai = round(nilai, 2)
             elif key in KOLOM_TEKS and nilai.startswith(("=", "+", "-", "@")):
-                nilai = "'" + nilai
-            ws.cell(row=i, column=j, value=nilai)
+                # Excel would evaluate this as a formula; quotePrefix keeps it literal
+                # without polluting the value with a visible apostrophe.
+                teks_tidak_aman = True
+            sel = ws.cell(row=i, column=j, value=nilai)
+            if teks_tidak_aman:
+                sel.quotePrefix = True
         if isinstance(d["Periode"], datetime.date):
             ws.cell(row=i, column=col_periode).number_format = fmt_periode
 

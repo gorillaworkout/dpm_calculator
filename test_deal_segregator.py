@@ -123,12 +123,25 @@ with TemporaryDirectory() as tmp:
         for sheet in ("Daily", "Monthly Summary"):
             cells = list(wb[sheet][2])
             assert [cells[i].value for i in (0, 1, 2, 4, 5, 12)] == [
-                "'=1+1", "'+MY", "'-Desk", "'@buy", "'=EURUSD", "'+USD",
+                "=1+1", "+MY", "-Desk", "@buy", "=EURUSD", "+USD",
             ]
+            # quotePrefix keeps the value literal in Excel WITHOUT a stray apostrophe.
+            assert all(cells[i].quotePrefix for i in (0, 1, 2, 4, 5, 12))
             assert cells[3].is_date
             assert all(c.data_type == "n" for c in cells[6:12])
     finally:
         wb.close()
+
+# An unreadable XLSX reports the failure in English.
+with TemporaryDirectory() as tmp:
+    empty = Path(tmp) / "empty.xlsx"
+    Workbook().save(empty)
+    try:
+        proses([empty], Path(tmp) / "out.xlsx")
+    except SystemExit as exc:
+        assert "no header row" in str(exc), exc
+    else:
+        raise AssertionError("empty workbook was accepted")
 
 # Trust-boundary diagnostics include source location and offending column.
 expect_error([row("1", volume="not-a-number")], "STOP:", "bad.csv", "row 2", "Volume")
