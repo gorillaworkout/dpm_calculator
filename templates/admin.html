@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}User Management — Dupoin DPM Tools{% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+<h1>User <span>Management</span></h1>
+<p class="lede">Accounts that may sign in to these tools. Everyone signs in with the
+username and password you create here — the browser asks for them once per session.
+Share each password with its owner directly; it cannot be read back afterwards.</p>
+
+{% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+
+<div class="card" style="margin-top:24px">
+  <h3>Add a user</h3>
+  <p style="margin-bottom:4px">A new account works immediately — the person can sign in as soon as you hand over the password.</p>
+  <form method="post" action="{{ url_for('admin_create') }}">
+    <label>Username</label>
+    <input type="text" name="username" required autocomplete="off"
+           placeholder="e.g. siti.rahman" pattern="[A-Za-z0-9._-]+">
+    <p class="hint">Letters, digits, and <code>. - _</code> only.</p>
+
+    <label>Password</label>
+    <input type="text" name="password" required autocomplete="off" minlength="10"
+           placeholder="at least 10 characters">
+    <p class="hint">Shown as plain text on purpose so you can copy it before sending. It is stored hashed.</p>
+
+    <label>Company access</label>
+    <label style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink)"><input type="checkbox" name="can_dpm" value="1" checked style="width:auto;margin-right:8px">DPM</label>
+    <label style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink)"><input type="checkbox" name="can_kvb" value="1" style="width:auto;margin-right:8px">KVB</label>
+
+    <label style="text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink)">
+      <input type="checkbox" name="is_admin" value="1" style="width:auto;margin-right:8px">
+      Also make this user an administrator (can manage accounts)
+    </label>
+
+    <button type="submit">Create user</button>
+  </form>
+</div>
+
+<div class="card" style="margin-top:20px">
+  <h3>Existing users ({{ users|length }})</h3>
+  <table style="width:100%;border-collapse:collapse;margin-top:14px;font-size:14px">
+    <thead>
+      <tr style="text-align:left;color:var(--mute);font-size:11.5px;text-transform:uppercase;letter-spacing:.08em">
+        <th style="padding:8px 6px;border-bottom:1px solid var(--line)">Username</th>
+        <th style="padding:8px 6px;border-bottom:1px solid var(--line)">Role</th>
+        <th style="padding:8px 6px;border-bottom:1px solid var(--line)">Last signed in</th>
+        <th style="padding:8px 6px;border-bottom:1px solid var(--line)">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for u in users %}
+      <tr>
+        <td style="padding:11px 6px;border-bottom:1px solid var(--line)">
+          {{ u.username }}{% if u.username == me %} <span class="tag" style="margin:0">you</span>{% endif %}
+        </td>
+        <td style="padding:11px 6px;border-bottom:1px solid var(--line);color:var(--mute)">
+          {{ "Administrator" if u.is_admin else "User" }}<br>
+          {{ "DPM " if u.can_dpm else "" }}{{ "KVB" if u.can_kvb else "" }}
+        </td>
+        <td style="padding:11px 6px;border-bottom:1px solid var(--line);color:var(--mute)">
+          {{ u.last_seen | waktu }}
+        </td>
+        <td style="padding:11px 6px;border-bottom:1px solid var(--line)">
+          <form method="post" action="{{ url_for('admin_access', username=u.username) }}" style="display:inline-flex;gap:6px;align-items:center">
+            <label style="margin:0;text-transform:none;letter-spacing:0"><input type="checkbox" name="can_dpm" value="1" {{ 'checked' if u.can_dpm }} style="width:auto"> DPM</label>
+            <label style="margin:0;text-transform:none;letter-spacing:0"><input type="checkbox" name="can_kvb" value="1" {{ 'checked' if u.can_kvb }} style="width:auto"> KVB</label>
+            <button type="submit" style="margin:0;width:auto;padding:7px 12px;font-size:13px">Access</button>
+          </form>
+          <form method="post" action="{{ url_for('admin_reset', username=u.username) }}"
+                style="display:inline-flex;gap:6px;align-items:center">
+            <input type="text" name="password" required minlength="10" autocomplete="off"
+                   placeholder="new password"
+                   style="width:170px;padding:7px 9px;font-size:13px;margin:0">
+            <button type="submit" style="margin:0;width:auto;padding:7px 12px;font-size:13px">Reset</button>
+          </form>
+          {% if u.username != me %}
+          <form method="post" action="{{ url_for('admin_delete', username=u.username) }}"
+                style="display:inline" onsubmit="return confirm('Delete {{ u.username }}? They will lose access immediately.')">
+            <button type="submit"
+                    style="margin:0;width:auto;padding:7px 12px;font-size:13px;background:linear-gradient(140deg,#ff6b6b,#d9455f)">
+              Delete
+            </button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

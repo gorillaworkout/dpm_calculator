@@ -22,8 +22,12 @@ from flask import (Flask, abort, redirect, render_template, request, send_file,
                    url_for)
 from werkzeug.utils import secure_filename
 
+import auth
+import chunked
+
 BASE = Path(__file__).resolve().parent
-JOBS = (Path(tempfile.gettempdir()) / "dw-calculator-jobs").resolve()
+JOBS = Path(os.environ.get("DW_JOB_DIR", Path(tempfile.gettempdir()) /
+                           "dw-calculator-jobs")).expanduser().resolve()
 JOBS.mkdir(exist_ok=True)
 
 
@@ -74,13 +78,58 @@ TOOLS = {
            "Missing Data, Legend. Fee rates and Xero rates are always read from the file "
            "you upload, never stored here.",
            ("isi_template.py", "hitung_dw.py"), True),
-    "segregate": ("Deal Segregator", "Combine one or more MT5 Deals History files into "
-                  "daily and monthly summaries with verification totals.",
+    "segregate": ("Deal Segregator", "Combine MT5 Deals History files and optionally add "
+                  "a Client Equity FX workbook for USD-converted financial totals.",
                   ("deal_segregator.py",), True),
 }
 
+# Separate registry: KVB never changes or extends the existing DPM pipeline.
+KVB_TOOLS = {
+    "dw": ("Generate D&W", "Upload a KVB Plus workbook and generate the finished monthly "
+           "D&W report in one run.",
+           ("siapkan_kvb.py", "isi_template.py", "hitung_dw.py"), True),
+}
+
+
+def _tools_for(company):
+    return TOOLS if company == "dpm" else KVB_TOOLS if company == "kvb" else None
+
+
+def _require_company(company):
+    if not auth.has_company(request.user, company):
+        abort(403, description=f"Your account does not have access to {company.upper()}.")
+
+
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 200 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
+
+# Every route is behind HTTP Basic Auth. A before_request hook is used instead of
+# decorating each view so a new endpoint cannot be added unprotected by accident.
+auth.register(app)
+chunked.register(app, JOBS)
+
+
+@app.before_request
+def _require_login():
+    if request.endpoint in ("static", "login", "login_post", "logout"):
+        return None
+    if request.path.startswith("/admin"):
+        return None                      # admin views carry their own stricter check
+    user = auth.current_user()
+    if not user:
+        # Browsers get the styled sign-in page; scripts and the chunked uploader
+        # get a plain 401 so they can report a clear error instead of parsing HTML.
+        wants_html = "text/html" in (request.headers.get("Accept") or "")
+        if request.method == "GET" and wants_html:
+            return redirect(url_for("login", next=request.full_path.rstrip("?")))
+        return auth._deny()
+    request.user = user
+    if (request.path == "/" or request.path.startswith("/tool/") or
+            request.path == "/template"):
+        _require_company("dpm")
+    elif request.path == "/kvb" or request.path.startswith("/kvb/"):
+        _require_company("kvb")
+    return None
 
 
 # ----------------------------------------------------------------- report month
@@ -99,6 +148,11 @@ PERIODE_ARG = {"isi_template.py": "--bulan", "hitung_dw.py": "--period"}
 # uploaded workbook has no 'J Wallet' / 'Opening Balance' sheet - which is the
 # normal case, so the closing balance never carried over from one month to the next.
 SALDO_ARG = {"hitung_dw.py": "--jwallet-opening"}
+
+# Saldo pembuka per Payment Channel + Currency. Isinya BANYAK BARIS (40-70), jadi
+# tidak bisa lewat satu field seperti J Wallet: orang menempel tabelnya, kita simpan
+# jadi file di folder job, lalu path-nya diberikan ke hitung_dw.py.
+CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 SALDO_POLA = re.compile(r"^-?[\d.,\s]{1,24}$")
 PERIODE_POLA = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 NAMA_BULAN = ["January", "February", "March", "April", "May", "June",
@@ -128,6 +182,7 @@ def _pilihan_bulan():
         "nama_bulan": NAMA_BULAN,
         "saldo_label": f"{sb} {st}",
         "saldo_default": "",
+        "saldo_ch_default": "",
     }
 
 
@@ -155,7 +210,9 @@ HINT = {
           "rates. Sheets 'Fund Transfer Table', 'Opening Balance', 'J Wallet' and "
           "'Payment Channel Balance' are used when present, so that Channel Balance and "
           "J Wallet come out complete.",
-    "segregate": "Choose one or more MT5 Deals History files. CSV, XLSX and XLSM are accepted.",
+    "segregate": "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). You may "
+                 "also include one Client Equity FX workbook (.xlsx, sheet 'Query result'); "
+                 "the two file types are detected automatically.",
 }
 
 
@@ -258,52 +315,109 @@ DOC = {
     },
     "segregate": {
         "judul": "Deal Segregator — daily and monthly trading summaries",
-        "ringkas": "Upload one or more MT5 Deals History exports. They are combined, filtered, "
-                   "deduplicated and returned as one workbook.",
+        "ringkas": "Upload one or more MT5 Deals History exports, optionally together with a "
+                   "Client Equity FX workbook. File types are detected automatically.",
         "siapkan": [
             "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
-            "Each file must contain Deal, Login, Group, Country, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns.",
-            "There is a <strong>200 MB total upload request limit</strong> per run. When your "
-            "files add up to more than that, split larger batches into several smaller runs "
-            "&mdash; duplicate Deal IDs are removed within each run.",
+            "Each file must contain Deal, Position, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns. Group and Country are ignored and are not required.",
+            "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
+            "format with sheet <code>Query result</code> and columns <code>date</code>, "
+            "<code>Currency</code>, <code>rate</code>. Select it together with the Deals files.",
+            "There is a <strong>5 GB total upload limit</strong> per run. Large "
+            "batches are sent to the server in pieces automatically &mdash; you will see "
+            "the progress under the button, so leave the tab open until it says "
+            "<em>Processing</em>. Duplicate Deal IDs are removed within each run.",
         ],
         "langkah": [
-            "Rows from every file are pooled. Only <code>Entry = out</code> rows are kept.",
-            "Repeated non-empty Deal IDs are removed, then Daily and Monthly Summary totals are grouped by account, country, desk, period, type, symbol and currency.",
-            "Country is copied exactly as supplied. No lookup or enrichment is performed.",
+            "Rows from every file are pooled. Only <code>Entry = out</code> rows become output rows. "
+            "Commission, Fee and Swap recorded on the matching <code>Entry = in</code> opening row are "
+            "added onto that closing row, so opening charges are never lost; Volume and the deal count "
+            "stay exactly as the closing row reports them.",
+            "Repeated non-empty Deal IDs are removed, then Daily and Monthly Summary totals are grouped by account, period, type, symbol and currency. Group and Country are deliberately ignored.",
+            "When Client Equity FX is included, Commission, Fee, Swap and Profit are converted "
+            "to USD by exact Date + Currency. Missing rates stay blank and are highlighted yellow.",
         ],
-        "hasil": "One <code>.xlsx</code> workbook with three sheets:",
-        "sheets": [("Daily", "Daily aggregates and financial totals."),
-                   ("Monthly Summary", "Monthly aggregates and financial totals."),
-                   ("Verifikasi", "Input, filtering, duplicate and output checks.")],
+        "hasil": "One <code>.zip</code> containing two workbooks:",
+        "sheets": [("Deals - Daily.xlsx", "Daily aggregates, USD columns when FX is supplied, plus Verifikasi."),
+                   ("Deals - Monthly Summary.xlsx", "Monthly aggregates, USD columns when FX is supplied, plus Verifikasi.")],
         "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.", CATATAN_ASLI],
     },
+}
+
+KVB_HINT = ("Upload one KVB Plus workbook (.xlsx/.xlsm) containing Transfer, D, W, Xero, "
+            "and Handing Fee or Handling Fee sheets.")
+KVB_DOC = {
+    "judul": "KVB Generate D&W — one monthly run",
+    "ringkas": "Upload the KVB Plus workbook. The app translates KVB fields, prepares a clean D&W template, then calculates the finished report.",
+    "siapkan": [
+        "One KVB Plus workbook with <code>Transfer</code>, <code>D</code>, <code>W</code>, <code>Xero</code>, and <code>Handing Fee</code> or <code>Handling Fee</code> sheets.",
+        "The report month. The uploaded workbook is never modified.",
+    ],
+    "langkah": [
+        "KVB sheet and field names are translated without changing transaction amounts.",
+        "The translated data is copied into the clean D&amp;W template.",
+        "The report is calculated and returned as a new workbook.",
+    ],
+    "hasil": "One finished <code>.xlsx</code> D&amp;W workbook.",
+    "sheets": SHEET_PENUH,
+    "catatan": [CATATAN_MISSING, CATATAN_ASLI],
+    "catatan_penting": True,
 }
 
 
 @app.context_processor
 def _nav():
-    return {"tools": TOOLS}
+    company = getattr(request, "company", "kvb" if request.path.startswith("/kvb") else "dpm")
+    user = getattr(request, "user", None)
+    return {"tools": _tools_for(company) or {}, "company": company,
+            "company_urls": {"dpm": "/", "kvb": "/kvb"},
+            "can_dpm": auth.has_company(user, "dpm"),
+            "can_kvb": auth.has_company(user, "kvb")}
+
+
+@app.template_filter("waktu")
+def _waktu(ts):
+    """Render a unix timestamp as a short local date, or a dash when never set."""
+    if not ts:
+        return "—"
+    return datetime.datetime.fromtimestamp(ts).strftime("%d %b %Y, %H:%M")
 
 
 @app.get("/")
 def index():
+    request.company = "dpm"
+    return render_template("index.html")
+
+
+@app.get("/kvb")
+def kvb_index():
+    request.company = "kvb"
     return render_template("index.html")
 
 
 @app.get("/tool/<slug>")
-def tool(slug):
-    if slug not in TOOLS or not TOOLS[slug][3]:
+def tool(slug, company="dpm"):
+    registry = _tools_for(company)
+    if slug not in registry or not registry[slug][3]:
         abort(404)
+    request.company = company
     pilihan = _pilihan_bulan() if slug == "dw" else {}
-    return render_template("tool.html", slug=slug, tool=TOOLS[slug],
-                           hint=HINT.get(slug), doc=DOC.get(slug), **pilihan)
+    return render_template("tool.html", slug=slug, tool=registry[slug],
+                           hint=KVB_HINT if company == "kvb" else HINT.get(slug),
+                           doc=KVB_DOC if company == "kvb" else DOC.get(slug), **pilihan)
+
+
+@app.get("/kvb/tool/<slug>")
+def kvb_tool(slug):
+    return tool(slug, "kvb")
 
 
 @app.post("/tool/<slug>")
-def run(slug):
-    if slug not in TOOLS or not TOOLS[slug][3]:
+def run(slug, company="dpm"):
+    registry = _tools_for(company)
+    if slug not in registry or not registry[slug][3]:
         abort(404)
+    request.company = company
     pilihan = _pilihan_bulan() if slug == "dw" else {}
     # Keep what the user picked, so a validation error does not reset the form.
     if (request.form.get("bulan") or "").isdigit():
@@ -312,23 +426,32 @@ def run(slug):
         pilihan["tahun_default"] = int(request.form["tahun"])
 
     def _gagal(pesan):
-        return render_template("tool.html", slug=slug, tool=TOOLS[slug],
-                               hint=HINT.get(slug), doc=DOC.get(slug),
+        return render_template("tool.html", slug=slug, tool=registry[slug],
+                               hint=KVB_HINT if company == "kvb" else HINT.get(slug),
+                               doc=KVB_DOC if company == "kvb" else DOC.get(slug),
                                error=pesan, **pilihan), 400
 
     uploads = [u for u in request.files.getlist("file") if u and u.filename]
+    # Large batches arrive in pieces via /upload/chunk and are already on disk by
+    # the time this runs -- Cloudflare caps a single request body at 100 MB, so a
+    # 900 MB run can only reach us that way. Both paths converge on the same list.
+    upload_id = (request.form.get("upload_id") or "").strip()
+    staged = chunked.staged_files(JOBS, upload_id) if upload_id else None
+    if upload_id and not staged:
+        return _gagal("The upload did not finish, or it expired. Please choose the files again.")
+
     if slug == "segregate":
-        if not uploads:
+        if not uploads and not staged:
             return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
-        invalid = [u.filename for u in uploads
-                   if not u.filename.lower().endswith((".csv", ".xlsx", ".xlsm"))]
+        names = [u.filename for u in uploads] + [orig for _p, orig in (staged or [])]
+        invalid = [n for n in names if not n.lower().endswith((".csv", ".xlsx", ".xlsm"))]
         if invalid:
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
                           f"{', '.join(invalid)}")
-        periode = saldo_jw = None
+        periode = saldo_jw = saldo_ch = None
     else:
-        up = uploads[0] if uploads else None
-        if not up or not up.filename.lower().endswith((".xlsx", ".xlsm")):
+        first = uploads[0].filename if uploads else (staged[0][1] if staged else None)
+        if not first or not first.lower().endswith((".xlsx", ".xlsm")):
             return _gagal("Please choose an .xlsx file first.")
         periode, salah = _baca_periode(request.form)
         if salah:
@@ -338,24 +461,49 @@ def run(slug):
         if saldo_jw and not SALDO_POLA.match(saldo_jw):
             return _gagal("The opening balance must be a number, for example 377233.36 "
                           "or 377,233.36. Leave it empty to start from zero.")
+        saldo_ch = (request.form.get("saldo_channel") or "").strip()
+        pilihan["saldo_ch_default"] = saldo_ch
+        if saldo_ch and not any(c.isdigit() for c in saldo_ch):
+            return _gagal("The channel opening balances do not contain a single number. "
+                          "Paste three columns: Payment Channel, Currency, Balance.")
 
     job = JOBS / uuid.uuid4().hex
     job.mkdir()
     _sweep_old_jobs()
     sources = []
-    for index, upload in enumerate(uploads, start=1):
-        safe = secure_filename(upload.filename) or f"upload-{index}"
+    nama_asli = []
+
+    def _tujuan(original, urutan):
+        """Pick a collision-free name inside the job directory."""
+        safe = secure_filename(original) or f"upload-{urutan}"
         if not Path(safe).suffix:
-            safe += Path(upload.filename).suffix.lower()
-        src = job / safe
-        suffix = 2
-        while src.exists():
-            src = job / f"{Path(safe).stem}-{suffix}{Path(safe).suffix}"
-            suffix += 1
-        upload.save(src)
-        sources.append(src)
+            safe += Path(original).suffix.lower()
+        target = job / safe
+        n = 2
+        while target.exists():
+            target = job / f"{Path(safe).stem}-{n}{Path(safe).suffix}"
+            n += 1
+        return target
+
+    urutan = 0
+    for upload in uploads:
+        urutan += 1
+        target = _tujuan(upload.filename, urutan)
+        upload.save(target)
+        sources.append(target)
+        nama_asli.append(upload.filename)
+    for path, original in (staged or []):
+        urutan += 1
+        target = _tujuan(original, urutan)
+        # Rename rather than copy: the staged file can be hundreds of MB and is
+        # on the same filesystem, so this is instant and needs no extra disk.
+        os.replace(path, target)
+        sources.append(target)
+        nama_asli.append(original)
+    if staged:
+        chunked.discard(JOBS, upload_id)
     src = sources[0]
-    dst = src.with_name(f"{src.stem}-hasil.xlsx") if slug == "dw" else job / "hasil.xlsx"
+    dst = src.with_name(f"{src.stem}-hasil.xlsx") if slug == "dw" else job / "hasil.zip"
 
     # Asynchronous on purpose. A 38 MB workbook takes several minutes, and any
     # proxy in front of this app (Cloudflare caps at 100s) would kill a request
@@ -366,24 +514,52 @@ def run(slug):
     # The month goes in the download name on purpose: two runs of the same
     # upload for different months would otherwise be indistinguishable on disk.
     if slug == "dw":
-        download_name = f"{Path(uploads[0].filename).stem} - {_label_periode(periode)}-hasil.xlsx"
+        download_name = f"{Path(nama_asli[0]).stem} - {_label_periode(periode)}-hasil.xlsx"
     else:
-        stems = [Path(upload.filename).stem for upload in uploads]
+        stems = [Path(n).stem for n in nama_asli]
         label = " - ".join(stems) if len(stems) <= 3 else f"{len(stems)} files"
-        download_name = f"{label}-hasil.xlsx"
+        download_name = f"{label}-hasil.zip"
     _write_state(job_id, state="running", name=download_name,
                  started=time.time(), error=None, log=None, path=None, slug=slug,
-                 periode=periode, saldo_jw=saldo_jw or None)
+                 company=company,
+                 owner_pid=os.getpid(),
+                 periode=periode, saldo_jw=saldo_jw or None,
+                 saldo_ch_baris=(len([x for x in saldo_ch.splitlines() if x.strip()])
+                                 if saldo_ch else None))
     threading.Thread(target=_process_job,
-                     args=(job_id, slug, job, sources if slug == "segregate" else src,
-                           dst, periode, saldo_jw),
+                     args=(job_id, company, slug, job, sources if slug == "segregate" else src,
+                           dst, periode, saldo_jw, saldo_ch),
                      daemon=True).start()
-    return redirect(url_for("job_status", job_id=job_id))
+    endpoint = "kvb_job_status" if company == "kvb" else "job_status"
+    return redirect(url_for(endpoint, job_id=job_id))
 
 
-def _process_job(job_id, slug, job, src, dst, periode=None, saldo_jw=None):
+@app.post("/kvb/tool/<slug>")
+def kvb_run(slug):
+    return run(slug, "kvb")
+
+
+def _cleanup_completed_job(job, result):
+    """Delete source/intermediate data while retaining the downloadable result."""
+    result = result.resolve()
+    for entry in job.iterdir():
+        if entry.resolve() == result:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry, ignore_errors=True)
+        else:
+            entry.unlink(missing_ok=True)
+
+
+def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None, saldo_ch=None):
     """Run the pipeline in the background and record the outcome."""
-    langkah = TOOLS[slug][2]
+    # Tabel saldo channel yang ditempel disimpan sebagai file di folder job -- ikut
+    # terhapus bersama job-nya, jadi tidak ada sisa data keuangan yang menetap.
+    f_ch = None
+    if saldo_ch:
+        f_ch = job / "saldo-channel.txt"
+        f_ch.write_text(saldo_ch, encoding="utf-8")
+    langkah = _tools_for(company)[slug][2]
     if isinstance(langkah, str):
         langkah = (langkah,)
     log = []
@@ -400,6 +576,9 @@ def _process_job(job_id, slug, job, src, dst, periode=None, saldo_jw=None):
             flag_saldo = SALDO_ARG.get(script)
             if saldo_jw and flag_saldo:
                 perintah += [flag_saldo, saldo_jw]
+            flag_ch = CHANNEL_ARG.get(script)
+            if f_ch and flag_ch:
+                perintah += [flag_ch, str(f_ch)]
             r = subprocess.run(perintah, capture_output=True,
                                text=True, cwd=BASE)
             log.append(f"$ {script}\n{r.stdout}{r.stderr}".rstrip())
@@ -411,6 +590,7 @@ def _process_job(job_id, slug, job, src, dst, periode=None, saldo_jw=None):
                 shutil.rmtree(job, ignore_errors=True)
                 return
             masuk = keluar
+        _cleanup_completed_job(job, dst)
         _write_state(job_id, state="done", path=str(dst),
                      log="\n\n".join(log).strip())
     except Exception as exc:                       # keep the worker from dying silently
@@ -419,36 +599,47 @@ def _process_job(job_id, slug, job, src, dst, periode=None, saldo_jw=None):
         shutil.rmtree(job, ignore_errors=True)
 
 
+@app.get("/kvb/job/<job_id>", endpoint="kvb_job_status")
 @app.get("/job/<job_id>")
 def job_status(job_id):
     info = _read_state(job_id)
     if not info:
         abort(404)
+    company = info.get("company", "dpm")
+    _require_company(company)
+    request.company = company
+    registry = _tools_for(company)
     slug = info["slug"]
     if info["state"] == "failed":
         # Keep the directory: a refresh on the error page must still show the
         # error, not a bare 404. The sweeper removes it later.
         pilihan = _pilihan_bulan() if slug == "dw" else {}
-        return render_template("tool.html", slug=slug, tool=TOOLS[slug],
-                               hint=HINT.get(slug), doc=DOC.get(slug),
+        return render_template("tool.html", slug=slug, tool=registry[slug],
+                               hint=KVB_HINT if company == "kvb" else HINT.get(slug),
+                               doc=KVB_DOC if company == "kvb" else DOC.get(slug),
                                error=info["error"],
                                log=info["log"] or "Failed with no message.",
                                **pilihan), 422
     elapsed = int(time.time() - info["started"])
     return render_template("job.html", job_id=job_id, info=info, elapsed=elapsed,
-                           tool=TOOLS[slug])
+                           tool=registry[slug])
 
 
+@app.get("/kvb/job/<job_id>/download", endpoint="kvb_job_download")
 @app.get("/job/<job_id>/download")
 def job_download(job_id):
     info = _read_state(job_id)
     if not info:
         abort(404)
+    company = info.get("company", "dpm")
+    _require_company(company)
+    request.company = company
+    registry = _tools_for(company)
     if info["state"] == "collected":
         # Already downloaded and wiped. Say so plainly instead of a bare 404 --
         # a second click or a browser retry lands here and must not look broken.
         return render_template("job.html", job_id=job_id, info=info, elapsed=0,
-                               tool=TOOLS[info["slug"]]), 410
+                               tool=registry[info["slug"]]), 410
     if info["state"] != "done" or not info["path"]:
         abort(404)
     job = _job_dir(job_id)
@@ -460,24 +651,42 @@ def job_download(job_id):
         latest = _read_state(job_id)
         if latest and latest["state"] == "collected":
             return render_template("job.html", job_id=job_id, info=latest, elapsed=0,
-                                   tool=TOOLS[latest["slug"]]), 410
+                                   tool=registry[latest["slug"]]), 410
         return "Download already in progress.", 409
 
-    # Results can be 50 MB+, so nothing is kept on disk after delivery. Read into
-    # memory first, then delete the claimed directory and mark the job collected.
-    try:
-        data = (claimed / path.relative_to(job)).read_bytes()
-    except OSError:
+    result = claimed / path.relative_to(job)
+    if not result.is_file():
         shutil.rmtree(claimed, ignore_errors=True)
         return "Download is no longer available.", 410
-    shutil.rmtree(claimed, ignore_errors=True)
     _write_state(job_id, state="collected", path=None, collected=time.time())
-    return send_file(io.BytesIO(data), as_attachment=True,
-                     download_name=info["name"],
-                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    mimetype = ("application/zip" if info["slug"] == "segregate" else
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    response = send_file(result, as_attachment=True,
+                         download_name=info["name"], mimetype=mimetype)
+    stream = response.response
+
+    def cleanup_stream():
+        try:
+            yield from stream
+        finally:
+            close = getattr(stream, "close", None)
+            if close:
+                close()
+            shutil.rmtree(claimed, ignore_errors=True)
+
+    response.response = cleanup_stream()
+    return response
 
 
-def _sweep_old_jobs(max_age_hours=6):
+def _pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _sweep_old_jobs(max_age_hours=1):
     """Remove stale job directories and their state markers.
 
     Downloaded jobs delete themselves immediately; this only catches jobs that
@@ -487,6 +696,13 @@ def _sweep_old_jobs(max_age_hours=6):
     cutoff = time.time() - max_age_hours * 3600
     for entry in JOBS.iterdir():
         try:
+            if entry.name == "staging":
+                continue
+            job_id = entry.name if entry.is_dir() else entry.stem
+            info = _read_state(job_id)
+            if (info and info.get("state") == "running" and
+                    _pid_alive(info.get("owner_pid"))):
+                continue
             if entry.stat().st_mtime >= cutoff:
                 continue
             if entry.is_dir():

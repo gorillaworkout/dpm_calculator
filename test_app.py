@@ -5,23 +5,38 @@ thread, lalu /job/<id>/download. Jadi tes ini POST, ambil job id dari header
 Location, tunggu state 'done'/'failed', baru unduh.
 """
 import io
+import os
 import shutil
+import tempfile
 import time
+import zipfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 from openpyxl import load_workbook
 
+# Every route is behind Basic Auth. Use a throwaway user database and send the
+# credentials on every request, so this file keeps testing the tools themselves.
+TEST_ROOT = Path(tempfile.mkdtemp())
+os.environ.setdefault("DW_AUTH_DB", str(TEST_ROOT / "test-users.db"))
+os.environ.setdefault("DW_JOB_DIR", str(TEST_ROOT / "jobs"))
+os.environ.setdefault("DW_ADMIN_USER", "tester")
+os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+
 import app as A
 from app import JOBS, TOOLS, app
 
-assert app.config["MAX_CONTENT_LENGTH"] == 200 * 1024 * 1024
+assert app.config["MAX_CONTENT_LENGTH"] == 1024 * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 c = app.test_client()
+c.environ_base["HTTP_AUTHORIZATION"] = "Basic " + __import__("base64").b64encode(
+    b"tester:tester-password-1").decode()
 HERE = Path(__file__).parent
 DEALS_FIXTURE = Path(
     "/Users/bayudarmawan/Documents/Dupoin/zern/"
     "31 Jul_Deals History 2026_08_07 12_07_27 (1).csv"
 )
+EQUITY_FIXTURE = Path("/Users/bayudarmawan/Documents/Dupoin/zern/Client Equity - FX.xlsx")
 
 # Setiap upload WAJIB menyertakan bulan laporan (28 Aug 2026 -> 31 Aug 2026).
 BULAN = {"bulan": "6", "tahun": "2026"}
@@ -63,13 +78,47 @@ assert b"multiple" not in halaman.data
 
 halaman_segregate = c.get("/tool/segregate")
 assert halaman_segregate.status_code == 200
-assert b'name="file"' in halaman_segregate.data
+class FilePickerParser(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.pickers = []
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "input" and a.get("type") == "file": self.pickers.append(a)
+file_picker_parser = FilePickerParser()
+file_picker_parser.feed(halaman_segregate.data.decode())
+assert [p.get("id") for p in file_picker_parser.pickers] == ["deals-file", "equity-file"], \
+    "Deals History and Client Equity FX need separate file pickers"
+assert "multiple" in file_picker_parser.pickers[0]
+assert "multiple" not in file_picker_parser.pickers[1]
+assert b'id="deals-drop"' in halaman_segregate.data
+assert b'id="equity-drop"' in halaman_segregate.data
+assert b"Drop Deals History files here" in halaman_segregate.data
+assert b"Drop Client Equity FX here" in halaman_segregate.data
+assert b"var CHUNK = 10 * 1024 * 1024" in halaman_segregate.data
+assert b"var DIRECT = 0" in halaman_segregate.data
+assert b"DataTransfer" in halaman_segregate.data
+assert halaman_segregate.data.count(b'class="drop-files"') == 2
+assert b'className = "file-remove"' in halaman_segregate.data
+assert b"button.textContent = 'Remove'" in halaman_segregate.data
+assert b"unique(selected.concat(incoming))" in halaman_segregate.data
+assert b"selected.splice(index, 1)" in halaman_segregate.data
+assert b"input.files = transfer.files" in halaman_segregate.data
+assert b'id="upload-progress"' in halaman_segregate.data
+assert b'id="upload-progress-bar"' in halaman_segregate.data
+assert b'id="upload-progress-title"' in halaman_segregate.data
+assert b'id="upload-progress-detail"' in halaman_segregate.data
+assert b"function updateProgress" in halaman_segregate.data
+assert b"function uploadError" in halaman_segregate.data
+assert b"File ' + (fileIndex + 1) + ' of ' + files.length" in halaman_segregate.data
+assert b"Retry ' + attempt + ' of 3" in halaman_segregate.data
+assert b"MB uploaded" in halaman_segregate.data
+assert b"Check your internet, VPN/WARP, or try another network" in halaman_segregate.data
 assert b"multiple" in halaman_segregate.data
 assert b'name="bulan"' not in halaman_segregate.data
 assert b'name="saldo_jw"' not in halaman_segregate.data
 assert b"Download the template" not in halaman_segregate.data
-assert b"200 MB total upload request limit" in halaman_segregate.data
-assert b"split larger batches" in halaman_segregate.data
+assert b"5 GB total upload limit" in halaman_segregate.data
+assert b"in pieces automatically" in halaman_segregate.data
 
 missing = c.post("/tool/segregate", data={}, content_type="multipart/form-data")
 assert missing.status_code == 400
@@ -102,7 +151,7 @@ unicode_job_id = None
 real_thread = A.threading.Thread
 class CapturingThread:
     def __init__(self, target, args, **kwargs):
-        captured["sources"] = args[3]
+        captured["sources"] = args[4]
     def start(self):
         pass
 A.threading.Thread = CapturingThread
@@ -121,17 +170,36 @@ finally:
 assert DEALS_FIXTURE.is_file(), f"real Deals History fixture missing: {DEALS_FIXTURE}"
 job_id, info = kirim_segregate([(DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name)])
 assert info["state"] == "done", info
-assert info["name"].endswith("-hasil.xlsx"), info["name"]
+assert info["name"].endswith("-hasil.zip"), info["name"]
 r = c.get(f"/job/{job_id}/download")
 assert r.status_code == 200
-assert r.mimetype == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-wb = load_workbook(io.BytesIO(r.data), read_only=True, data_only=True)
-try:
-    assert wb.sheetnames == ["Daily", "Monthly Summary", "Verifikasi"]
-    assert wb["Daily"].max_row - 1 == 9418
-    assert wb["Monthly Summary"].max_row - 1 == 9418
-finally:
-    wb.close()
+assert r.mimetype == "application/zip"
+with zipfile.ZipFile(io.BytesIO(r.data)) as archive:
+    assert archive.namelist() == ["Deals - Daily.xlsx", "Deals - Monthly Summary.xlsx"]
+    wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True, data_only=True)
+    try:
+        assert wb.sheetnames == ["Daily", "Verifikasi"]
+        assert wb["Daily"].max_row - 1 == 9418
+    finally:
+        wb.close()
+
+assert EQUITY_FIXTURE.is_file(), f"Client Equity FX fixture missing: {EQUITY_FIXTURE}"
+job_id, info = kirim_segregate([
+    (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
+    (EQUITY_FIXTURE.open("rb"), EQUITY_FIXTURE.name),
+])
+assert info["state"] == "done", info
+assert "FX conversion: True" in (info["log"] or "") or "pakai_fx: True" in (info["log"] or "")
+fx_response = c.get(f"/job/{job_id}/download")
+assert fx_response.status_code == 200 and fx_response.mimetype == "application/zip"
+with zipfile.ZipFile(io.BytesIO(fx_response.data)) as archive:
+    wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True, data_only=True)
+    try:
+        headers = [cell.value for cell in wb["Daily"][1]]
+        assert headers[-4:] == ["Commission (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
+        assert wb["Daily"].max_row - 1 == 9418
+    finally:
+        wb.close()
 
 job_id, info = kirim_segregate([
     (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
@@ -178,7 +246,11 @@ hasil_jun = len(r.data)
 # --- saldo pembuka J Wallet yang diketik di halaman upload -------------------
 halaman = c.get("/tool/dw")
 assert b'name="saldo_jw"' in halaman.data, "field saldo pembuka hilang dari halaman"
-assert b'id="prevlbl"' in halaman.data, "label bulan sebelumnya hilang"
+assert b'class="prevlbl"' in halaman.data, "label bulan sebelumnya hilang"
+assert b'name="saldo_channel"' in halaman.data, "textarea saldo channel hilang"
+assert b"out.innerHTML" not in halaman.data, "upload error DOM XSS"
+assert b"function sendChunk" in halaman.data and b"attempt < 3" in halaman.data, \
+    "chunk upload must retry transient failures"
 
 r = c.post("/tool/dw", data={"file": (src.open("rb"), src.name),
                              "saldo_jw": "bukan angka!!", **BULAN})
@@ -211,7 +283,13 @@ assert "2026-06" in (info["log"] or ""), (info["log"] or "")[-800:]
 for slug in TOOLS:
     assert c.get(f"/tool/{slug}").status_code == 200, slug
 
-sisa = [p for p in JOBS.iterdir() if p.is_dir()]
+# 'staging' holds in-flight chunked uploads and is permanent; it must however be
+# empty once every run has finished, or a large upload was left behind on disk.
+sisa = [p for p in JOBS.iterdir() if p.is_dir() and p.name != "staging"]
 assert not sisa, f"job dir bocor: {sisa}"
+staging = JOBS / "staging"
+if staging.is_dir():
+    tertinggal = list(staging.iterdir())
+    assert not tertinggal, f"staging bocor: {tertinggal}"
 
 print("OK", len(TOOLS), "menu,", f"{hasil_jun:,}", "bytes hasil Jun 2026")

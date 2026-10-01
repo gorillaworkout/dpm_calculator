@@ -52,6 +52,10 @@ nav a.on .dot{background:var(--accent); box-shadow:0 0 0 3px rgba(79,124,255,.20
 .sidefoot{margin-top:auto; font-size:12px; color:var(--mute); padding:0 10px}
 .sidefoot a{color:#7aa2ff; text-decoration:none}
 .sidefoot a:hover{text-decoration:underline}
+.companies{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:18px}
+.companies a,.companies span{padding:8px 10px;border:1px solid var(--line);border-radius:9px;text-align:center;text-decoration:none;color:var(--mute);font-size:12px;font-weight:700}
+.companies a.on{color:var(--ink);border-color:var(--accent);background:rgba(79,124,255,.16)}
+.companies span[aria-disabled=true]{opacity:.38;cursor:not-allowed}
 
 /* ---------- panel kanan ---------- */
 main{min-width:0; padding:44px 40px 72px; position:relative}
@@ -86,6 +90,13 @@ a.card:focus-visible,nav a:focus-visible{outline:2px solid var(--accent); outlin
 .card.soon{opacity:.72}
 label{display:block; margin:18px 0 7px; font-size:12.5px; font-weight:600; letter-spacing:.05em; text-transform:uppercase; color:var(--mute)}
 label .opt{text-transform:none; letter-spacing:0; font-weight:400}
+textarea{
+  width:100%; padding:12px 13px; color:var(--ink); font:inherit;
+  font-family:ui-monospace,"SF Mono",Menlo,monospace; font-size:12.5px; line-height:1.5;
+  background:#0c1120; border:1px solid var(--line); border-radius:10px; resize:vertical;
+}
+textarea:focus-visible{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
+textarea::placeholder{color:var(--mute); opacity:.55}
 input[type=file],input[type=text],select{
   width:100%; padding:12px 13px; color:var(--ink); font:inherit; font-size:14px;
   background:#0c1120; border:1px solid var(--line); border-radius:10px;
@@ -152,19 +163,46 @@ pre{
   button{padding:16px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.dropzone{border:1.5px dashed var(--line);border-radius:12px;padding:22px;text-align:center;cursor:pointer;margin:8px 0 18px;color:var(--mute);transition:.15s}
+.dropzone:hover,.dropzone:focus,.dropzone.over{border-color:var(--accent);background:rgba(46,181,196,.08);outline:none}
+.dropzone strong{color:var(--ink)}
+.dropzone input[type=file]{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none}
+.drop-files{list-style:none;padding:0;margin:10px 0 0;color:var(--ink);font-size:12px;text-align:left}
+.drop-files:empty{display:none}
+.drop-files li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;margin-top:6px;border:1px solid var(--line);border-radius:8px;background:rgba(255,255,255,.025);overflow-wrap:anywhere}
+.drop-files li span{min-width:0}
+.file-remove{width:auto;padding:6px 9px;flex:none;font-size:11px;background:transparent;color:#ffb4b4;border:1px solid rgba(255,180,180,.35)}
+.file-remove:hover,.file-remove:focus{background:rgba(255,100,100,.12);border-color:#ffb4b4}
+.upload-progress{margin-top:16px;padding:14px;border:1px solid var(--line);border-radius:10px;background:rgba(255,255,255,.025)}
+.upload-progress[hidden]{display:none}
+.upload-progress-head{display:flex;justify-content:space-between;gap:12px;color:var(--ink)}
+.upload-progress-track{height:9px;margin:10px 0;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}
+#upload-progress-bar{height:100%;width:0;background:var(--accent);transition:width .2s ease}
+.upload-progress-detail{font-size:12px;color:var(--mute);line-height:1.5;overflow-wrap:anywhere}
+.upload-progress.retrying #upload-progress-bar{background:#f0b44c}
+.upload-progress.failed{border-color:rgba(255,100,100,.5)}
+.upload-progress.failed #upload-progress-bar{background:#ff6b6b}
+.upload-progress.failed .upload-progress-detail{color:#ffb4b4}
+.upload-progress.processing #upload-progress-bar{background:#72d6a0}
 </style>
 </head>
 <body>
 <aside class="side">
-  <a class="logo" href="/"><span class="mark">DPM</span>
-    <span class="brand">Dupoin DPM Tools<small>DPM Malaysia</small></span></a>
+  <a class="logo" href="{{ company_urls[company] }}"><span class="mark">{{ company|upper }}</span>
+    <span class="brand">{{ 'Dupoin DPM Tools' if company == 'dpm' else 'KVB Tools' }}<small>{{ 'DPM Malaysia' if company == 'dpm' else 'KVB' }}</small></span></a>
   <div class="navwrap">
+    <div class="navlabel">Company</div>
+    <div class="companies">
+      {% if can_dpm %}<a data-company="dpm" href="/" class="{{ 'on' if company == 'dpm' }}">DPM</a>{% else %}<span data-company="dpm" aria-disabled="true" title="Your account does not have DPM access">DPM</span>{% endif %}
+      {% if can_kvb %}<a data-company="kvb" href="/kvb" class="{{ 'on' if company == 'kvb' }}">KVB</a>{% else %}<span data-company="kvb" aria-disabled="true" title="Your account does not have KVB access">KVB</span>{% endif %}
+    </div>
     <div class="navlabel">Tools</div>
     <nav>
       {% for slug, (nama, _d, _s, siap) in tools.items() %}
         {% if siap %}
-          <a href="/tool/{{ slug }}" class="{{ 'on' if request.path == '/tool/' + slug }}"
-             {{ 'aria-current=page' if request.path == '/tool/' + slug }}><i class="dot"></i>{{ nama }}</a>
+          {% set tool_path = ('/kvb/tool/' if company == 'kvb' else '/tool/') + slug %}
+          <a href="{{ tool_path }}" class="{{ 'on' if request.path == tool_path }}"
+             {{ 'aria-current=page' if request.path == tool_path }}><i class="dot"></i>{{ nama }}</a>
         {% else %}
           <span title="Not available yet"><i class="dot"></i>{{ nama }}</span>
         {% endif %}
@@ -172,7 +210,14 @@ pre{
     </nav>
   </div>
   <div class="sidefoot">Your original file is never modified — the result is always a new file.
-    {% if request.path == '/tool/dw' %}<br><a href="/template">Download Template D&amp;W.xlsx</a>{% endif %}</div>
+    {% if company == 'dpm' and request.path == '/tool/dw' %}<br><a href="/template">Download Template D&amp;W.xlsx</a>{% endif %}
+    {% if request.user is defined and request.user %}
+      <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line)">
+        Signed in as <b style="color:var(--ink)">{{ request.user['username'] }}</b>
+        {% if request.user['is_admin'] %}<br><a href="/admin">Manage users</a>{% endif %}
+        <br><a href="/logout">Sign out</a>
+      </div>
+    {% endif %}</div>
 </aside>
 <main><div class="inner{% block wide %}{% endblock %}">{% block body %}{% endblock %}</div></main>
 </body>

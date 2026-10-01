@@ -5,14 +5,26 @@
 <p class="lede">{{ tool[1] }}</p>
 
 <div class="card">
-  <form method="post" enctype="multipart/form-data"
-        onsubmit="this.b.disabled=true;this.b.textContent='Working…'">
-    <label for="f">{{ "D&W workbook (.xlsx)" if slug == "dw" else "Deals History files (.csv, .xlsx, .xlsm)" }}</label>
-    <input id="f" type="file" name="file"
-           accept="{{ '.xlsx,.xlsm' if slug == 'dw' else '.csv,.xlsx,.xlsm' }}"
-           {{ 'multiple' if slug == 'segregate' }} required>
+  <form id="uploadform" method="post" enctype="multipart/form-data">
+    {% if slug == "segregate" %}
+    <label for="deals-file">Deals History <span class="opt">— one or more files</span></label>
+    <div id="deals-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop Deals History files here</strong><br><span>or click to choose one or more files</span>
+      <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
+    <div id="equity-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
+      <input id="equity-file" type="file" name="file" accept=".xlsx,.xlsm">
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    {% else %}
+    <label for="f">{{ 'KVB Plus workbook' if company == 'kvb' else 'D&W workbook' }} (.xlsx)</label>
+    <input id="f" type="file" name="file" accept=".xlsx,.xlsm" required>
+    {% endif %}
     <p class="hint">{{ hint or "Must contain the transaction sheets plus D&W FEE and Xero." }}
-      {% if slug == "dw" %}Don't have one? <a href="/template">Download the template</a>.{% endif %}</p>
+      {% if company == 'dpm' and slug == "dw" %}Don't have one? <a href="/template">Download the template</a>.{% endif %}</p>
 
     {% if bulan_opsi %}
     <label for="bulan">Report month</label>
@@ -37,7 +49,7 @@
       in section&nbsp;0 of the <code>Missing Data</code> sheet.</p>
 
     <label for="saldo">J Wallet opening balance
-      <span class="opt">— closing balance from <b id="prevlbl">{{ saldo_label }}</b>, optional</span></label>
+      <span class="opt">— closing balance from <b class="prevlbl">{{ saldo_label }}</b>, optional</span></label>
     <input id="saldo" type="text" name="saldo_jw" inputmode="decimal"
            value="{{ saldo_default }}" placeholder="e.g. 377233.36" autocomplete="off">
     <p class="hint">The J Wallet ledger continues from this figure instead of starting at zero.
@@ -45,11 +57,281 @@
       <code>377233.36</code> and <code>377,233.36</code> are accepted.
       Leave it empty if the workbook you upload already contains an
       <code>Opening Balance</code> or <code>J Wallet</code> sheet — those are used
-      automatically. Channel balances are separate and still need those sheets.</p>
+      automatically. For per-channel balances use the box below.</p>
+
+    <label for="saldoch">Payment channel opening balances
+      <span class="opt">— as at end of <b class="prevlbl">{{ saldo_label }}</b>, optional</span></label>
+    <textarea id="saldoch" name="saldo_channel" rows="6" spellcheck="false"
+              placeholder="Paste three columns straight from Excel:&#10;77Pay&#9;VND&#9;1,058,257.96&#10;PA&#9;ZAR&#9;1,164.20&#10;&#9;BRL&#9;5,399.16">{{ saldo_ch_default }}</textarea>
+    <p class="hint">Copy the <b>Payment Channel / Currency / Balance</b> columns from your
+      balance sheet and paste them here. Merged channel cells are fine — a blank channel
+      keeps the one above it, exactly as Excel pastes it. <code>(4,976.10)</code> is read
+      as negative and <code>-</code> as zero.
+      <br>When this is filled in, <code>Payment Channel Balance</code> shows
+      <b>every channel on every day of the month</b> and carries the balance forward on
+      days with no movement — so the daily movement can be checked against other
+      departments.</p>
     {% endif %}
 
     <button name="b" type="submit">Run &amp; download result</button>
+    <div id="upload-progress" class="upload-progress" hidden aria-live="polite">
+      <div class="upload-progress-head">
+        <strong id="upload-progress-title">Preparing upload…</strong>
+        <span id="upload-progress-percent">0%</span>
+      </div>
+      <div class="upload-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div id="upload-progress-bar"></div>
+      </div>
+      <div id="upload-progress-detail" class="upload-progress-detail">Checking files…</div>
+    </div>
   </form>
+
+  <script>
+  // Cloudflare refuses any single request body over 100 MB, so large batches are
+  // sliced here and sent one piece at a time. Each request stays small; the total
+  // is limited only by the 5 GB server cap. Small uploads take the plain path.
+  (function () {
+    var CHUNK = 10 * 1024 * 1024;        // smaller requests survive unstable VPN/WARP links
+    var DIRECT = {{ '0' if slug == 'segregate' else '80 * 1024 * 1024' }};
+    // Deal Segregator always uses chunks, even for small files, so progress and
+    // retry/error details are accurate from the first byte.
+    var form = document.getElementById('uploadform'),
+        inputs = Array.prototype.slice.call(form.querySelectorAll('input[type="file"][name="file"]')),
+        progress = document.getElementById('upload-progress'),
+        progressTitle = document.getElementById('upload-progress-title'),
+        progressDetail = document.getElementById('upload-progress-detail'),
+        progressPercent = document.getElementById('upload-progress-percent'),
+        progressBar = document.getElementById('upload-progress-bar'),
+        progressTrack = progress.querySelector('[role="progressbar"]');
+    if (!form || !inputs.length || !window.fetch) return; // no JS: the plain form still works
+
+    function mb(n) { return (n / 1048576).toFixed(0); }
+
+    function setupDrop(zoneId, input, single) {
+      var zone = document.getElementById(zoneId);
+      if (!zone) return;
+      var list = zone.querySelector('.drop-files');
+      var selected = Array.prototype.slice.call(input.files || []);
+      function key(file) { return [file.name, file.size, file.lastModified].join(':'); }
+      function unique(files) {
+        var seen = {};
+        return files.filter(function (file) {
+          var id = key(file);
+          if (seen[id]) return false;
+          seen[id] = true;
+          return true;
+        });
+      }
+      function sync() {
+        var transfer = new DataTransfer();
+        selected.forEach(function (file) { transfer.items.add(file); });
+        input.files = transfer.files;
+      }
+      function show() {
+        list.textContent = '';
+        selected.forEach(function (file, index) {
+          var item = document.createElement('li');
+          var name = document.createElement('span');
+          var button = document.createElement('button');
+          name.textContent = file.name + ' (' + mb(file.size) + ' MB)';
+          button.type = 'button';
+          button.className = "file-remove";
+          button.textContent = 'Remove';
+          button.setAttribute('aria-label', 'Remove ' + file.name);
+          button.addEventListener('click', function (event) {
+            event.stopPropagation();
+            selected.splice(index, 1);
+            sync();
+            show();
+          });
+          item.appendChild(name);
+          item.appendChild(button);
+          list.appendChild(item);
+        });
+      }
+      function add(incoming) {
+        selected = single ? incoming.slice(0, 1) : unique(selected.concat(incoming));
+        sync();
+        show();
+      }
+      zone.addEventListener('click', function (e) { if (e.target !== input) input.click(); });
+      zone.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
+      });
+      ['dragenter', 'dragover'].forEach(function (name) {
+        zone.addEventListener(name, function (e) { e.preventDefault(); zone.classList.add('over'); });
+      });
+      ['dragleave', 'drop'].forEach(function (name) {
+        zone.addEventListener(name, function (e) { e.preventDefault(); zone.classList.remove('over'); });
+      });
+      zone.addEventListener('drop', function (e) {
+        add(Array.prototype.slice.call(e.dataTransfer.files || []));
+      });
+      input.addEventListener('change', function () {
+        add(Array.prototype.slice.call(input.files || []));
+      });
+      show();
+    }
+    setupDrop('deals-drop', document.getElementById('deals-file'), false);
+    setupDrop('equity-drop', document.getElementById('equity-file'), true);
+
+    function elapsed(started) {
+      var seconds = Math.max(0, Math.round((Date.now() - started) / 1000));
+      return seconds < 60 ? seconds + 's elapsed' : Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's elapsed';
+    }
+
+    function updateProgress(title, detail, percent, state) {
+      percent = Math.max(0, Math.min(100, Math.round(percent || 0)));
+      progress.hidden = false;
+      progress.className = 'upload-progress' + (state ? ' ' + state : '');
+      progressTitle.textContent = title;
+      progressDetail.textContent = detail;
+      progressPercent.textContent = percent + '%';
+      progressBar.style.width = percent + '%';
+      progressTrack.setAttribute('aria-valuenow', String(percent));
+    }
+
+    function uploadError(err, context) {
+      var where = context && context.file
+        ? 'Upload stopped at file ' + context.fileIndex + ' of ' + context.fileCount +
+          ' (' + context.file + '), chunk ' + context.chunk + ' of ' + context.chunks + '. '
+        : 'Upload could not start; 0 MB reached the server. ';
+      var reason = err && err.message && err.message !== 'Failed to fetch'
+        ? err.message + ' '
+        : 'The browser lost its connection before the server acknowledged this chunk. ';
+      return where + reason + 'Your selected files are still in the list. Check your internet, VPN/WARP, or try another network, then press Run again.';
+    }
+
+    function sendChunk(fd, attempt, context) {
+      return fetch('/upload/chunk', { method: 'POST', body: fd })
+        .then(function (r) {
+          if (r.ok) return;
+          if ((r.status >= 500 || r.status === 429) && attempt < 3) {
+            updateProgress('Connection interrupted — retrying', context.label + ' · Retry ' + attempt + ' of 3', context.percent, 'retrying');
+            return new Promise(function (resolve) {
+              setTimeout(resolve, 1000 * Math.pow(2, attempt));
+            }).then(function () { return sendChunk(fd, attempt + 1, context); });
+          }
+          return r.json().catch(function () { return {}; }).then(function (e) {
+            var err = new Error(e.error || 'The upload was interrupted.');
+            err.noRetry = true;
+            throw err;
+          });
+        }, function (err) {
+          if (attempt >= 3) throw err;
+          updateProgress('Connection interrupted — retrying', context.label + ' · Retry ' + attempt + ' of 3', context.percent, 'retrying');
+          return new Promise(function (resolve) {
+            setTimeout(resolve, 1000 * Math.pow(2, attempt));
+          }).then(function () { return sendChunk(fd, attempt + 1, context); });
+        });
+    }
+
+    function beginUpload(attempt, total) {
+      var fd = new FormData(); fd.append('bytes', total);
+      return fetch('/upload/begin', { method: 'POST', body: fd }).then(function (r) {
+        if (r.ok) return r.json();
+        if ((r.status >= 500 || r.status === 429) && attempt < 3) {
+          return new Promise(function (resolve) {
+            setTimeout(resolve, 1000 * Math.pow(2, attempt));
+          }).then(function () { return beginUpload(attempt + 1, total); });
+        }
+        return r.json().catch(function () { return {}; }).then(function (e) {
+          throw new Error(e.error || ('Could not start the upload (HTTP ' + r.status + ').'));
+        });
+      }, function (err) {
+        if (attempt >= 3) throw err;
+        return new Promise(function (resolve) {
+          setTimeout(resolve, 1000 * Math.pow(2, attempt));
+        }).then(function () { return beginUpload(attempt + 1, total); });
+      });
+    }
+
+    form.addEventListener('submit', function (ev) {
+      var files = inputs.reduce(function (all, input) {
+        return all.concat(Array.prototype.slice.call(input.files || []));
+      }, []);
+      var total = files.reduce(function (s, f) { return s + f.size; }, 0);
+      if (!files.length || total < DIRECT) {
+        form.b.disabled = true; form.b.textContent = 'Working…';
+        updateProgress('Uploading files…', files.length + ' file(s), ' + mb(total) + ' MB · waiting for server response', 0, 'uploading');
+        return;                                   // ordinary submit, unchanged
+      }
+
+      ev.preventDefault();
+      form.b.disabled = true;
+      form.b.textContent = 'Uploading…';
+
+      var sent = 0;
+      var activeId = null;
+      var started = Date.now();
+      var currentContext = null;
+      updateProgress('Starting upload…', files.length + ' file(s), ' + mb(total) + ' MB total · ' + elapsed(started), 0, 'uploading');
+      beginUpload(1, total)
+        .then(function (start) {
+          var id = activeId = start.id;
+
+          // Sequential on purpose: parallel chunks would race on the append and
+          // the server rejects anything out of order.
+          var chain = Promise.resolve();
+          files.forEach(function (file, fileIndex) {
+            var seq = 0;
+            var chunks = Math.ceil(file.size / CHUNK);
+            for (var off = 0; off < file.size; off += CHUNK) {
+              (function (offset, mySeq) {
+                chain = chain.then(function () {
+                  var label = 'File ' + (fileIndex + 1) + ' of ' + files.length + ': ' + file.name +
+                    ' · chunk ' + (mySeq + 1) + ' of ' + chunks;
+                  currentContext = {file: file.name, fileIndex: fileIndex + 1, fileCount: files.length,
+                    chunk: mySeq + 1, chunks: chunks, label: label, percent: total ? sent / total * 100 : 0};
+                  updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),
+                    currentContext.percent, 'uploading');
+                  var fd = new FormData();
+                  fd.append('id', id);
+                  fd.append('name', file.name);
+                  fd.append('index', fileIndex);
+                  fd.append('seq', mySeq);
+                  fd.append('chunk', file.slice(offset, offset + CHUNK));
+                  return sendChunk(fd, 1, currentContext)
+                    .then(function () {
+                      sent += Math.min(CHUNK, file.size - offset);
+                      updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),
+                        total ? sent / total * 100 : 100, 'uploading');
+                    });
+                });
+              })(off, seq++);
+            }
+          });
+
+          return chain.then(function () {
+            updateProgress('Upload complete — processing…', mb(total) + ' MB received by server · ' + elapsed(started), 100, 'processing');
+            form.b.textContent = 'Working…';
+            // Hand the staged files to the normal pipeline. The file input is
+            // cleared first so the browser does not resend the bytes.
+            inputs.forEach(function (input) {
+              input.value = '';
+              input.removeAttribute('required');
+            });
+            var hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = 'upload_id';
+            hidden.value = id;
+            form.appendChild(hidden);
+            activeId = null; // processing route now owns and removes the staged files
+            form.submit();
+          });
+        })
+        .catch(function (err) {
+          if (activeId) {
+            var cleanup = new FormData(); cleanup.append('id', activeId);
+            fetch('/upload/discard', { method: 'POST', body: cleanup, keepalive: true });
+          }
+          updateProgress('Upload failed', uploadError(err, currentContext), currentContext ? currentContext.percent : 0, 'failed');
+          form.b.disabled = false;
+          form.b.textContent = 'Run & download result';
+        });
+    });
+  })();
+  </script>
 
   {% if slug == "dw" %}<script>
     // Label saldo pembuka mengikuti bulan SEBELUM bulan laporan yang dipilih.
@@ -57,12 +339,12 @@
       var M = {{ nama_bulan|tojson }};
       var b = document.getElementById('bulan'),
           t = document.getElementById('tahun'),
-          l = document.getElementById('prevlbl');
-      if (!b || !t || !l) return;
+          l = document.querySelectorAll('.prevlbl');
+      if (!b || !t || !l.length) return;
       function upd() {
         var m = parseInt(b.value, 10), y = parseInt(t.value, 10);
         if (m === 1) { m = 12; y -= 1; } else { m -= 1; }
-        l.textContent = M[m - 1] + ' ' + y;
+        l.forEach(function (e) { e.textContent = M[m - 1] + ' ' + y; });
       }
       b.addEventListener('change', upd);
       t.addEventListener('change', upd);

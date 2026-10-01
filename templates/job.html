@@ -10,7 +10,7 @@ Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
   <p style="margin:0 0 14px; color:var(--mute); font-size:13.5px">Results are deleted the
     moment they reach you, so nothing large is left sitting on the server. If you need the
     file again, run the workbook through once more.</p>
-  <a class="dl" href="{{ url_for('tool', slug=info.slug) }}">Start a new job</a>
+  <a class="dl" href="{{ url_for('kvb_tool', slug=info.slug) if company == 'kvb' else url_for('tool', slug=info.slug) }}">Start a new job</a>
 </div>
 
 {% elif info.state == 'done' %}
@@ -26,7 +26,7 @@ shows the file in its download list.</p>
     <p style="margin:0; color:var(--mute); font-size:13.5px" id="msg">Starting download&hellip;</p>
   </div>
   <p class="hint" style="margin-top:16px">Download did not start?
-    <a href="/job/{{ job_id }}/download" id="manual">Click here</a>. The file is removed
+    <a href="{{ url_for('kvb_job_download', job_id=job_id) if company == 'kvb' else url_for('job_download', job_id=job_id) }}" id="manual">Click here</a>. The file is removed
     from the server once delivered, so save it before closing this tab.</p>
 </div>
 
@@ -42,7 +42,7 @@ shows the file in its download list.</p>
 <script>
   // Navigating to the download URL keeps this page intact (the response is an
   // attachment), so the user still sees the confirmation text afterwards.
-  window.location.href = '/job/{{ job_id }}/download';
+  window.location.href = {{ (url_for('kvb_job_download', job_id=job_id) if company == 'kvb' else url_for('job_download', job_id=job_id))|tojson }};
   setTimeout(function () {
     document.getElementById('msg').textContent =
       'Download started — check your Downloads folder.';
@@ -52,8 +52,8 @@ shows the file in its download list.</p>
 {% else %}
 <h1>Processing&hellip;</h1>
 {% if info.slug == 'segregate' %}
-<p class="lede">Your Deals History files are being combined, filtered, and deduplicated on
-the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
+<p class="lede">Your Deals History and optional Client Equity FX files are being classified,
+combined, converted, and verified on the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
 can safely return to this same job URL later.</p>
 {% else %}
 <p class="lede">Your workbook is being calculated on the server. Large files

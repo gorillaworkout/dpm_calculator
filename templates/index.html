@@ -1,6 +1,13 @@
 {% extends "base.html" %}
 {% block wide %} wide{% endblock %}
 {% block body %}
+{% if company == 'kvb' %}
+<h1><span>KVB</span> Tools</h1>
+<p class="lede">Upload one KVB Plus workbook. The app translates the KVB fields, prepares the clean D&amp;W template, then calculates the finished monthly report. Your original file is never modified.</p>
+<div class="grid">
+  <a class="card" href="/kvb/tool/dw"><span class="tag">Ready</span><h3>Generate D&amp;W</h3><p>One upload runs KVB preparation, template preparation, and the D&amp;W calculation.</p></a>
+</div>
+{% else %}
 <h1>Dupoin <span>DPM</span> Tools</h1>
 <p class="lede">Two reporting tools for the DPM Malaysia team. Pick the one you need, upload
 your file, and download the finished workbook. Your original files are never modified
@@ -84,4 +91,5 @@ currency.</p>
 
 <p class="lede" style="margin:16px 0 0">Both tools return one workbook, downloaded straight to
 your browser. Nothing is stored on the server after you download it.</p>
+{% endif %}
 {% endblock %}

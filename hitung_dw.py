@@ -112,7 +112,23 @@ DATE_COLUMNS = ("PAID DATE", "COMPLETED DATE", "SETTLEMENT DATE", "APPLY DATE")
 # Karena aturannya "hanya finish", yang kosong ikut dikeluarkan juga.
 # Sheet yang tidak punya kolom Status sama sekali (mis. 'D') tidak terpengaruh.
 HANYA_STATUS_FINISH = True
-STATUS_DIPAKAI = ("FINISH",)
+# 'SUCCESS' ditambahkan 28 Sep 2026: ditemukan di ekspor W yang lebih baru
+# (mis. `July - D&W.xlsx`), Source Name='Rebate Withdrawal' memakai kata
+# 'success' untuk transaksi selesai, BUKAN 'finish' -- padahal Source Name
+# 'Withdrawal' biasa tetap memakai 'finish'. Dibuktikan dari jumlah baris:
+# 90.463 baris 'success' (semuanya Rebate Withdrawal) + 31.996 baris 'finish'
+# (semuanya Withdrawal) = 122.459, PERSIS SAMA dengan total baris 'finish' di
+# `July - D&W_V5.xlsx` (versi yang sudah dinormalisasi tim Malaysia sendiri
+# sebelum dikirim). Jadi 'success' = 'finish', cuma istilah beda untuk jenis
+# transaksi Rebate Withdrawal -- BUKAN status baru yang berarti sesuatu yang
+# lain. Tanpa ini, file yang BELUM dinormalisasi (V5 belum dibuat) kehilangan
+# SEMUA baris Rebate Withdrawal-nya (73% dari baris selesai di W), dianggap
+# "bukan finish" dan dibuang seluruhnya.
+# 'REFUSE' TETAP TIDAK dihitung -- itu keputusan terpisah, terkonfirmasi
+# berkali-kali (28 Aug 2026, lihat [[dpm-dw-status]]) dan tim Malaysia SENDIRI
+# menulis "Blank status is same as Refuse, hence do not include in any
+# calculations." Jangan digabung ke sini tanpa keputusan baru dari user.
+STATUS_DIPAKAI = ("FINISH", "SUCCESS")
 
 # ------------------------------------------------------------- periode laporan
 # Bulan laporan, diisi dari --period YYYY-MM  ->  (tahun, bulan). None = semua
@@ -188,6 +204,93 @@ def baca_angka_saldo(teks):
     except ValueError:
         sys.exit(f"--jwallet-opening bukan angka yang bisa dibaca: {teks!r}")
     return -v if neg else v
+
+
+# Saldo pembuka Payment Channel Balance per (currency, channel), ditempel orang di
+# halaman upload lalu diteruskan lewat --channel-opening <file>. Menang atas sheet
+# 'Payment Channel Balance' / 'Opening Balance' di workbook.
+SALDO_AWAL_CHANNEL = None
+
+
+# Dipakai HANYA untuk mendeteksi "<channel> <currency>" yang menyatu jadi satu
+# sel waktu ditempel (lihat baca_tabel_saldo_channel) -- bukan daftar lengkap
+# semua currency yang pernah muncul di laporan, cukup yang cukup dikenal untuk
+# jadi penanda aman (currency asli tidak pernah punya spasi di dalamnya).
+KODE_CURRENCY_DIKENAL = {
+    "VND", "INR", "JPY", "LAK", "THB", "TRY", "PKR", "EGP", "KES", "KRW",
+    "AED", "BRL", "MXN", "NGN", "ZAR", "PHP", "KHR", "USDT", "USD", "SGD",
+    "USDC", "UZS", "MYR", "LKR",
+}
+
+
+def baca_tabel_saldo_channel(teks):
+    """Tabel tempelan -> {(CURRENCY, kunci_channel): saldo}.
+
+    Bentuk yang diterima (dipisah TAB, koma, titik-koma, atau 2+ spasi):
+
+        Payment Channel   Currency   Balance
+        77Pay             VND        1,058,257.96
+        PA                ZAR        1,164.20
+                          BRL        5,399.16      <- sel channel DIGABUNG di Excel
+                          MXN        26,852.34
+
+    Sel channel yang digabung di Excel jadi KOSONG waktu ditempel, jadi nama channel
+    terakhir DIBAWA TURUN. Angka boleh '1.058.257,96', '(4.976,10)' (kurung = minus),
+    atau '-' (dianggap nol). Baris header dan baris tanpa angka dilewati.
+    """
+    out = {}
+    channel = ""
+    n_baris = 0
+    for baris in str(teks or "").splitlines():
+        b = baris.strip()
+        if not b:
+            continue
+        if "\t" in b:
+            bagian = [x.strip() for x in baris.split("\t")]
+        elif ";" in b:
+            bagian = [x.strip() for x in b.split(";")]
+        elif "," in b and re.search(r",\s*[A-Za-z]", b):
+            bagian = [x.strip() for x in b.split(",", 2)]
+        else:
+            bagian = [x for x in re.split(r"\s{2,}", b) if x.strip()]
+        bagian = [x for x in bagian if x != ""] if len(bagian) > 3 else bagian
+        if len(bagian) >= 3:
+            ch, cur, saldo = bagian[0], bagian[1], bagian[2]
+        elif len(bagian) == 2:
+            ch, cur, saldo = "", bagian[0], bagian[1]
+            # JEBAKAN 17 Sep 2026: baris 2-kolom di atas diasumsikan (currency,
+            # saldo) dengan channel DIBAWA TURUN dari baris sebelumnya -- itu
+            # untuk kasus sel Payment Channel yang digabung/kosong. Tapi kalau
+            # 'cur' ternyata "<channel> <currency>" yang menyatu (mis. tim
+            # menempel "Novolink VND" jadi satu sel karena sel Currency-nya
+            # kosong), currency ASLI tidak pernah mengandung spasi -- jadi ini
+            # salah kaprah, dan channel ikut salah (kebawa dari baris yang
+            # tidak berhubungan). Nyata terjadi 17 Sep 2026: "Novolink VND"
+            # jadi currency 'NOVOLINK VND' + channel 'BECKPAY' (baris terakhir
+            # yang channel-nya valid, padahal tidak berhubungan sama sekali).
+            # Deteksi: kata TERAKHIR di 'cur' adalah kode currency yang
+            # dikenal DAN ada kata lain sebelumnya -> itu memang channel+currency
+            # yang menyatu, pisahkan.
+            kata = cur.split()
+            if len(kata) > 1 and norm(kata[-1]) in KODE_CURRENCY_DIKENAL:
+                ch, cur = " ".join(kata[:-1]), kata[-1]
+        else:
+            continue
+        if norm(cur) in ("CURRENCY", "") or norm(ch) in ("PAYMENT CHANNEL",):
+            channel = ch or channel
+            continue
+        if ch:
+            channel = ch
+        if not channel:
+            continue
+        v = 0.0 if saldo.strip() in ("-", "--", "") else baca_angka_saldo(
+            saldo.replace("(", "-").replace(")", ""))
+        if v is None:
+            continue
+        out[(norm(cur), kunci_channel(cur, channel))] = out.get(
+            (norm(cur), kunci_channel(cur, channel)), 0.0) + v
+        n_baris += 1
+    return out, n_baris
 
 
 def tanggal_saldo_pembuka():
@@ -675,7 +778,20 @@ def as_date(v):
         return v.date()
     if isinstance(v, datetime.date):
         return v
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+    # Ditemukan 17 Sep 2026: sheet 'D' file Juli menyimpan 'Settlement Date'
+    # sebagai ANGKA YYYYMMDD (mis. 20260703), bukan tanggal Excel maupun teks
+    # bertanda hubung -- SEMUA 70.832 baris begitu. Tanpa ini, as_date() diam-diam
+    # mengembalikan None untuk semuanya, dan baris berbasis Settlement Date
+    # (MT4入金/CRM入金/CRM入金（原币种）) jadi 0 di SETIAP tanggal -- kelihatan
+    # seperti kolomnya kosong padahal datanya ADA, cuma bentuknya beda.
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and float(v).is_integer():
+        s = str(int(v))
+        if len(s) == 8:
+            try:
+                return datetime.datetime.strptime(s, "%Y%m%d").date()
+            except ValueError:
+                pass
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"):
         try:
             return datetime.datetime.strptime(str(v).strip(), fmt).date()
         except (ValueError, TypeError):
@@ -1799,6 +1915,14 @@ def saldo_awal_jwallet(wb, tgl_awal):
 def saldo_awal_channel(wb, tgl_awal):
     """Saldo pembuka per (currency, channel) dari blok 余额 sheet
     'Payment Channel Balance' -- baris terakhir sebelum tgl_awal."""
+    # Tabel yang ditempel orang MENANG atas semua sumber lain.
+    if SALDO_AWAL_CHANNEL:
+        _ASAL_SALDO["channel"] = "opening balance you pasted in"
+        tgl = tanggal_saldo_pembuka()
+        if tgl is None and tgl_awal:
+            tgl = tgl_awal - datetime.timedelta(days=1)
+        return dict(SALDO_AWAL_CHANNEL), tgl
+
     def _dari_ob():
         saldo, tgl, _jw, _tjw = baca_opening_balance(wb)
         _ASAL_SALDO["channel"] = OB_SHEET if saldo else None
@@ -1855,6 +1979,8 @@ def write_channel_sheets(wb, report, ftt):
     ragu -- rumusnya sudah dikonfirmasi tim 3 Sep 2026 -- tapi karena kolom itu
     boleh disesuaikan manual oleh tim keuangan setelah laporan jadi."""
     from openpyxl.styles import Alignment
+
+    WALLET_CUR_ANEH = []          # baris J Wallet yang label mata uangnya bukan USD
 
     # --- agregat D/W per (tanggal, currency, channel)
     # Payment Channel Balance memakai Paid Date untuk deposit dan Apply Date
@@ -1949,8 +2075,10 @@ def write_channel_sheets(wb, report, ftt):
             "'J Wallet' for the USDT wallet), or run isi_template.py which fills it "
             "automatically from the source workbook."))
     if awal_ch:
-        print(f"         saldo pembuka channel: {len(awal_ch)} kombinasi dari "
-              f"sheet {asal_ch!r} per {tgl_ch}")
+        asal_ch_txt = ("ditempel di halaman upload" if SALDO_AWAL_CHANNEL
+                       else f"dari sheet {asal_ch!r}")
+        print(f"         saldo pembuka channel: {len(awal_ch)} kombinasi "
+              f"({asal_ch_txt}) per {tgl_ch}")
     # Nama tampilan: kode currency dibuang. Kalau pembersihan itu membuat dua channel
     # berbeda jadi bernama sama, dua-duanya dikembalikan ke nama aslinya supaya
     # tidak ada dua baris yang terlihat identik.
@@ -1968,8 +2096,59 @@ def write_channel_sheets(wb, report, ftt):
 
     r = 1
     n_kuning = 0
-    for (d, cur, kgw) in sorted(agg, key=lambda x: (x[0], x[1], x[2])):
-        v = agg[(d, cur, kgw)]
+
+    # --- SALDO PEMBUKA DITAMPILKAN DI ATAS (diminta tim Malaysia 16 Sep 2026) ---
+    # Sama seperti sheet 'J Wallet': baris teratas tiap channel+currency menunjukkan
+    # saldo PENUTUP bulan sebelumnya (mis. 30 Juni untuk laporan Juli), supaya saldo
+    # pembuka yang tertarik dari 'Opening Balance'/tempelan bisa langsung dicocokkan.
+    # Sebelumnya angka itu cuma 'tersembunyi' di dalam Balance baris transaksi
+    # pertama, tidak ada titik pembanding yang terlihat.
+    if awal_ch:
+        asal_ch_txt = ("opening balance you pasted in" if SALDO_AWAL_CHANNEL
+                       else f"from sheet '{asal_ch}'")
+        for (cur, kgw) in sorted(awal_ch, key=lambda k: (k[0], nama_bersih.get(k, k[1]))):
+            r += 1
+            nilai = [tgl_ch, cur, nama_bersih.get((cur, kgw), kgw),
+                     None, None, None, None, None, None,
+                     awal_ch[(cur, kgw)],
+                     f"Opening balance ({asal_ch_txt}), as of {tgl_ch}."]
+            for c, val in enumerate(nilai, start=1):
+                sel = ws.cell(r, c, val)
+                sel.font = Font(bold=True)
+                sel.fill = kuning
+                if c == 1:
+                    sel.number_format = "yyyy-mm-dd"
+                elif 4 <= c <= 10:
+                    sel.number_format = FMT_ACC
+        print(f"         '{PCB_SHEET}': {len(awal_ch)} saldo pembuka ditampilkan di baris "
+              f"paling atas (per {tgl_ch})")
+
+    # --- BAWA TURUN SALDO HARIAN (permintaan tim Malaysia 15 Sep 2026) -----------
+    # Kalau saldo pembuka DIBERIKAN, sheet ini menampilkan SETIAP channel+currency di
+    # SETIAP tanggal bulan laporan, walau hari itu tidak ada mutasi -- saldonya
+    # tinggal dibawa turun. Tujuannya supaya pergerakan harian bisa dicocokkan dengan
+    # departemen lain hari per hari.
+    # Kalau TIDAK ada saldo pembuka, perilakunya seperti dulu (hanya baris yang ada
+    # mutasinya), karena baris nol tanpa saldo pembuka cuma jadi kebisingan.
+    if awal_ch:
+        kombinasi = sorted(set((c, g) for _d, c, g in agg) | set(awal_ch))
+        if PERIODE_FILTER:
+            t0 = datetime.date(PERIODE_FILTER[0], PERIODE_FILTER[1], 1)
+            t1 = (datetime.date(PERIODE_FILTER[0] + (PERIODE_FILTER[1] == 12),
+                                PERIODE_FILTER[1] % 12 + 1, 1)
+                  - datetime.timedelta(days=1))
+        else:
+            semua_d = [d for d, _c, _g in agg]
+            t0, t1 = min(semua_d), max(semua_d)
+        urutan = [(t0 + datetime.timedelta(days=i), c, g)
+                  for i in range((t1 - t0).days + 1) for (c, g) in kombinasi]
+        print(f"         '{PCB_SHEET}': saldo dibawa turun tiap hari -- "
+              f"{len(kombinasi)} channel x {(t1 - t0).days + 1} tanggal")
+    else:
+        urutan = sorted(agg, key=lambda x: (x[0], x[1], x[2]))
+
+    for (d, cur, kgw) in urutan:
+        v = agg.get((d, cur, kgw), {})
         r += 1
         dep, dfee = v.get("dep", 0.0), v.get("dep_fee", 0.0)
         ft, ffee = v.get("ft", 0.0), v.get("ft_fee", 0.0)
@@ -1994,9 +2173,16 @@ def write_channel_sheets(wb, report, ftt):
         if (cur, kgw) not in awal_ch:
             catatan += (" No opening balance found for this channel, so Balance starts "
                         "from zero.")
-        nilai = [d, cur, nama_bersih.get((cur, kgw), v.get("_nama", kgw)),
-                 dep, dfee, ft, ffee, wd, wfee,
-                 saldo[kunci_saldo], catatan]
+        # Baris TANPA mutasi selnya dikosongkan supaya 2.000-an baris bawa-turun
+        # tidak penuh '0,00'. Baris yang ADA mutasinya ditulis apa adanya seperti
+        # dulu -- termasuk nol -- supaya tidak mengubah keluaran yang sudah dipakai.
+        ada_mutasi = any((dep, dfee, ft, ffee, wd, wfee))
+        angka = ([dep, dfee, ft, ffee, wd, wfee] if ada_mutasi
+                 else [None, None, None, None, None, None])
+        nilai = [d, cur, nama_bersih.get((cur, kgw), v.get("_nama", kgw))] + angka + [
+                 saldo[kunci_saldo],
+                 catatan if ada_mutasi else "No movement on this day - balance carried "
+                                            "forward from the previous day."]
         for c, val in enumerate(nilai, start=1):
             sel = ws.cell(r, c, val)
             if c == 1:
@@ -2042,23 +2228,50 @@ def write_channel_sheets(wb, report, ftt):
     # memperlihatkan ini karena kebetulan kedua sisinya 30.000 USDT.
     USDT = "USDT"
 
+    # Mata uang yang nilainya memang sudah dalam USD. Kolom 金额 sisi 收款 untuk
+    # baris ini adalah jumlah USD yang benar-benar diterima dompet.
+    KELUARGA_USD = {USDT, "USD", "USDC"}
+
     def sisi_wallet(t):
-        """-> (arah, jumlah USDT) atau None kalau baris ini tidak menyentuh dompet."""
+        """-> (arah, jumlah USD) atau None kalau baris ini tidak menyentuh dompet.
+
+        DIBETULKAN 15 Sep 2026 (laporan tim Malaysia): baris yang MASUK ke dompet
+        dulu dibuang diam-diam kalau 收入币种-nya bukan USDT. Padahal di FTT Juli
+        ada transfer masuk ber-收入币种 'INR' yang 金额-nya justru SUDAH dalam USD
+        (mis. AXIS Bank INR 65.734 -> J Wallet 689,18 ; 65.734/95,38 = 689,18).
+        Baris seperti itu hilang dari J Wallet tanpa jejak.
+        Sekarang: yang menentukan PENERIMANYA 'J Wallet', bukan label mata uangnya.
+        """
         masuk_ke = ("J WALLET" in norm(t.get("penerima"))
                     or "J WALLET" in norm(t.get("tujuan")))
         keluar_dari = "J WALLET" in norm(t["channel"])
         if masuk_ke and not keluar_dari:
-            if norm(t.get("tujuan_cur")) == USDT:
-                return "IN", (t.get("tujuan_jumlah") or 0.0)
-            return None                      # masuk dompet tapi bukan USDT -> bukan dompet USDT
+            # Terima apa pun label mata uangnya -- 金额 sisi 收款 itulah yang masuk
+            # dompet. Label yang bukan keluarga USD dicatat supaya bisa diperiksa.
+            if norm(t.get("tujuan_cur")) not in KELUARGA_USD:
+                WALLET_CUR_ANEH.append((t["tgl"], norm(t.get("tujuan_cur")),
+                                        t.get("tujuan_jumlah"), "IN", t.get("channel")))
+            return "IN", (t.get("tujuan_jumlah") or 0.0)
         if keluar_dari:
-            if norm(t.get("currency")) == USDT:
+            if norm(t.get("currency")) in KELUARGA_USD:
                 return "OUT", (t.get("jumlah") or 0.0)
+            # Dompet mengirim dalam mata uang lain: 金额 bukan USD, jadi TIDAK BOLEH
+            # langsung dikurangkan dari saldo USD. Pakai kolom Xero (USD) kalau ada.
+            if t.get("usd"):
+                WALLET_CUR_ANEH.append((t["tgl"], norm(t.get("currency")),
+                                        t.get("usd"), "OUT (pakai Xero USD)", t.get("channel")))
+                return "OUT", t["usd"]
+            WALLET_CUR_ANEH.append((t["tgl"], norm(t.get("currency")),
+                                    t.get("jumlah"), "OUT DILEWATI - tidak ada Xero USD",
+                                    t.get("channel")))
             return None
         return None
 
     def sentuh_wallet(t):
         return sisi_wallet(t) is not None
+
+    # sisi_wallet() dipanggil dua kali per baris (filter lalu pakai), jadi daftar ini
+    # bisa berisi duplikat -- dirapikan waktu dilaporkan.
 
     if tgl_bal:
         asal_txt = ("diketik di halaman upload" if SALDO_AWAL_JW is not None
@@ -2146,6 +2359,15 @@ def write_channel_sheets(wb, report, ftt):
                 sel.number_format = FMT_ACC
             if c == 8:
                 sel.fill = PatternFill("solid", fgColor="E2EFDA")
+    if WALLET_CUR_ANEH:
+        unik = sorted({x for x in WALLET_CUR_ANEH})
+        print(f"         J Wallet: {len(unik)} baris label mata uangnya BUKAN USD/USDT "
+              f"-- tetap dihitung, periksa kalau angkanya terlihat aneh:")
+        for tgl, cur, jml, arah, ch in unik[:10]:
+            print(f"            {tgl}  {cur:6} {arah:30} {jml or 0:>14,.2f}  lewat {ch}")
+        if len(unik) > 10:
+            print(f"            ... dan {len(unik) - 10} baris lain")
+
     if n_trx == 0:
         # Pesan sesudah opening balance; jangan menimpa baris pembuka.
         msg_row = baris_pesan_jwallet_kosong(rr, n_trx)
@@ -2215,6 +2437,7 @@ def write_mtoatd_sheet(wb, report):
     # --- indeks D & W per currency per tanggal
     idx = spec.Indeks()
     tanpa_tanggal = 0
+    n_dep, n_dep_no_settle = 0, 0    # deteksi sheet D tanpa Settlement Date sama sekali
     for rec in report["records"]:
         cur = norm(rec.get("Currency"))
         if not cur:
@@ -2235,7 +2458,34 @@ def write_mtoatd_sheet(wb, report):
             if paid is None and settle is None:
                 tanpa_tanggal += 1
                 continue
+            n_dep += 1
+            if settle is None:
+                n_dep_no_settle += 1
             idx.tambah_deposit(cur, paid, settle, usd, tx)
+
+    # MT4入金 / CRM入金 / CRM入金（原币种） dihitung dari Settlement Date.
+    # Kalau kolom itu kosong di HAMPIR SEMUA baris deposit, ketiga baris itu 0 di
+    # SETIAP tanggal sepanjang bulan -- kelihatan seperti bug tapi datanya memang
+    # tidak ada. Sudah terjadi di file Juli 2026 (70.832/70.832 baris kosong).
+    # Diberitahukan LEWAT LAPORAN (bukan didiamkan) supaya tim tidak menyangka ini
+    # rusak di kode -- lihat [[dpm-dw-status]] bagian 'Umpan balik tim atas data JULI'.
+    if n_dep and n_dep_no_settle / n_dep >= 0.99:
+        pct = n_dep_no_settle / n_dep * 100
+        print(f"PERINGATAN: sheet D -- 'Settlement Date' kosong di {n_dep_no_settle:,} dari "
+              f"{n_dep:,} baris deposit ({pct:.0f}%). MT4入金 / CRM入金 / "
+              f"CRM入金（原币种） akan 0 di SEMUA tanggal bulan ini -- "
+              f"ini kekurangan DATA, bukan bug. Minta tim ekspor ulang sheet D dengan "
+              f"kolom Settlement Date terisi.")
+        report["input_kurang"].append((
+            "D",
+            f"'Settlement Date' is empty on {n_dep_no_settle:,} of {n_dep:,} deposit "
+            f"rows ({pct:.0f}%).",
+            f"MT4 Deposit (USD), CRM Deposit (USD) and CRM Deposit (original currency) "
+            f"in '{MTOATD_SHEET}' are summed by Settlement Date, so every one of those "
+            f"cells shows 0 for the whole month. TD Deposit (USD) and Actual Received "
+            f"(original currency), which use Paid Date instead, are not affected.",
+            "Ask the Malaysia team to re-export sheet 'D' with the 'Settlement Date' "
+            "column filled in - this cannot be calculated or guessed from other columns."))
 
     # Baris `refuse` untuk aturan H+1 -- daftar_tanggal=False supaya tidak
     # menciptakan blok tanggal baru; dia cuma menumpang di blok yang sudah ada.
@@ -2826,7 +3076,8 @@ def write_legend_sheet(wb, date_cols_used):
     # Cap waktu: user sempat memeriksa file hasil LAMA dan mengira aturan baru tidak
     # jalan. Dengan stempel ini, versi file langsung ketahuan.
     r += 1
-    aturan = ("only rows with Status = 'finish' are counted"
+    status_teks = " or ".join(f"'{s.lower()}'" for s in STATUS_DIPAKAI)
+    aturan = (f"only rows with Status = {status_teks} are counted"
               if HANYA_STATUS_FINISH else "ALL rows are counted regardless of Status")
     bulan = (f"REPORT MONTH {nama_periode()} - rows dated outside it are dropped"
              if PERIODE_FILTER else
@@ -2958,11 +3209,11 @@ def write_legend_sheet(wb, date_cols_used):
 
     # --- bagian: aturan status
     r += 2
-    ws.cell(r, 2, "ONLY 'FINISH' ROWS ARE COUNTED").font = \
+    ws.cell(r, 2, "ONLY 'FINISH'/'SUCCESS' ROWS ARE COUNTED").font = \
         Font(bold=True, size=12, color="C00000")
     r += 1
-    ws.cell(r, 2, "Every row in sheet D and W whose Status is not 'finish' is dropped "
-                  "completely - it is not counted in any sheet, total or variance. "
+    ws.cell(r, 2, "Every row in sheet D and W whose Status is not 'finish' or 'success' is "
+                  "dropped completely - it is not counted in any sheet, total or variance. "
                   "That covers rows marked 'refuse' AND rows where the Status cell was "
                   "left empty (those carry remarks such as 'Application Failed, please "
                   "withdraw...'). A withdrawal that was refused never left the account, "
@@ -2970,6 +3221,16 @@ def write_legend_sheet(wb, date_cols_used):
                   "is always printed when the calculation runs.").font = \
         Font(size=10, color="C00000")
     ws.row_dimensions[r].height = 44
+    r += 1
+    ws.cell(r, 2, "'success' was added 28 Sep 2026: newer exports use 'success' instead of "
+                  "'finish' specifically for Source Name = 'Rebate Withdrawal' rows (regular "
+                  "'Withdrawal' rows still say 'finish'). Confirmed to mean the same thing: "
+                  "'success' row count + 'finish' row count matches exactly the all-'finish' "
+                  "total in a workbook the Malaysia team had already relabelled by hand. "
+                  "Without this, every Rebate Withdrawal row in an un-relabelled export was "
+                  "silently dropped as if refused.").font = \
+        Font(size=10, color="008000")
+    ws.row_dimensions[r].height = 56
     r += 1
     ws.cell(r, 2, "CONFIRMED by the DPM Malaysia team, 3 September 2026, on the treatment of "
                   "a blank Status cell: \"Blank status is same as Refuse, hence do not "
@@ -2983,7 +3244,8 @@ def write_legend_sheet(wb, date_cols_used):
     ws.cell(r, 2, "Note on sheet 'D&W Detail': the deposit rows show an EMPTY Status "
                   "column. That is normal - sheet 'D' has no Status column at all, "
                   "because a deposit has no approve/refuse step. Only withdrawals carry "
-                  "a status, and every withdrawal row you see here is 'finish'. Filter "
+                  "a status, and every withdrawal row you see here is 'finish' or "
+                  "'success' (both mean completed - see the note above). Filter "
                   "the 'Type' column to tell deposits and withdrawals apart.").font = \
         Font(size=10, color="C00000")
     ws.row_dimensions[r].height = 40
@@ -3069,6 +3331,10 @@ def main():
                          f"'{MISSING_SHEET}'")
     ap.add_argument("--open", action="store_true", dest="buka",
                     help="buka file hasil setelah selesai")
+    ap.add_argument("--channel-opening", metavar="FILE",
+                    help="file teks berisi tabel saldo pembuka per Payment Channel + "
+                         "Currency (3 kolom). Menang atas sheet 'Payment Channel "
+                         "Balance'/'Opening Balance'. Dipakai halaman upload.")
     ap.add_argument("--jwallet-opening", metavar="ANGKA",
                     help="saldo penutup J Wallet bulan SEBELUMNYA, dipakai sebagai "
                          "saldo pembuka. Menang atas sheet 'J Wallet'/'Opening Balance'. "
@@ -3083,6 +3349,21 @@ def main():
     # Dipasang PALING AWAL: process_sheet dan baca_fund_transfer membacanya lewat
     # global PERIODE_FILTER.
     set_periode(args.period)
+
+    global SALDO_AWAL_CHANNEL
+    if args.channel_opening:
+        f_ch = Path(args.channel_opening).expanduser()
+        if not f_ch.exists():
+            sys.exit(f"File saldo pembuka channel tidak ditemukan: {f_ch}")
+        SALDO_AWAL_CHANNEL, n_ch = baca_tabel_saldo_channel(
+            f_ch.read_text(encoding="utf-8", errors="replace"))
+        if not SALDO_AWAL_CHANNEL:
+            sys.exit("Tabel saldo pembuka channel tidak terbaca satu baris pun.\n"
+                     "Bentuknya: 3 kolom -> Payment Channel | Currency | Balance, "
+                     "satu baris per channel+currency.")
+        tgl_ob = tanggal_saldo_pembuka()
+        print(f"Saldo  : {n_ch} baris saldo pembuka channel ditempel di halaman upload"
+              + (f", per {tgl_ob}" if tgl_ob else ""))
 
     global SALDO_AWAL_JW
     SALDO_AWAL_JW = baca_angka_saldo(args.jwallet_opening)
@@ -3344,7 +3625,8 @@ def main():
 
     if report.get("dibuang"):
         tot = sum(report["dibuang"].values())
-        print(f"\n!  DIBUANG: {tot:,} baris statusnya BUKAN 'finish' -> tidak dihitung "
+        status_teks = "/".join(s.lower() for s in STATUS_DIPAKAI)
+        print(f"\n!  DIBUANG: {tot:,} baris statusnya BUKAN {status_teks} -> tidak dihitung "
               f"di laporan mana pun")
         for (sh, cur, st), n in sorted(report["dibuang"].items(), key=lambda x: -x[1])[:15]:
             usd = report["dibuang_usd"][(sh, cur, st)]

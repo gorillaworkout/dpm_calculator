@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · Dupoin DPM Tools</title>
+<style>
+:root{
+  --bg:#0a0d14; --panel:#111624; --panel-2:#161d30; --line:#222b42;
+  --ink:#e8edf7; --mute:#8d9ab5; --accent:#4f7cff; --accent-2:#22d3a6;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; min-height:100dvh; background:var(--bg); color:var(--ink);
+  font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,sans-serif;
+  -webkit-font-smoothing:antialiased;
+  display:grid; grid-template-columns:1.05fr .95fr; align-items:stretch;
+}
+/* ---------- left: brand panel ---------- */
+.stage{
+  position:relative; overflow:hidden; min-height:100dvh; padding:56px 56px 48px;
+  display:flex; flex-direction:column; justify-content:space-between; gap:40px;
+  background:linear-gradient(165deg,#0c1120,#0a0d14 60%);
+  border-right:1px solid var(--line);
+}
+.stage::before{
+  content:""; position:absolute; inset:0; pointer-events:none;
+  background:radial-gradient(620px 420px at 18% 8%,rgba(79,124,255,.20),transparent 62%),
+             radial-gradient(520px 380px at 88% 78%,rgba(34,211,166,.13),transparent 60%);
+}
+.stage > *{position:relative}
+.logo{display:flex; align-items:center; gap:13px; text-decoration:none; color:inherit}
+.mark{
+  flex:0 0 44px; height:44px; border-radius:12px; display:grid; place-items:center;
+  font-weight:800; font-size:16px; letter-spacing:-.5px; color:#fff;
+  background:linear-gradient(140deg,var(--accent),#8b5cf6 55%,var(--accent-2));
+  box-shadow:0 10px 26px -9px rgba(79,124,255,.8);
+}
+.brand{font-weight:700; letter-spacing:-.2px; line-height:1.25}
+.brand small{display:block; color:var(--mute); font-weight:400; font-size:10.5px;
+  letter-spacing:.09em; text-transform:uppercase}
+.pitch h2{
+  margin:0 0 14px; font-size:clamp(24px,2.9vw,34px); line-height:1.2; letter-spacing:-1px;
+}
+.pitch h2 span{
+  background:linear-gradient(100deg,var(--accent),var(--accent-2));
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.pitch p{color:#9aa7c0; max-width:42ch; margin:0 0 26px}
+.points{list-style:none; margin:0; padding:0; display:grid; gap:11px}
+.points li{display:flex; gap:11px; align-items:flex-start; color:#9aa7c0; font-size:13.5px}
+.points i{
+  flex:0 0 6px; height:6px; margin-top:9px; border-radius:50%;
+  background:var(--accent); box-shadow:0 0 0 3px rgba(79,124,255,.18);
+}
+.stagefoot{color:#9aa7c0; font-size:12px}
+
+/* ---------- right: the form ---------- */
+/* A faint wash of the left panel's colour stops the two halves reading as a
+   hard seam down the middle of the screen. */
+.formwrap{
+  display:grid; place-items:center; justify-content:center;
+  min-height:100dvh; padding:40px 32px;
+  background:linear-gradient(95deg,#0c111d,var(--bg) 42%);
+}
+.box{width:100%; max-width:390px}
+h1{font-size:27px; letter-spacing:-.7px; margin:0 0 7px}
+.sub{color:#9aa7c0; font-size:14px; margin:0 0 28px}
+label{display:block; margin:0 0 7px; font-size:12.5px; font-weight:600;
+  letter-spacing:.05em; text-transform:uppercase; color:#b6c0d4}
+.field{margin-bottom:17px}
+input[type=text],input[type=password]{
+  width:100%; padding:13px 14px; color:var(--ink); font:inherit; font-size:14.5px;
+  background:#0c1120; border:1px solid var(--line); border-radius:10px;
+}
+input::placeholder{color:#5d6b8a}
+input:focus-visible{outline:2px solid var(--accent); outline-offset:1px; border-color:transparent}
+.pw{position:relative}
+.peek{
+  position:absolute; right:6px; top:50%; transform:translateY(-50%);
+  background:#141c30; border:1px solid var(--line); border-radius:7px;
+  cursor:pointer; padding:6px 11px; margin:0; width:auto;
+  color:#b6c0d4; font:inherit; font-size:12.5px; font-weight:600; box-shadow:none;
+}
+.peek:hover{color:var(--ink); border-color:#31406a; filter:none}
+.peek:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+button[type=submit]{
+  margin-top:8px; width:100%; padding:14px; border:0; border-radius:11px; cursor:pointer;
+  font:inherit; font-weight:700; font-size:15px; color:#fff;
+  background:linear-gradient(140deg,var(--accent),#6d5cf6);
+  box-shadow:0 10px 20px -16px rgba(79,124,255,.85);
+}
+button[type=submit]:hover{filter:brightness(1.08)}
+button[type=submit]:active{transform:translateY(1px)}
+button[disabled]{opacity:.6; cursor:progress}
+.err{
+  padding:12px 14px; border-radius:10px; font-size:13.5px; margin:0 0 20px;
+  color:#ffb4b4; background:rgba(255,107,107,.09); border:1px solid rgba(255,107,107,.3);
+}
+.foot{margin-top:24px; color:#9aa7c0; font-size:12.5px; line-height:1.7}
+
+@media (max-width:880px){
+  body{grid-template-columns:1fr; min-height:auto}
+  .stage{min-height:auto; padding:22px 22px 26px; border-right:0;
+    border-bottom:1px solid var(--line); gap:0}
+  .pitch,.stagefoot{display:none}
+  .formwrap{min-height:auto; padding:34px 22px 56px; place-items:start center}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<section class="stage">
+  <a class="logo" href="/"><span class="mark">DPM</span>
+    <span class="brand">Dupoin DPM Tools<small>DPM Malaysia</small></span></a>
+
+  <div class="pitch">
+    <h2>Reporting tools for the <span>DPM Malaysia</span> desk</h2>
+    <p>Sign in to generate D&amp;W reports and segregate MT5 deals history into daily
+       and monthly summaries.</p>
+    <ul class="points">
+      <li><i></i><span>Your uploaded file is never modified — the result is always a new file.</span></li>
+      <li><i></i><span>Large batches are uploaded in pieces automatically, up to 5&nbsp;GB per run.</span></li>
+      <li><i></i><span>Results are deleted from the server as soon as you download them.</span></li>
+    </ul>
+  </div>
+
+  <p class="stagefoot">Accounts are issued by your administrator.</p>
+</section>
+
+<section class="formwrap">
+  <div class="box">
+    <h1>Sign in</h1>
+    <p class="sub">Use the username and password your administrator gave you.</p>
+
+    {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+
+    <form method="post" action="/login" onsubmit="this.s.disabled=true;this.s.textContent='Signing in…'">
+      <input type="hidden" name="next" value="{{ next or '' }}">
+
+      <div class="field">
+        <label for="u">Username</label>
+        <input id="u" type="text" name="username" value="{{ username or '' }}"
+               placeholder="e.g. siti.rahman"
+               autocomplete="username" autocapitalize="none" spellcheck="false"
+               required autofocus>
+      </div>
+
+      <div class="field">
+        <label for="p">Password</label>
+        <div class="pw">
+          <input id="p" type="password" name="password" autocomplete="current-password" required>
+          <button type="button" class="peek" id="peek" aria-label="Show password">Show</button>
+        </div>
+      </div>
+
+      <button name="s" type="submit">Sign in</button>
+    </form>
+
+    <p class="foot">Forgotten your password? Ask your administrator to set a new one —
+      passwords are stored hashed and cannot be read back.</p>
+  </div>
+</section>
+
+<script>
+  (function () {
+    var p = document.getElementById('p'), b = document.getElementById('peek');
+    if (!p || !b) return;
+    b.addEventListener('click', function () {
+      var hidden = p.type === 'password';
+      p.type = hidden ? 'text' : 'password';
+      b.textContent = hidden ? 'Hide' : 'Show';
+      b.setAttribute('aria-label', hidden ? 'Hide password' : 'Show password');
+      p.focus();
+    });
+  })();
+</script>
+</body>
+</html>

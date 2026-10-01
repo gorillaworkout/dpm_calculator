@@ -1,12 +1,20 @@
 """Focused regressions for 7 Sep MTOATD/J Wallet corrections."""
+import base64
 import datetime as dt
 import multiprocessing
+import os
 import shutil
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
 from openpyxl import Workbook
+
+os.environ.setdefault("DW_AUTH_DB", str(Path(tempfile.mkdtemp()) / "test-users.db"))
+os.environ.setdefault("DW_ADMIN_USER", "tester")
+os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+AUTH = "Basic " + base64.b64encode(b"tester:tester-password-1").decode()
 
 import app as web
 import hitung_dw as h
@@ -15,6 +23,7 @@ from mtoatd_spec import Indeks, hitung
 
 def test_job_page_uses_shared_title_validated_slug_and_tool_specific_copy():
     client = web.app.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = AUTH
     job_id = uuid.uuid4().hex
     web._write_state(job_id, state="running", name="deals-hasil.xlsx", started=0,
                      error=None, log=None, path=None, slug="segregate")
@@ -22,7 +31,7 @@ def test_job_page_uses_shared_title_validated_slug_and_tool_specific_copy():
         page = client.get(f"/job/{job_id}")
         assert page.status_code == 200
         assert b"Processing \xc2\xb7 Dupoin DPM Tools" in page.data
-        assert b"combined, filtered, and deduplicated" in page.data
+        assert b"classified" in page.data and b"Client Equity FX" in page.data
         assert b"return to this same job URL" in page.data
 
         web._write_state(job_id, state="collected", name="deals-hasil.xlsx", started=0,
@@ -35,6 +44,7 @@ def test_job_page_uses_shared_title_validated_slug_and_tool_specific_copy():
 
 def test_dw_job_processing_copy_remains_accurate():
     client = web.app.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = AUTH
     job_id = uuid.uuid4().hex
     web._write_state(job_id, state="running", name="dw-hasil.xlsx", started=0,
                      error=None, log=None, path=None, slug="dw")
@@ -77,6 +87,124 @@ def test_empty_notice_does_not_overwrite_opening_balance():
     assert h.baris_pesan_jwallet_kosong(1, 0) == 2
 
 
+def test_comma_delimited_channel_balance_keeps_thousands_separators():
+    balances, count = h.baca_tabel_saldo_channel("77Pay,VND,1,058,257.96")
+    assert count == 1
+    assert balances[("VND", h.kunci_channel("VND", "77Pay"))] == 1058257.96
+
+
+def test_combined_channel_and_currency_does_not_inherit_previous_channel():
+    balances, count = h.baca_tabel_saldo_channel(
+        "Beckpay\tVND\t100\nExamplePay LKR\t250\n\tUSD\t50"
+    )
+    assert count == 3
+    assert balances[("VND", h.kunci_channel("VND", "Beckpay"))] == 100
+    assert balances[("LKR", h.kunci_channel("LKR", "ExamplePay"))] == 250
+    assert balances[("USD", h.kunci_channel("USD", "ExamplePay"))] == 50
+    assert ("EXAMPLEPAY LKR", h.kunci_channel("EXAMPLEPAY LKR", "Beckpay")) not in balances
+
+
+def test_numeric_yyyymmdd_requires_an_integer_value():
+    assert h.as_date(20260703) == dt.date(2026, 7, 3)
+    assert h.as_date(20260703.0) == dt.date(2026, 7, 3)
+    assert h.as_date(20260703.9) is None
+
+
+def test_sweeper_never_deletes_an_active_job_even_when_old():
+    jobs = Path(tempfile.mkdtemp())
+    original_jobs = web.JOBS
+    web.JOBS = jobs
+    job_id = uuid.uuid4().hex
+    job = jobs / job_id
+    job.mkdir()
+    source = job / "large-source.csv"
+    source.write_text("still processing")
+    web._write_state(job_id, state="running", started=time.time() - 7200,
+                     name="result.zip", slug="segregate", owner_pid=os.getpid())
+    old = time.time() - 7200
+    os.utime(job, (old, old))
+    os.utime(web._state_path(job_id), (old, old))
+    try:
+        web._sweep_old_jobs(max_age_hours=1)
+        assert source.exists()
+        assert web._state_path(job_id).exists()
+    finally:
+        web.JOBS = original_jobs
+        shutil.rmtree(jobs, ignore_errors=True)
+
+
+def test_sweeper_removes_orphaned_running_job():
+    jobs = Path(tempfile.mkdtemp())
+    original_jobs = web.JOBS
+    web.JOBS = jobs
+    job_id = uuid.uuid4().hex
+    job = jobs / job_id
+    job.mkdir()
+    (job / "source.csv").write_text("orphaned")
+    web._write_state(job_id, state="running", started=time.time() - 7200,
+                     name="result.zip", slug="segregate", owner_pid=99999999)
+    old = time.time() - 7200
+    os.utime(job, (old, old))
+    os.utime(web._state_path(job_id), (old, old))
+    try:
+        web._sweep_old_jobs(max_age_hours=1)
+        assert not job.exists()
+        assert not web._state_path(job_id).exists()
+    finally:
+        web.JOBS = original_jobs
+        shutil.rmtree(jobs, ignore_errors=True)
+
+
+def test_completed_job_cleanup_keeps_only_download_result():
+    job = Path(tempfile.mkdtemp())
+    source = job / "five-gb-source.csv"
+    intermediate = job / "step0.xlsx"
+    result = job / "result.zip"
+    source.write_text("source")
+    intermediate.write_text("intermediate")
+    result.write_text("result")
+    (job / "nested").mkdir()
+    (job / "nested" / "temporary").write_text("temporary")
+    try:
+        web._cleanup_completed_job(job, result)
+        assert sorted(p.name for p in job.iterdir()) == ["result.zip"]
+        assert result.read_text() == "result"
+    finally:
+        shutil.rmtree(job, ignore_errors=True)
+
+
+def test_download_streams_result_without_reading_it_all_into_memory():
+    jobs = Path(tempfile.mkdtemp())
+    original_jobs = web.JOBS
+    original_read_bytes = Path.read_bytes
+    web.JOBS = jobs
+    job_id = uuid.uuid4().hex
+    job = jobs / job_id
+    job.mkdir()
+    result = job / "result.zip"
+    result.write_bytes(b"PK-streamed")
+    web._write_state(job_id, state="done", path=str(result), name="result.zip",
+                     slug="segregate", started=time.time())
+
+    def forbidden(_path):
+        raise AssertionError("download must not call Path.read_bytes()")
+
+    Path.read_bytes = forbidden
+    try:
+        response = web.app.test_client().get(
+            f"/job/{job_id}/download", headers={"Authorization": AUTH})
+        assert response.status_code == 200
+        assert response.data == b"PK-streamed"
+        assert web._read_state(job_id)["state"] == "collected"
+        assert not job.exists()
+        response.close()
+        assert not (jobs / f".{job_id}.download").exists()
+    finally:
+        Path.read_bytes = original_read_bytes
+        web.JOBS = original_jobs
+        shutil.rmtree(jobs, ignore_errors=True)
+
+
 def _download_worker(jobs, job_id, start, results):
     web.JOBS = Path(jobs)
     original = Path.read_bytes
@@ -88,7 +216,8 @@ def _download_worker(jobs, job_id, start, results):
     Path.read_bytes = slow_read
     start.wait()
     try:
-        response = web.app.test_client().get(f"/job/{job_id}/download")
+        response = web.app.test_client().get(
+            f"/job/{job_id}/download", headers={"Authorization": AUTH})
         results.put((response.status_code, response.data[:2]))
     except Exception as exc:
         results.put(("error", type(exc).__name__))

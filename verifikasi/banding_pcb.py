@@ -43,8 +43,16 @@ hdr=[c for c in next(cb.iter_rows(max_row=1,values_only=True))]
 KOL=['Deposit','Deposit charges','Fund transfer','Fund transfer charges','Withdrawal','Withdrawal charges','Balance']
 print(f"{'channel':22} {'kolom':22} {'KITA':>18} {'MEREKA':>18}   selisih")
 n_ok=n_beda=0
+# HANYA baris tanggal 1 Jun 2026. Sheet kita sekarang memuat SEMUA tanggal bulan
+# laporan (saldo dibawa turun tiap hari, permintaan tim 15 Sep 2026), sementara
+# angka pembanding di sheet mereka cuma satu baris tanggal itu. Tanpa saringan ini
+# ke-31 hari dibanding melawan angka 1 Juni dan hasilnya tidak ada artinya.
+import datetime as _dt
+ACUAN_TGL = _dt.date(2026, 6, 1)
 for r in cb.iter_rows(min_row=2,values_only=True):
     if not r[1]: continue
+    _d = r[0].date() if hasattr(r[0], "date") else r[0]
+    if _d != ACUAN_TGL: continue
     k=key(r[1],r[2])
     m=mereka.get(k)
     if not m:

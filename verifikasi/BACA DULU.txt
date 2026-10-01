@@ -19,9 +19,15 @@ Malaysia yang sudah beredar. Dipakai tiap kali rumus diubah.
 
   banding_mtoatd.py   sheet 'MTOATD' hasil   vs  sheet "MTOATD (MAY'26)" sumber
                       -> terakhir: 520 cocok, 23 beda (1 hari saja)
-  banding_pcb.py      sheet 'Channel Balance' vs blok-blok
+  banding_pcb.py      <-- DIPERBAIKI 15 Sep 2026: sekarang HANYA membanding
+                      baris tanggal 1 Jun. Dulu dia membanding SEMUA tanggal
+                      kita melawan angka 1 Juni mereka -- tidak ketahuan
+                      selama sheet kita cuma 1 hari.
+                      -> terakhir: 369 cocok, 18 beda (dulu 81/18; cocok naik
+                         karena saldo dibawa turun tiap hari, beda TETAP 18)
+                      sheet 'Channel Balance' vs blok-blok
                       'Payment Channel Balance' sumber
-                      -> terakhir: 81 cocok, 18 beda (semua sudah terjelaskan:
+                      (semua beda sudah terjelaskan:
                          Withdrawal charges yang diketik manual di sheet mereka)
 
 Cara pakai:
