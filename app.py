@@ -153,8 +153,10 @@ SALDO_ARG = {"hitung_dw.py": "--jwallet-opening"}
 # tidak bisa lewat satu field seperti J Wallet: orang menempel tabelnya, kita simpan
 # jadi file di folder job, lalu path-nya diberikan ke hitung_dw.py.
 CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
-# KVB tidak boleh memakai EXTRA_FEES (rate DPM yang ditulis di kode). Hanya KVB.
-KVB_ARG = {"hitung_dw.py": "--tanpa-extra-fees"}
+# KVB tidak boleh memakai EXTRA_FEES (rate DPM yang ditulis di kode). Flag harus
+# ikut sejak isi_template.py karena tahap itu bisa menggabungkan beberapa fee sheet.
+KVB_ARG = {"isi_template.py": "--tanpa-extra-fees",
+           "hitung_dw.py": "--tanpa-extra-fees"}
 SALDO_POLA = re.compile(r"^-?[\d.,\s]{1,24}$")
 PERIODE_POLA = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 NAMA_BULAN = ["January", "February", "March", "April", "May", "June",

@@ -932,7 +932,7 @@ def _baca_satu_sheet_fee(ws):
     return out, h_idx + 1
 
 
-def load_fee_table(wb):
+def load_fee_table(wb, pakai_extra_fees=None):
     """Gabungan semua sheet fee. Sheet '-add.' diterapkan terakhir -> menimpa.
 
     SUMBER SATU-SATUNYA adalah sheet fee di workbook yang diproses. Tidak ada rate
@@ -992,7 +992,8 @@ def load_fee_table(wb):
                   f"{wd_x*100:g}% -- kelihatannya TERTUKAR, betulkan di sheet fee")
 
     # EXTRA_FEES hanya MENAMBAL yang masih kosong
-    for (cur_x, gw_x), (d, w) in (EXTRA_FEES.items() if PAKAI_EXTRA_FEES else ()):
+    pakai_extra = PAKAI_EXTRA_FEES if pakai_extra_fees is None else pakai_extra_fees
+    for (cur_x, gw_x), (d, w) in (EXTRA_FEES.items() if pakai_extra else ()):
         key = (norm(cur_x), kunci_gw(gw_x))
         row = table.setdefault(key, {"deposit": None, "withdrawal": None, "fixed": 0.0,
                                      "nama": norm(gw_x), "asal": ["EXTRA_FEES (script)"],

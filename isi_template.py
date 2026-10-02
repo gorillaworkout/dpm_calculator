@@ -245,6 +245,9 @@ def main():
     ap.add_argument("--bulan", metavar="YYYY-MM",
                     help="BULAN LAPORAN: hanya baris bulan ini yang disalin "
                          "(sheet D, W dan Fund Transfer Table)")
+    ap.add_argument("--tanpa-extra-fees", action="store_true",
+                    help="Saat menggabungkan beberapa fee sheet, jangan tambahkan fallback "
+                         "EXTRA_FEES milik DPM (dipakai untuk KVB).")
     ap.add_argument("--sheet-d", help="nama sheet deposit di sumber (default: D / Deposit)")
     ap.add_argument("--sheet-w", help="nama sheet withdrawal di sumber (default: W / Withdrawal)")
     args = ap.parse_args()
@@ -426,7 +429,7 @@ def main():
     if len(fee_src) > 1:
         hd = muat_hitung_dw()
         if hd is not None:
-            tabel = hd.load_fee_table(wb_out)
+            tabel = hd.load_fee_table(wb_out, pakai_extra_fees=not args.tanpa_extra_fees)
             if tabel:
                 # write_fee_sheet membuang semua sheet fee lain lalu menulis satu
                 n_fee = hd.write_fee_sheet(wb_out, tabel)

@@ -62,7 +62,7 @@ try:
         "siapkan_kvb.py", "isi_template.py", "hitung_dw.py"
     ]
     assert "--bulan" not in commands[0]
-    assert commands[1][-2:] == ["--bulan", "2026-08"]
+    assert commands[1][-3:] == ["--bulan", "2026-08", "--tanpa-extra-fees"]
     assert commands[2][-3:] == ["--period", "2026-08", "--tanpa-extra-fees"]
     assert Path(commands[1][2]) == Path(commands[0][commands[0].index("-o") + 1])
     assert Path(commands[2][2]) == Path(commands[1][commands[1].index("-o") + 1])
