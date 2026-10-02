@@ -211,6 +211,7 @@ pre{
   </div>
   <div class="sidefoot">Your original file is never modified — the result is always a new file.
     {% if company == 'dpm' and request.path == '/tool/dw' %}<br><a href="/template">Download Template D&amp;W.xlsx</a>{% endif %}
+    {% if company == 'kvb' and request.path == '/kvb/tool/dw' %}<br><a href="/kvb/template">Download Template KVB Plus.xlsx</a>{% endif %}
     {% if request.user is defined and request.user %}
       <div style="margin-top:14px; padding-top:12px; border-top:1px solid var(--line)">
         Signed in as <b style="color:var(--ink)">{{ request.user['username'] }}</b>

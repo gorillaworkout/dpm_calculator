@@ -24,7 +24,7 @@
     <input id="f" type="file" name="file" accept=".xlsx,.xlsm" required>
     {% endif %}
     <p class="hint">{{ hint or "Must contain the transaction sheets plus D&W FEE and Xero." }}
-      {% if company == 'dpm' and slug == "dw" %}Don't have one? <a href="/template">Download the template</a>.{% endif %}</p>
+      {% if slug == "dw" %}Don't have one? <a href="{{ '/kvb/template' if company == 'kvb' else '/template' }}">Download the template</a>.{% endif %}</p>
 
     {% if bulan_opsi %}
     <label for="bulan">Report month</label>

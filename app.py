@@ -719,6 +719,12 @@ def template_file():
     return send_file(f, as_attachment=True) if f.is_file() else abort(404)
 
 
+@app.get("/kvb/template")
+def kvb_template_file():
+    f = BASE / "Template KVB Plus.xlsx"
+    return send_file(f, as_attachment=True) if f.is_file() else abort(404)
+
+
 if __name__ == "__main__":
     # BAHAYA KALAU DEPLOY: debug=True membuka debugger Werkzeug, dan siapa pun yang
     # memicu error bisa menjalankan kode Python di server. Sekarang MATI secara

@@ -1,5 +1,6 @@
 # Private financial inputs, generated reports, templates
 *.xlsx
+!Template KVB Plus.xlsx
 *.xlsm
 *.csv
 *.zip
