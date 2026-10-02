@@ -83,6 +83,12 @@ EXTRA_FEES = {
     ("VND", "BECKPAY"):     (0.016,   0.000),    # ditambahkan 19 Aug 2026
 }
 
+# False = EXTRA_FEES TIDAK dipakai (--tanpa-extra-fees, dipasang app.py untuk KVB).
+# EXTRA_FEES adalah rate DPM yang ditulis di kode; brand lain tidak boleh diam-diam
+# memakainya. Rate yang kosong di tabel fee brand itu harus kelihatan (merah +
+# 'Missing Data'), bukan diisi dari angka DPM.
+PAKAI_EXTRA_FEES = True
+
 # Nama gateway di sheet data -> nama gateway di tabel fee (semua di-UPPERCASE)
 GATEWAY_ALIAS = {
     ("VND", "VN77PAY"):         "77 PAY",
@@ -986,7 +992,7 @@ def load_fee_table(wb):
                   f"{wd_x*100:g}% -- kelihatannya TERTUKAR, betulkan di sheet fee")
 
     # EXTRA_FEES hanya MENAMBAL yang masih kosong
-    for (cur_x, gw_x), (d, w) in EXTRA_FEES.items():
+    for (cur_x, gw_x), (d, w) in (EXTRA_FEES.items() if PAKAI_EXTRA_FEES else ()):
         key = (norm(cur_x), kunci_gw(gw_x))
         row = table.setdefault(key, {"deposit": None, "withdrawal": None, "fixed": 0.0,
                                      "nama": norm(gw_x), "asal": ["EXTRA_FEES (script)"],
@@ -3344,7 +3350,15 @@ def main():
                          "bulan ini DIBUANG (ekspor back office selalu punya ekor "
                          "bulan sebelum/sesudah). Tanpa ini semua tanggal dihitung "
                          "dan periode di sheet report = bulan terbanyak.")
+    ap.add_argument("--tanpa-extra-fees", action="store_true",
+                    help="JANGAN pakai EXTRA_FEES (rate DPM di kode). Dipakai untuk brand "
+                         "lain (KVB): rate yang kosong di tabel fee jadi merah + masuk "
+                         "'Missing Data', tidak diisi diam-diam dari angka DPM.")
     args = ap.parse_args()
+
+    global PAKAI_EXTRA_FEES
+    if args.tanpa_extra_fees:
+        PAKAI_EXTRA_FEES = False
 
     # Dipasang PALING AWAL: process_sheet dan baca_fund_transfer membacanya lewat
     # global PERIODE_FILTER.

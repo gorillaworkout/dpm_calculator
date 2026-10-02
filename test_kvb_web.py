@@ -63,7 +63,7 @@ try:
     ]
     assert "--bulan" not in commands[0]
     assert commands[1][-2:] == ["--bulan", "2026-08"]
-    assert commands[2][-2:] == ["--period", "2026-08"]
+    assert commands[2][-3:] == ["--period", "2026-08", "--tanpa-extra-fees"]
     assert Path(commands[1][2]) == Path(commands[0][commands[0].index("-o") + 1])
     assert Path(commands[2][2]) == Path(commands[1][commands[1].index("-o") + 1])
     assert client.get(f"/kvb/job/{job_id}").status_code == 200
@@ -76,6 +76,7 @@ try:
     _, state = wait(response.headers["Location"])
     assert state["state"] == "done", state
     assert [Path(c[1]).name for c in commands] == ["isi_template.py", "hitung_dw.py"]
+    assert "--tanpa-extra-fees" not in commands[1]   # DPM tetap memakai EXTRA_FEES
 
     commands.clear()
     def fail_translate(command, **_kwargs):

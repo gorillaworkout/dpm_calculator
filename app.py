@@ -153,6 +153,8 @@ SALDO_ARG = {"hitung_dw.py": "--jwallet-opening"}
 # tidak bisa lewat satu field seperti J Wallet: orang menempel tabelnya, kita simpan
 # jadi file di folder job, lalu path-nya diberikan ke hitung_dw.py.
 CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
+# KVB tidak boleh memakai EXTRA_FEES (rate DPM yang ditulis di kode). Hanya KVB.
+KVB_ARG = {"hitung_dw.py": "--tanpa-extra-fees"}
 SALDO_POLA = re.compile(r"^-?[\d.,\s]{1,24}$")
 PERIODE_POLA = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 NAMA_BULAN = ["January", "February", "March", "April", "May", "June",
@@ -576,6 +578,8 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
             flag_saldo = SALDO_ARG.get(script)
             if saldo_jw and flag_saldo:
                 perintah += [flag_saldo, saldo_jw]
+            if company == "kvb" and KVB_ARG.get(script):
+                perintah.append(KVB_ARG[script])
             flag_ch = CHANNEL_ARG.get(script)
             if f_ch and flag_ch:
                 perintah += [flag_ch, str(f_ch)]
