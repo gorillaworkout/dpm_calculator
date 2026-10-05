@@ -64,6 +64,7 @@ assert set(TOOLS) == {"dw", "segregate"}
 assert b"Dupoin DPM Tools" in landing.data
 assert b"Generate D&amp;W" in landing.data
 assert b"Deal Segregator" in landing.data
+assert b"one ZIP containing two XLSX workbooks" in landing.data
 assert c.get("/tool/mtoatd").status_code == 404, "menu yang tidak ada harus 404"
 assert c.get("/tool/hitung").status_code == 404, "menu lama sudah dihapus"
 assert c.get("/tool/../../etc/passwd").status_code == 404

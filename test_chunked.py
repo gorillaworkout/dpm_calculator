@@ -32,8 +32,8 @@ c.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(
 CHUNK = 64 * 1024
 
 
-def begin():
-    r = c.post("/upload/begin")
+def begin(total):
+    r = c.post("/upload/begin", data={"bytes": str(total)})
     assert r.status_code == 200, r.status_code
     return r.get_json()["id"]
 
@@ -66,7 +66,7 @@ finally:
     chunked._write_manifest = original_write_manifest
 
 # --- browser can discard an interrupted upload immediately ------------------
-uid = begin()
+uid = begin(1)
 stage_dir = JOBS / "staging" / uid
 assert c.post("/upload/discard", data={"id": uid}).status_code == 200
 assert not stage_dir.exists(), "discard endpoint left interrupted upload data"
@@ -74,7 +74,7 @@ assert not stage_dir.exists(), "discard endpoint left interrupted upload data"
 # --- a file split into pieces is reassembled exactly ------------------------
 payload = os.urandom(CHUNK * 3 + 517)
 digest = hashlib.sha256(payload).hexdigest()
-uid = begin()
+uid = begin(len(payload))
 seq = 0
 for off in range(0, len(payload), CHUNK):
     r = send(uid, "deals.csv", 0, seq, payload[off:off + CHUNK])
@@ -88,8 +88,8 @@ assert original == "deals.csv"
 assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, "reassembled bytes differ"
 
 # --- 20 files keep their own identity and order -----------------------------
-uid = begin()
 payloads = [f"row-{i}".encode() for i in range(20)]
+uid = begin(sum(len(p) for p in payloads))
 for i, payload_i in enumerate(payloads):
     assert send(uid, f"day-{i + 1}.csv", i, 0, payload_i).status_code == 200
 staged = chunked.staged_files(JOBS, uid)
@@ -97,7 +97,7 @@ assert [n for _p, n in staged] == [f"day-{i}.csv" for i in range(1, 21)], staged
 assert [p.read_bytes() for p, _n in staged] == payloads
 
 # --- retrying an accepted chunk is idempotent -------------------------------
-retry_uid = begin()
+retry_uid = begin(3)
 assert send(retry_uid, "x.csv", 0, 0, b"aaa").status_code == 200
 r = send(retry_uid, "x.csv", 0, 0, b"aaa")
 assert r.status_code == 200, (r.status_code, r.get_json())
@@ -107,7 +107,7 @@ assert chunked.staged_files(JOBS, retry_uid)[0][0].read_bytes() == b"aaa"
 old_max = chunked.MAX_TOTAL
 chunked.MAX_TOTAL = 6
 try:
-    uid = begin()
+    uid = begin(6)
     assert send(uid, "limit.csv", 0, 0, b"aaa").status_code == 200
     assert send(uid, "limit.csv", 0, 1, b"bbb").status_code == 200
     r = send(uid, "limit.csv", 0, 1, b"bbb")
@@ -121,13 +121,22 @@ r = send(retry_uid, "x.csv", 0, 5, b"bbb")
 assert r.status_code == 409, r.status_code
 assert chunked.staged_files(JOBS, retry_uid)[0][0].read_bytes() == b"aaa"
 
+# Declared bytes are a storage contract, not a hint. A client cannot reserve
+# one byte and then stream more data.
+r = c.post("/upload/begin", data={"bytes": "1"})
+assert r.status_code == 200
+forged_uid = r.get_json()["id"]
+r = send(forged_uid, "forged.csv", 0, 0, b"12345")
+assert r.status_code == 413, (r.status_code, r.get_json())
+assert chunked.staged_files(JOBS, forged_uid) is None
+
 # --- rejected file types ----------------------------------------------------
-uid = begin()
+uid = begin(2)
 r = send(uid, "payload.exe", 0, 0, b"MZ")
 assert r.status_code == 400 and b"not a .csv" in r.data
 
 # --- path traversal cannot escape the staging directory ---------------------
-uid = begin()
+uid = begin(len(b"root:x:0:0"))
 r = send(uid, "../../../../etc/passwd.csv", 0, 0, b"root:x:0:0")
 assert r.status_code == 200, "the name should be sanitised, not rejected outright"
 staged = chunked.staged_files(JOBS, uid)
@@ -148,7 +157,7 @@ r = c.post("/tool/segregate", data={"upload_id": "ab" * 16},
 assert r.status_code == 400 and b"expired" in r.data, r.status_code
 
 # --- a completed run consumes the staged files ------------------------------
-uid = begin()
+uid = begin(len(b"Deal,Login\n1,2\n"))
 assert send(uid, "small.csv", 0, 0, b"Deal,Login\n1,2\n").status_code == 200
 stage_dir = (JOBS / "staging" / uid)
 assert stage_dir.is_dir()
@@ -156,7 +165,7 @@ chunked.discard(JOBS, uid)
 assert not stage_dir.exists(), "staging survived discard"
 
 # --- the sweeper removes abandoned uploads ----------------------------------
-uid = begin()
+uid = begin(1)
 stage_dir = JOBS / "staging" / uid
 old = time.time() - 7 * 3600
 os.utime(stage_dir, (old, old))
@@ -166,7 +175,7 @@ assert not stage_dir.exists(), "an abandoned upload was left on disk"
 
 # Directory mtime does not change while a chunk is appended. A recently updated
 # manifest is the activity marker and must protect a long-running upload.
-uid = begin()
+uid = begin(1)
 stage_dir = JOBS / "staging" / uid
 os.utime(stage_dir, (old, old))
 chunked.sweep(JOBS)
@@ -174,7 +183,7 @@ assert stage_dir.exists(), "an active long upload was deleted"
 chunked.discard(JOBS, uid)
 
 # The generic completed-job sweeper must never delete active chunk staging.
-uid = begin()
+uid = begin(1)
 stage_dir = JOBS / "staging" / uid
 os.utime(JOBS / "staging", (old, old))
 web._sweep_old_jobs()

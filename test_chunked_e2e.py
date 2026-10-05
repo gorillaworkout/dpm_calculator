@@ -32,7 +32,7 @@ CHUNK = 5 * 1024 * 1024        # small on purpose: forces many pieces
 data = FIXTURE.read_bytes()
 print(f"fixture {len(data)/1048576:.1f} MB -> {-(-len(data)//CHUNK)} chunks")
 
-uid = c.post("/upload/begin").get_json()["id"]
+uid = c.post("/upload/begin", data={"bytes": str(len(data))}).get_json()["id"]
 seq = 0
 for off in range(0, len(data), CHUNK):
     r = c.post("/upload/chunk", data={

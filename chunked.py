@@ -100,6 +100,8 @@ def staged_files(jobs_dir, upload_id):
     manifest = _read_manifest(stage)
     if not manifest:
         return None
+    if manifest["bytes"] != manifest.get("declared_bytes"):
+        return None
     paths = []
     for entry in manifest["files"]:
         p = stage / entry["stored"]
@@ -133,7 +135,9 @@ def register(app, jobs_dir):
         stage = _stage_root(jobs_dir) / upload_id
         try:
             stage.mkdir()
-            _write_manifest(stage, {"files": [], "bytes": 0, "started": time.time()})
+            _write_manifest(stage, {"files": [], "bytes": 0,
+                                    "declared_bytes": requested,
+                                    "started": time.time()})
         except OSError:
             shutil.rmtree(stage, ignore_errors=True)
             return _storage_error()
@@ -186,6 +190,10 @@ def register(app, jobs_dir):
                         return jsonify({"received": manifest["bytes"]})
             if seq != expected:
                 return jsonify({"error": "Chunk arrived out of order.", "expected": expected}), 409
+            if manifest["bytes"] + len(data) > manifest.get("declared_bytes", 0):
+                shutil.rmtree(stage, ignore_errors=True)
+                return jsonify({"error": "Received bytes exceed the size declared when the upload started. "
+                                         "Please choose the files again."}), 413
             if manifest["bytes"] + len(data) > MAX_TOTAL:
                 shutil.rmtree(stage, ignore_errors=True)
                 return jsonify({"error": "The files add up to more than 5 GB. "
