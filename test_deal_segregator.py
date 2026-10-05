@@ -446,3 +446,31 @@ with TemporaryDirectory() as tmp:
     assert nonlocal_alive[1] < 20, f"normalized rows retained: peak={nonlocal_alive[1]}"
 
 print("OK deal segregator engine")
+
+# OOM regression: high-cardinality Deal/Position state must live on disk, not RAM.
+# 150k unique closing rows + 150k opening rows must stay far below the ~3x footprint
+# the old in-memory sets/dicts needed (production was OOM-killed at 7.2 GB).
+import resource
+import subprocess
+import sys
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "big.csv", tmp / "big.zip"
+    with src.open("w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(HEADERS)
+        for i in range(150_000):
+            w.writerow([f"in{i}", f"P{i}", str(100 + i % 50), "", "", "2026.07.01 00:00:00",
+                        "buy", "in", "EURUSD", "1", "-1", "0", "0", "0", "USD"])
+            w.writerow([f"out{i}", f"P{i}", str(100 + i % 50), "", "", "2026.07.02 00:00:00",
+                        "buy", "out", "EURUSD", "1", "0", "0", "0", "1", "USD"])
+    code = ("import resource,sys;from pathlib import Path;from deal_segregator import proses;"
+            "r=proses([Path(sys.argv[1])],Path(sys.argv[2]));"
+            "print(r['dipakai'],resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)")
+    res = subprocess.run([sys.executable, "-c", code, str(src), str(out)], capture_output=True,
+                         text=True, check=True, cwd=Path(__file__).parent)
+    kept, rss = map(int, res.stdout.split())
+    rss_mb = rss / (1024 * 1024 if sys.platform == "darwin" else 1024)
+    assert kept == 150_000, kept
+    assert rss_mb < 250, f"peak RSS {rss_mb:.0f} MB; high-cardinality state back in RAM"
+print("OK deal segregator bounded memory")

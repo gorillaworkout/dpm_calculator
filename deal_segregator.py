@@ -39,6 +39,7 @@ import argparse
 import csv
 import datetime
 import math
+import sqlite3
 import tempfile
 import sys
 import zipfile
@@ -46,6 +47,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
@@ -275,7 +277,81 @@ def _kunci_waktu(v):
 
 
 # --------------------------------------------------------------------- pipeline
-def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
+class _DiskState:
+    """Disk-backed high-cardinality state; RAM stays bounded for multi-GB runs."""
+    def __init__(self, path):
+        self.db = sqlite3.connect(path)
+        self.db.executescript("""
+            PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;
+            CREATE TABLE in_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
+            CREATE TABLE out_scan_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
+            CREATE TABLE out_used_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
+            CREATE TABLE openings (
+                login TEXT, position TEXT, commission REAL, fee REAL, swap REAL, rows INTEGER,
+                PRIMARY KEY(login, position)) WITHOUT ROWID;
+            CREATE TABLE legs (
+                login TEXT, position TEXT, date TEXT, currency TEXT,
+                commission REAL, fee REAL, swap REAL);
+            CREATE INDEX legs_key ON legs(login, position);
+            CREATE TABLE targets (
+                login TEXT, position TEXT, sort_key TEXT, path TEXT, row_number INTEGER,
+                PRIMARY KEY(login, position)) WITHOUT ROWID;
+        """)
+
+    def add_deal(self, table, deal):
+        if not deal:
+            return True
+        return self.db.execute(f"INSERT OR IGNORE INTO {table}(deal) VALUES(?)", (deal,)).rowcount == 1
+
+    def has_in_deal(self, deal):
+        return bool(deal and self.db.execute(
+            "SELECT 1 FROM in_deals WHERE deal=?", (deal,)).fetchone())
+
+    def add_opening(self, login, position, date, currency, commission, fee, swap):
+        self.db.execute("""INSERT INTO openings VALUES(?,?,?,?,?,1)
+            ON CONFLICT(login,position) DO UPDATE SET
+            commission=commission+excluded.commission, fee=fee+excluded.fee,
+            swap=swap+excluded.swap, rows=rows+1""",
+            (login, position, commission, fee, swap))
+        self.db.execute("INSERT INTO legs VALUES(?,?,?,?,?,?,?)",
+                        (login, position, date.isoformat(), currency, commission, fee, swap))
+
+    def consider_target(self, login, position, sort_key, path, row_number):
+        self.db.execute("""INSERT INTO targets VALUES(?,?,?,?,?)
+            ON CONFLICT(login,position) DO UPDATE SET
+            sort_key=excluded.sort_key,path=excluded.path,row_number=excluded.row_number
+            WHERE excluded.sort_key < targets.sort_key""",
+            (login, position, sort_key, str(path), row_number))
+
+    def take_opening(self, login, position, path, row_number):
+        target = self.db.execute("SELECT path,row_number FROM targets WHERE login=? AND position=?",
+                                 (login, position)).fetchone()
+        if target != (str(path), row_number):
+            return None
+        row = self.db.execute("SELECT commission,fee,swap,rows FROM openings WHERE login=? AND position=?",
+                              (login, position)).fetchone()
+        if not row:
+            return None
+        legs = [{"Date": datetime.date.fromisoformat(d), "Currency": c,
+                 "Commission": commission, "Fee": fee, "Swap": swap}
+                for d, c, commission, fee, swap in self.db.execute(
+                    "SELECT date,currency,commission,fee,swap FROM legs WHERE login=? AND position=?",
+                    (login, position))]
+        self.db.execute("DELETE FROM openings WHERE login=? AND position=?", (login, position))
+        self.db.execute("DELETE FROM legs WHERE login=? AND position=?", (login, position))
+        return {"Commission": row[0], "Fee": row[1], "Swap": row[2],
+                "_rows": row[3], "_fx_legs": legs}
+
+    def unmatched(self):
+        positions, rows = self.db.execute(
+            "SELECT COUNT(*),COALESCE(SUM(rows),0) FROM openings").fetchone()
+        return positions, rows
+
+    def close(self):
+        self.db.close()
+
+
+def _kumpulkan_komisi_in(deal_paths, state):
     """PASS 1 (dikonfirmasi user 24 Sep 2026, opsi 'merge onto the closing
     row'): baca ULANG semua file Deals History, kali ini cuma mengumpulkan
     Commission/Fee/Swap dari baris Entry='in', dijumlah per Position.
@@ -293,11 +369,6 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
     Login is part of the key because Position is not globally unique across
     client accounts.
     -> dict {(Login, Position): {"Commission","Fee","Swap"}}, counts by key"""
-    in_extra = defaultdict(lambda: {"Commission": 0.0, "Fee": 0.0, "Swap": 0.0,
-                                    "_fx_legs": []})
-    n_per_posisi = defaultdict(int)
-    out_pertama = {}
-    out_deal_terpakai = set()
     for path in deal_paths:
         idx, rows = baca_file(path)
         for nomor, row in rows:
@@ -316,21 +387,16 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
                 # Match pass 2's first-seen Deal dedup. A later duplicate must
                 # never become the target and then be discarded, or opening
                 # costs would remain stranded in in_extra.
-                if deal_id and (deal_id in deal_id_terpakai or deal_id in out_deal_terpakai):
+                if state.has_in_deal(deal_id) or not state.add_deal("out_scan_deals", deal_id):
                     continue
-                if deal_id:
-                    out_deal_terpakai.add(deal_id)
-                candidate = (_kunci_waktu(row[idx["Time"]]), _teks(row[idx["Deal"]]),
-                             path.name, nomor, path)
-                if position_key not in out_pertama or candidate[:4] < out_pertama[position_key][:4]:
-                    out_pertama[position_key] = candidate
+                candidate = (_kunci_waktu(row[idx["Time"]]).isoformat(),
+                             _teks(row[idx["Deal"]]), path.name, f"{nomor:012d}")
+                state.consider_target(login, posisi, "\0".join(candidate), path, nomor)
             if entry != "in":
                 continue
             deal_id = _teks(row[idx["Deal"]])
-            if deal_id and deal_id in deal_id_terpakai:
+            if not state.add_deal("in_deals", deal_id):
                 continue
-            if deal_id:
-                deal_id_terpakai.add(deal_id)
             commission = _angka(row[idx["Commission"]], path, nomor, "Commission")
             fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
             swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
@@ -342,25 +408,12 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
                     sys.exit(f"STOP: blank Position on Entry = 'in' with financial charges "
                              f"in '{path.name}', row {nomor}")
                 continue
-            acc = in_extra[position_key]
-            acc["Commission"] += commission
-            acc["Fee"] += fee
-            acc["Swap"] += swap
-            acc["_fx_legs"].append({
-                "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
-                "Currency": _norm(row[idx["Currency"]]),
-                "Commission": commission,
-                "Fee": fee,
-                "Swap": swap,
-            })
-            n_per_posisi[position_key] += 1
-    target_out = {position_key: (candidate[4], candidate[3])
-                  for position_key, candidate in out_pertama.items()}
-    return in_extra, n_per_posisi, target_out
+            state.add_opening(login, posisi, tanggal_dari_waktu(row[idx["Time"]], path, nomor),
+                              _norm(row[idx["Currency"]]), commission, fee, swap)
+        state.db.commit()
 
 
-def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris, in_extra,
-                           posisi_dipakai: set, target_out):
+def _normalisasi_satu_file(path: Path, state, pakai_baris):
     """PASS 2: baris 'out' seperti sebelumnya, TAPI Commission/Fee/Swap-nya
     sekarang ditambah dengan komisi 'in' pasangannya (dicari lewat
     'in_extra', hasil _kumpulkan_komisi_in, dikunci per Position).
@@ -387,18 +440,15 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris, in_ex
             continue
         entry_out += 1
         deal_id = _teks(row[idx["Deal"]])
-        if deal_id and deal_id in deal_id_terpakai:
+        if state.has_in_deal(deal_id) or not state.add_deal("out_used_deals", deal_id):
             duplikat += 1
             continue
-        if deal_id:
-            deal_id_terpakai.add(deal_id)
         posisi = _teks(row[idx["Position"]])
         login = _teks(row[idx["Login"]])
         if not login:
             sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
         position_key = (login, posisi)
-        tambahan = (in_extra.pop(position_key, None)
-                    if posisi and target_out.get(position_key) == (path, nomor) else None)
+        tambahan = state.take_opening(login, posisi, path, nomor) if posisi else None
         komisi = _angka(row[idx["Commission"]], path, nomor, "Commission")
         fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
         swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
@@ -415,7 +465,7 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris, in_ex
             komisi += tambahan["Commission"]
             fee += tambahan["Fee"]
             swap += tambahan["Swap"]
-            posisi_dipakai.add(position_key)
+
         pakai_baris({
             "Login": _teks(row[idx["Login"]]),
             "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
@@ -429,6 +479,7 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris, in_ex
             "Currency": _teks(row[idx["Currency"]]),
             "_opening_fx_legs": tambahan["_fx_legs"] if tambahan else [],
         })
+    state.db.commit()
     return {"nama": path.name, "total": total, "out": entry_out, "in": entry_in,
             "lain": entry_lain, "duplikat": duplikat}
 
@@ -489,7 +540,6 @@ def proses(paths_in, path_out: Path) -> dict:
     pakai_fx = bool(fx_paths)
     kurs_kurang = defaultdict(int)
 
-    deal_id_terpakai = set()
     kelompok_harian, kelompok_bulanan = {}, {}
     login_unik = set()
     dipakai = 0
@@ -532,11 +582,15 @@ def proses(paths_in, path_out: Path) -> dict:
         _tambah_agregat(kelompok_harian, b, "hari", pakai_fx)
         _tambah_agregat(kelompok_bulanan, b, "bulan", pakai_fx)
 
-    in_extra, n_in_per_posisi, target_out = _kumpulkan_komisi_in(deal_paths, deal_id_terpakai)
-    posisi_dipakai = set()
-    per_file = [_normalisasi_satu_file(path, deal_id_terpakai, pakai_baris, in_extra,
-                                      posisi_dipakai, target_out)
-                for path in deal_paths]
+    with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
+        state = _DiskState(Path(state_dir) / "state.sqlite")
+        try:
+            _kumpulkan_komisi_in(deal_paths, state)
+            per_file = [_normalisasi_satu_file(path, state, pakai_baris)
+                        for path in deal_paths]
+            unmatched_positions, n_in_belum_ketemu = state.unmatched()
+        finally:
+            state.close()
 
     total = sum(r["total"] for r in per_file)
     entry_in = sum(r["in"] for r in per_file)
@@ -575,13 +629,12 @@ def proses(paths_in, path_out: Path) -> dict:
     # terbuka, atau baris 'out'-nya ada di file yang tidak ikut diupload).
     # Dilaporkan (kuning), BUKAN error -- supaya tidak ada komisi yang hilang
     # tanpa jejak begitu batch berikutnya (yang memuat 'out'-nya) diupload.
-    n_in_terpakai = sum(n_in_per_posisi[p] for p in posisi_dipakai)
-    n_in_belum_ketemu = sum(n_in_per_posisi[p] for p in in_extra)
+    n_in_terpakai = entry_in - n_in_belum_ketemu
     ringkasan["Entry = in (merged onto matching Out by Position)"] = (
         f"{entry_in} seen, {n_in_terpakai} rows merged onto a matching Out row")
-    if in_extra:
+    if unmatched_positions:
         label = "In-row commission with no matching Out in this upload (Position still open?)"
-        ringkasan[label] = f"{len(in_extra):,} positions, {n_in_belum_ketemu:,} 'in' rows"
+        ringkasan[label] = f"{unmatched_positions:,} positions, {n_in_belum_ketemu:,} 'in' rows"
         yellow_labels.add(label)
     ringkasan.update({
         "Total source rows (all files)": total,
@@ -616,62 +669,70 @@ KUNING = PatternFill("solid", fgColor="FFFF00")
 
 
 def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
+    """Stream rows into a write-only sheet so memory does not scale with row count."""
     kolom = [kolom_periode if k == "{PERIODE}" else k
              for k in KOLOM_HASIL + (KOLOM_USD if pakai_fx else [])]
     usd_indexes = {kolom.index(k) + 1 for k in KOLOM_USD} if pakai_fx else set()
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
     for j, name in enumerate(kolom, start=1):
-        c = ws.cell(row=1, column=j, value=name)
+        ws.column_dimensions[get_column_letter(j)].width = max(10, len(name) + 2) + 4
+    ws.freeze_panes = "A2"
+    header = []
+    for j, name in enumerate(kolom, start=1):
+        c = WriteOnlyCell(ws, value=name)
         c.fill = header_fill
         c.font = header_font
         if j in usd_indexes:
             c.comment = Comment("Yellow means this row has no matching date/currency rate in the Client Equity FX file.",
                                 "Deal Segregator")
+        header.append(c)
+    ws.append(header)
 
-    col_periode = kolom.index(kolom_periode) + 1
-    for i, d in enumerate(hasil, start=2):
+    for d in hasil:
+        linha = []
         for j, name in enumerate(kolom, start=1):
             key = "Periode" if name == kolom_periode else name
             nilai = d[key]
-            if j in usd_indexes and d.get("_kurs_kurang"):
+            missing_fx = j in usd_indexes and d.get("_kurs_kurang")
+            if missing_fx:
                 nilai = None
             teks_tidak_aman = False
             if key in ("Commission", "Fee", "Swap", "Profit") or key in KOLOM_USD:
                 if isinstance(nilai, float):
                     nilai = round(nilai, 2)
             elif key in KOLOM_TEKS and nilai.startswith(("=", "+", "-", "@")):
-                # Force string storage; quotePrefix alone still serializes '=…' as <f>.
+                # Force string storage; quotePrefix alone still serializes '=...' as <f>.
                 teks_tidak_aman = True
-            sel = ws.cell(row=i, column=j, value=nilai)
+            sel = WriteOnlyCell(ws, value=nilai)
             if teks_tidak_aman:
                 sel.data_type = "s"
-            if j in usd_indexes and d.get("_kurs_kurang"):
+            if missing_fx:
                 sel.fill = KUNING
-        if isinstance(d["Periode"], datetime.date):
-            ws.cell(row=i, column=col_periode).number_format = fmt_periode
-
-    ws.freeze_panes = "A2"
-    for j, name in enumerate(kolom, start=1):
-        ws.column_dimensions[get_column_letter(j)].width = max(10, len(name) + 2) + 4
+            if name == kolom_periode and isinstance(d["Periode"], datetime.date):
+                sel.number_format = fmt_periode
+            linha.append(sel)
+        ws.append(linha)
 
 
 def _tulis_verifikasi(ws, ringkasan: dict, yellow_labels=frozenset()):
-    ws.cell(row=1, column=1, value="Summary - Deal Segregator").font = Font(bold=True, size=13)
-    for i, (label, val) in enumerate(ringkasan.items(), start=3):
-        first = ws.cell(row=i, column=1, value=label)
-        second = ws.cell(row=i, column=2, value=val)
-        if label in yellow_labels:
-            first.fill = second.fill = KUNING
     ws.column_dimensions["A"].width = 52
     ws.column_dimensions["B"].width = 22
+    title = WriteOnlyCell(ws, value="Summary - Deal Segregator")
+    title.font = Font(bold=True, size=13)
+    ws.append([title])
+    ws.append([])
+    for label, val in ringkasan.items():
+        first, second = WriteOnlyCell(ws, value=label), WriteOnlyCell(ws, value=val)
+        if label in yellow_labels:
+            first.fill = second.fill = KUNING
+        ws.append([first, second])
 
 
 def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
     """Legacy one-workbook writer kept for direct callers."""
-    wb = Workbook()
-    daily = wb.active
-    daily.title = "Daily"
+    wb = Workbook(write_only=True)
+    daily = wb.create_sheet("Daily")
     _tulis_sheet(daily, harian, "Date", "dd mmm yyyy")
     monthly = wb.create_sheet("Monthly Summary")
     _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy")
@@ -685,9 +746,8 @@ def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
 
 def _write_split_workbook(path, title, rows, period_name, period_format, summary,
                           pakai_fx, yellow_labels):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = title
+    wb = Workbook(write_only=True)
+    ws = wb.create_sheet(title)
     _tulis_sheet(ws, rows, period_name, period_format, pakai_fx)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:

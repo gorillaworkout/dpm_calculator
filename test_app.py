@@ -193,7 +193,7 @@ with zipfile.ZipFile(io.BytesIO(r.data)) as archive:
     wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True, data_only=True)
     try:
         assert wb.sheetnames == ["Daily", "Verifikasi"]
-        assert wb["Daily"].max_row - 1 == 9418
+        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == 9418
     finally:
         wb.close()
 
@@ -211,7 +211,7 @@ with zipfile.ZipFile(io.BytesIO(fx_response.data)) as archive:
     try:
         headers = [cell.value for cell in wb["Daily"][1]]
         assert headers[-4:] == ["Commission (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
-        assert wb["Daily"].max_row - 1 == 9418
+        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == 9418
     finally:
         wb.close()
 
