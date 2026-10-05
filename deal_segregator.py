@@ -290,7 +290,9 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
     Dedup pakai 'deal_id_terpakai' yang SAMA dengan pass 'out' (Deal ID unik
     per baris apa pun jenisnya, jadi berbagi satu set aman) -- supaya file
     yang sama diupload dua kali tidak melipatgandakan komisi.
-    -> dict {Position: {"Commission","Fee","Swap"}}, dict {Position: n_baris}"""
+    Login is part of the key because Position is not globally unique across
+    client accounts.
+    -> dict {(Login, Position): {"Commission","Fee","Swap"}}, counts by key"""
     in_extra = defaultdict(lambda: {"Commission": 0.0, "Fee": 0.0, "Swap": 0.0,
                                     "_fx_legs": []})
     n_per_posisi = defaultdict(int)
@@ -304,8 +306,13 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
                          f"expected {len(idx)} columns, found {len(row)} columns")
             entry = _teks(row[idx["Entry"]]).lower()
             posisi = _teks(row[idx["Position"]])
+            login = _teks(row[idx["Login"]])
+            position_key = (login, posisi)
             if entry == "out" and posisi:
+                if not login:
+                    sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
                 deal_id = _teks(row[idx["Deal"]])
+
                 # Match pass 2's first-seen Deal dedup. A later duplicate must
                 # never become the target and then be discarded, or opening
                 # costs would remain stranded in in_extra.
@@ -315,8 +322,8 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
                     out_deal_terpakai.add(deal_id)
                 candidate = (_kunci_waktu(row[idx["Time"]]), _teks(row[idx["Deal"]]),
                              path.name, nomor, path)
-                if posisi not in out_pertama or candidate[:4] < out_pertama[posisi][:4]:
-                    out_pertama[posisi] = candidate
+                if position_key not in out_pertama or candidate[:4] < out_pertama[position_key][:4]:
+                    out_pertama[position_key] = candidate
             if entry != "in":
                 continue
             deal_id = _teks(row[idx["Deal"]])
@@ -324,22 +331,31 @@ def _kumpulkan_komisi_in(deal_paths, deal_id_terpakai: set):
                 continue
             if deal_id:
                 deal_id_terpakai.add(deal_id)
+            commission = _angka(row[idx["Commission"]], path, nomor, "Commission")
+            fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
+            swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
+            if not login and any((commission, fee, swap)):
+                sys.exit(f"STOP: blank Login on Entry = 'in' with financial charges "
+                         f"in '{path.name}', row {nomor}")
             if not posisi:
+                if any((commission, fee, swap)):
+                    sys.exit(f"STOP: blank Position on Entry = 'in' with financial charges "
+                             f"in '{path.name}', row {nomor}")
                 continue
-            acc = in_extra[posisi]
-            acc["Commission"] += _angka(row[idx["Commission"]], path, nomor, "Commission")
-            acc["Fee"] += _angka(row[idx["Fee"]], path, nomor, "Fee")
-            acc["Swap"] += _angka(row[idx["Swap"]], path, nomor, "Swap")
+            acc = in_extra[position_key]
+            acc["Commission"] += commission
+            acc["Fee"] += fee
+            acc["Swap"] += swap
             acc["_fx_legs"].append({
                 "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
                 "Currency": _norm(row[idx["Currency"]]),
-                "Commission": _angka(row[idx["Commission"]], path, nomor, "Commission"),
-                "Fee": _angka(row[idx["Fee"]], path, nomor, "Fee"),
-                "Swap": _angka(row[idx["Swap"]], path, nomor, "Swap"),
+                "Commission": commission,
+                "Fee": fee,
+                "Swap": swap,
             })
-            n_per_posisi[posisi] += 1
-    target_out = {posisi: (candidate[4], candidate[3])
-                  for posisi, candidate in out_pertama.items()}
+            n_per_posisi[position_key] += 1
+    target_out = {position_key: (candidate[4], candidate[3])
+                  for position_key, candidate in out_pertama.items()}
     return in_extra, n_per_posisi, target_out
 
 
@@ -377,16 +393,29 @@ def _normalisasi_satu_file(path: Path, deal_id_terpakai: set, pakai_baris, in_ex
         if deal_id:
             deal_id_terpakai.add(deal_id)
         posisi = _teks(row[idx["Position"]])
-        tambahan = (in_extra.pop(posisi, None)
-                    if posisi and target_out.get(posisi) == (path, nomor) else None)
+        login = _teks(row[idx["Login"]])
+        if not login:
+            sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
+        position_key = (login, posisi)
+        tambahan = (in_extra.pop(position_key, None)
+                    if posisi and target_out.get(position_key) == (path, nomor) else None)
         komisi = _angka(row[idx["Commission"]], path, nomor, "Commission")
         fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
         swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
         if tambahan:
+            closing_currency = _norm(row[idx["Currency"]])
+            opening_currencies = {
+                leg["Currency"] for leg in tambahan["_fx_legs"]
+                if any(leg[name] for name in ("Commission", "Fee", "Swap"))
+            }
+            if opening_currencies and opening_currencies != {closing_currency}:
+                names = ", ".join(sorted(opening_currencies)) or "(blank)"
+                sys.exit(f"STOP: opening Currency {names} does not match closing Currency "
+                         f"{closing_currency or '(blank)'} in '{path.name}', row {nomor}")
             komisi += tambahan["Commission"]
             fee += tambahan["Fee"]
             swap += tambahan["Swap"]
-            posisi_dipakai.add(posisi)
+            posisi_dipakai.add(position_key)
         pakai_baris({
             "Login": _teks(row[idx["Login"]]),
             "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
@@ -608,15 +637,15 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
             if j in usd_indexes and d.get("_kurs_kurang"):
                 nilai = None
             teks_tidak_aman = False
-            if key in KOLOM_JUMLAH + KOLOM_USD and isinstance(nilai, float):
-                nilai = round(nilai, 2)
+            if key in ("Commission", "Fee", "Swap", "Profit") or key in KOLOM_USD:
+                if isinstance(nilai, float):
+                    nilai = round(nilai, 2)
             elif key in KOLOM_TEKS and nilai.startswith(("=", "+", "-", "@")):
-                # Excel would evaluate this as a formula; quotePrefix keeps it literal
-                # without polluting the value with a visible apostrophe.
+                # Force string storage; quotePrefix alone still serializes '=…' as <f>.
                 teks_tidak_aman = True
             sel = ws.cell(row=i, column=j, value=nilai)
             if teks_tidak_aman:
-                sel.quotePrefix = True
+                sel.data_type = "s"
             if j in usd_indexes and d.get("_kurs_kurang"):
                 sel.fill = KUNING
         if isinstance(d["Periode"], datetime.date):

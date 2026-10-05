@@ -118,7 +118,10 @@ assert b'name="bulan"' not in halaman_segregate.data
 assert b'name="saldo_jw"' not in halaman_segregate.data
 assert b"Download the template" not in halaman_segregate.data
 assert b"5 GB total upload limit" in halaman_segregate.data
+assert b"50 files maximum" in halaman_segregate.data
 assert b"in pieces automatically" in halaman_segregate.data
+assert b"files.length > 50" in halaman_segregate.data
+assert b"file.size === 0" in halaman_segregate.data
 
 missing = c.post("/tool/segregate", data={}, content_type="multipart/form-data")
 assert missing.status_code == 400
@@ -130,6 +133,16 @@ invalid = c.post(
 )
 assert invalid.status_code == 400
 assert b".csv, .xlsx, or .xlsm" in invalid.data
+
+too_many = c.post("/tool/segregate", data={
+    "file": [(io.BytesIO(b"x"), f"{i}.csv") for i in range(51)]
+}, content_type="multipart/form-data")
+assert too_many.status_code == 400 and b"no more than 50 files" in too_many.data
+
+empty = c.post("/tool/segregate", data={
+    "file": (io.BytesIO(b""), "empty.csv")
+}, content_type="multipart/form-data")
+assert empty.status_code == 400 and b"Empty files cannot be processed" in empty.data
 
 
 def kirim_segregate(files):
@@ -207,7 +220,7 @@ job_id, info = kirim_segregate([
 ])
 assert info["state"] == "done", info
 assert "kept: 209838" in (info["log"] or ""), info["log"]
-c.get(f"/job/{job_id}/download")
+assert c.get(f"/job/{job_id}/download").data[:2] == b"PK"
 
 # --- yang harus DITOLAK sebelum job dibuat ---------------------------------
 assert c.post("/tool/dw", data={"file": (io.BytesIO(b"x"), "a.txt"), **BULAN}
@@ -262,14 +275,14 @@ assert info["saldo_jw"] == "377.233,36", info["saldo_jw"]
 # angka Eropa/Indonesia harus dibaca 377233.36, dan tanggalnya akhir bulan SEBELUMNYA
 assert "377,233.36" in info["log"], (info["log"] or "")[:1500]
 assert "2026-05-31" in info["log"], (info["log"] or "")[:1500]
-c.get(f"/job/{job_id}/download")
+assert c.get(f"/job/{job_id}/download").data[:2] == b"PK"
 
 # tanpa saldo -> tidak boleh ada baris 'Saldo :' sama sekali
 job_id, state, info = kirim(src.name, src.open("rb"), **BULAN)
 assert state == "done", state
 assert info["saldo_jw"] is None
 assert "diketik di halaman upload" not in (info["log"] or "")
-c.get(f"/job/{job_id}/download")
+assert c.get(f"/job/{job_id}/download").data[:2] == b"PK"
 
 # --- bulan yang SALAH -> berhenti dengan pesan yang menyebut bulannya --------
 # Sengaja GAGAL, bukan menghasilkan workbook kosong: file kosong yang kelihatan

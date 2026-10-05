@@ -56,6 +56,33 @@ def test_dw_job_processing_copy_remains_accurate():
         web._state_path(job_id).unlink(missing_ok=True)
 
 
+def test_interrupted_download_remains_retryable():
+    client = web.app.test_client()
+    client.environ_base["HTTP_AUTHORIZATION"] = AUTH
+    job_id = uuid.uuid4().hex
+    job = web._job_dir(job_id)
+    job.mkdir()
+    result = job / "hasil.zip"
+    payload = b"PK" + b"x" * 200_000
+    result.write_bytes(payload)
+    web._write_state(job_id, state="done", name="hasil.zip", started=0,
+                     error=None, log=None, path=str(result), slug="segregate")
+    try:
+        response = client.get(f"/job/{job_id}/download", buffered=False)
+        assert response.status_code == 200
+        next(iter(response.response))
+        response.close()  # browser/network aborted before consuming the body
+
+        assert web._read_state(job_id)["state"] == "done"
+        retry = client.get(f"/job/{job_id}/download")
+        assert retry.status_code == 200
+        assert retry.data == payload
+    finally:
+        shutil.rmtree(web._job_dir(job_id), ignore_errors=True)
+        shutil.rmtree(web.JOBS / f".{job_id}.download", ignore_errors=True)
+        web._state_path(job_id).unlink(missing_ok=True)
+
+
 def test_cross_month_refuse_h1_is_relevant_to_report_period():
     h.PERIODE_FILTER = (2026, 6)
     assert h.refuse_h1_relevan(

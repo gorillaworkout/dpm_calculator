@@ -327,8 +327,9 @@ DOC = {
             "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
             "format with sheet <code>Query result</code> and columns <code>date</code>, "
             "<code>Currency</code>, <code>rate</code>. Select it together with the Deals files.",
-            "There is a <strong>5 GB total upload limit</strong> per run. Large "
-            "batches are sent to the server in pieces automatically &mdash; you will see "
+            "There is a <strong>5 GB total upload limit</strong> and a "
+            "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
+            "in pieces automatically &mdash; you will see "
             "the progress under the button, so leave the tab open until it says "
             "<em>Processing</em>. Duplicate Deal IDs are removed within each run.",
         ],
@@ -447,6 +448,19 @@ def run(slug, company="dpm"):
     if slug == "segregate":
         if not uploads and not staged:
             return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
+        if len(uploads) + len(staged or []) > chunked.MAX_FILES:
+            return _gagal(f"Select no more than {chunked.MAX_FILES} files per run.")
+        empty = []
+        for upload in uploads:
+            pos = upload.stream.tell()
+            upload.stream.seek(0, os.SEEK_END)
+            size = upload.stream.tell()
+            upload.stream.seek(pos)
+            if size == 0:
+                empty.append(upload.filename)
+        empty += [original for path, original in (staged or []) if path.stat().st_size == 0]
+        if empty:
+            return _gagal("Empty files cannot be processed: " + ", ".join(empty))
         names = [u.filename for u in uploads] + [orig for _p, orig in (staged or [])]
         invalid = [n for n in names if not n.lower().endswith((".csv", ".xlsx", ".xlsm"))]
         if invalid:
@@ -664,7 +678,6 @@ def job_download(job_id):
     if not result.is_file():
         shutil.rmtree(claimed, ignore_errors=True)
         return "Download is no longer available.", 410
-    _write_state(job_id, state="collected", path=None, collected=time.time())
     mimetype = ("application/zip" if info["slug"] == "segregate" else
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     response = send_file(result, as_attachment=True,
@@ -672,13 +685,24 @@ def job_download(job_id):
     stream = response.response
 
     def cleanup_stream():
+        completed = False
         try:
             yield from stream
+            completed = True
         finally:
             close = getattr(stream, "close", None)
             if close:
                 close()
-            shutil.rmtree(claimed, ignore_errors=True)
+            if completed:
+                _write_state(job_id, state="collected", path=None, collected=time.time())
+                shutil.rmtree(claimed, ignore_errors=True)
+            else:
+                # A dropped browser/VPN connection must not destroy a finished
+                # financial artifact. Restore it so the same URL can be retried.
+                try:
+                    os.rename(claimed, job)
+                except OSError:
+                    pass
 
     response.response = cleanup_stream()
     return response

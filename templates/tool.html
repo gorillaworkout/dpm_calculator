@@ -7,7 +7,7 @@
 <div class="card">
   <form id="uploadform" method="post" enctype="multipart/form-data">
     {% if slug == "segregate" %}
-    <label for="deals-file">Deals History <span class="opt">— one or more files</span></label>
+    <label for="deals-file">Deals History <span class="opt">— one or more files, 50 files maximum</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Deals History files here</strong><br><span>or click to choose one or more files</span>
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
@@ -251,6 +251,14 @@
         return all.concat(Array.prototype.slice.call(input.files || []));
       }, []);
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
+      if (files.length > 50 || files.some(function (file) { return file.size === 0; })) {
+        ev.preventDefault();
+        var message = files.length > 50
+          ? 'Select no more than 50 files per run.'
+          : 'Empty files cannot be processed. Remove the 0-byte file and try again.';
+        updateProgress('Upload failed', message, 0, 'failed');
+        return;
+      }
       if (!files.length || total < DIRECT) {
         form.b.disabled = true; form.b.textContent = 'Working…';
         updateProgress('Uploading files…', files.length + ' file(s), ' + mb(total) + ' MB · waiting for server response', 0, 'uploading');

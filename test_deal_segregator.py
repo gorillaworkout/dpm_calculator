@@ -264,6 +264,83 @@ with TemporaryDirectory() as tmp:
         {"EARLIER": -12, "LATER": 0},
     ], results
 
+# Position identifiers are not globally unique across client accounts. Opening
+# charges must only merge into an Out row owned by the same Login.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "cross-login.csv", tmp / "cross-login.xlsx"
+    write_csv(src, [
+        row("in-100", position="SHARED", login="100", entry="in",
+            commission="-9", fee="-1", swap="-2", profit="0"),
+        row("out-200", position="SHARED", login="200", entry="out",
+            commission="0", fee="0", swap="0", profit="10"),
+    ])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        output = values(wb["Daily"])[1]
+        assert output[0] == "200"
+        assert output[6:9] == (0, 0, 0), output
+        verification = dict(values(wb["Verifikasi"])[2:])
+        assert verification["In-row commission with no matching Out in this upload (Position still open?)"] == \
+            "1 positions, 1 'in' rows"
+    finally:
+        wb.close()
+
+# Non-zero opening costs without Position cannot be matched safely. Reject the
+# batch instead of silently dropping financial values from the report.
+expect_error([
+    row("blank-position", position="", entry="in", commission="-7", fee="-1", swap="-2", profit="0"),
+    row("closing", position="", entry="out", commission="0", fee="0", swap="0", profit="10"),
+], "STOP:", "blank Position", "row 2")
+
+# A single output row has one native Currency. Opening charges in another
+# currency cannot be added to it without corrupting the native totals.
+expect_error([
+    row("cross-currency-in", position="PC", entry="in", currency="JPY",
+        commission="-100", fee="0", swap="0", profit="0"),
+    row("cross-currency-out", position="PC", entry="out", currency="EUR",
+        commission="0", fee="0", swap="0", profit="10"),
+], "STOP:", "opening Currency", "JPY", "closing Currency", "EUR")
+
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "zero-cross-currency.csv", tmp / "zero-cross-currency.xlsx"
+    write_csv(src, [
+        row("zero-in", position="PZ", entry="in", currency="JPY",
+            commission="0", fee="0", swap="0", profit="0"),
+        row("zero-out", position="PZ", entry="out", currency="EUR",
+            commission="0", fee="0", swap="0", profit="10"),
+    ])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert values(wb["Daily"])[1][6:9] == (0, 0, 0)
+    finally:
+        wb.close()
+
+# Grouping identifiers are financial dimensions; blank Login would collapse
+# unrelated unidentified accounts into one aggregate.
+expect_error([row("blank-login", login="")], "STOP:", "blank Login", "row 2")
+expect_error([
+    row("blank-login-in", login="", position="PBL", entry="in",
+        commission="-9", fee="-1", swap="-2", profit="0"),
+    row("valid-close", login="100", position="PBL", entry="out",
+        commission="0", fee="0", swap="0", profit="10"),
+], "STOP:", "blank Login", "financial charges", "row 2")
+
+# Volume is not money and must retain source precision.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "volume.csv", tmp / "volume.xlsx"
+    write_csv(src, [row("small-volume", volume="0.001")])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert values(wb["Daily"])[1][5] == 0.001
+    finally:
+        wb.close()
+
 # Untrusted text must stay literal in Excel; typed dates/numbers must remain typed.
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
@@ -279,10 +356,12 @@ with TemporaryDirectory() as tmp:
             assert [cells[i].value for i in (0, 2, 3, 10)] == [
                 "=1+1", "@buy", "=EURUSD", "+USD",
             ]
-            # quotePrefix keeps the value literal in Excel WITHOUT a stray apostrophe.
-            assert all(cells[i].quotePrefix for i in (0, 2, 3, 10))
+            assert all(cells[i].data_type == "s" for i in (0, 2, 3, 10))
             assert cells[1].is_date
             assert all(c.data_type == "n" for c in cells[4:10])
+        with zipfile.ZipFile(out) as archive:
+            xml = archive.read("xl/worksheets/sheet1.xml")
+            assert b"<f>1+1</f>" not in xml
     finally:
         wb.close()
 
