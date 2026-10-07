@@ -23,7 +23,7 @@ def test_zip_writer_does_not_buffer_workbooks_in_memory():
     try:
         with TemporaryDirectory() as folder:
             out = Path(folder) / "result.zip"
-            deal_segregator._tulis_zip([row], [row], out, {}, False, set())
+            deal_segregator._tulis_zip([row], [row], [], [], out, {}, False, set())
             with zipfile.ZipFile(out) as archive:
                 assert archive.namelist() == ["Deals - Daily.xlsx", "Deals - Monthly Summary.xlsx"]
     finally:
@@ -45,11 +45,6 @@ def row(deal, position=None, login="100", group=r"real\DPMKT-15", country="MY",
         time="2026.07.01 01:02:03.004", type_="buy", entry="out",
         symbol="EURUSD", volume="1.25", commission="-1", fee="-0.1",
         swap="-0.2", profit="10", currency="USD"):
-    # Kalau tidak diberikan, Position default UNIK per baris (= Deal-nya sendiri)
-    # supaya baris di fixture yang sudah ada TIDAK saling ketemu lewat pencarian
-    # Position (lihat _kumpulkan_komisi_in/_normalisasi_satu_file) -- angka yang
-    # sudah diverifikasi di bawah tetap berlaku apa adanya. Tes gabungan in/out
-    # yang SENGAJA berbagi Position ada di blok terpisah di bawah.
     if position is None:
         position = deal
     return [deal, position, login, group, country, time, type_, entry, symbol,
@@ -126,7 +121,8 @@ with TemporaryDirectory() as tmp:
     summary = proses([first, second], out)
     wb = load_workbook(out, read_only=True, data_only=True)
     try:
-        assert wb.sheetnames == ["Daily", "Monthly Summary", "Verifikasi"]
+        assert wb.sheetnames == ["Daily", "Daily - In", "Monthly Summary",
+                                 "Monthly Summary - In", "Verifikasi"]
         daily = values(wb["Daily"])
         monthly = values(wb["Monthly Summary"])
         assert daily[0] == tuple(RESULT_HEADERS)
@@ -146,198 +142,88 @@ with TemporaryDirectory() as tmp:
         assert wb["Verifikasi"]["A1"].value == "Summary - Deal Segregator"
         assert verification["Total source rows (all files)"] == 7
         assert verification["Entry = out (before deduplication)"] == 6
-        assert verification["Entry = in (merged onto matching Out by Position)"] == \
-            "1 seen, 0 rows merged onto a matching Out row"
-        assert verification["In-row commission with no matching Out in this upload (Position still open?)"] == \
-            "1 positions, 1 'in' rows"
+        assert verification["Entry = in (before deduplication)"] == 1
         assert verification["Duplicate non-empty Deal IDs (dropped)"] == 1
-        assert verification["Unique rows kept"] == 5
+        assert verification["Unique 'out' rows kept"] == 5
+        assert verification["Unique 'in' rows kept"] == 1
+        # The 'in' row lives on its own sheet, with its own values as in MT5.
+        assert values(wb["Daily - In"])[0] == tuple(RESULT_HEADERS)
+        assert values(wb["Daily - In"])[1:] == [
+            ("100", datetime.datetime(2026, 7, 1), "buy", "EURUSD", 1, 1.25, -1, -0.1, -0.2, 999, "USD"),
+        ]
+        assert len(values(wb["Monthly Summary - In"])) == 2
         # The label must state every grouping dimension actually used.
-        assert verification["Daily output rows (Login+Date+Type+Symbol+Currency)"] == 4
-        assert verification["Monthly Summary output rows (Login+Month+Type+Symbol+Currency)"] == 3
+        assert verification["Daily 'out' rows (Login+Date+Type+Symbol+Currency)"] == 4
+        assert verification["Monthly Summary 'out' rows (Login+Month+Type+Symbol+Currency)"] == 3
         assert verification["Unique logins"] == 2
         assert "Rows with Country" not in verification
         assert "Rows without Country" not in verification
         assert "Unique desks" not in verification
-        assert verification["Total Profit (all kept rows)"] == 72
-        assert summary == {"file_masuk": 2, "total": 7, "dipakai": 5,
-                           "harian": 4, "bulanan": 3, "login_unik": 2}
+        assert verification["Total Profit ('out' rows)"] == 72
+        assert verification["Total Profit ('in' rows)"] == 999
+        assert summary == {"file_masuk": 2, "total": 7, "dipakai": 5, "dipakai_in": 1,
+                           "harian": 4, "bulanan": 3, "harian_in": 1, "bulanan_in": 1,
+                           "login_unik": 2}
     finally:
         wb.close()
 
-# Entry='in' Commission/Fee/Swap merge onto the matching Entry='out' row by
-# Position (dikonfirmasi user 24 Sep 2026, opsi "merge onto the closing row"):
-# some brokers only record Commission on the opening leg, so dropping 'in'
-# rows outright silently loses real charges. Volume/Deals must stay exactly
-# as the 'out' row alone -- 'in' and 'out' of the same position almost always
-# report the SAME Volume, so counting both would double it.
-# Each Position below uses its OWN Symbol so the three scenarios land in
-# three distinct, unambiguous output rows (grouping is by Symbol among other
-# fields, so reusing a Symbol across positions would merge them together).
+# 'in' rows get their OWN sheet (dikonfirmasi user 6 Okt 2026, opsi A): nothing is
+# merged onto the 'out' rows, so Commission/Fee/Swap of an opening leg stays on the
+# 'in' sheet exactly as MT5 reports it and is never counted twice.
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
-    src, out = tmp / "merge.csv", tmp / "merge.xlsx"
+    src, out = tmp / "split.csv", tmp / "split.xlsx"
     write_csv(src, [
-        # Simple case: one 'in' with real Commission, one 'out' with none of
-        # its own -- merged Commission must equal the 'in' row's alone.
-        row("1", position="P1", entry="in", commission="-2", fee="0", swap="0", profit="0"),
-        row("2", position="P1", entry="out", symbol="XAUUSD", commission="0", fee="0", swap="0", profit="10"),
-        # Partial close: ONE 'in' shared by TWO 'out' rows (different Symbols,
-        # so they land in different output rows) -- the 'in' Commission must
-        # land on only the FIRST 'out' encountered in the file, never both.
-        row("3", position="P2", entry="in", commission="-5", fee="-0.5", swap="0", profit="0"),
-        row("4", position="P2", entry="out", symbol="EURUSD", commission="0", fee="0", swap="0", profit="20"),
-        row("5", position="P2", entry="out", symbol="GBPUSD", commission="0", fee="0", swap="0", profit="30"),
-        # Position never closed in this upload -- its Commission must be
-        # reported as unmatched, not silently dropped.
-        row("6", position="P3", entry="in", commission="-7", fee="0", swap="0", profit="0"),
+        row("1", position="P1", entry="in", type_="buy", commission="-2", fee="0", swap="0", profit="0"),
+        row("2", position="P1", entry="out", type_="sell", commission="0", fee="0", swap="0", profit="10"),
+        row("3", position="P2", entry="in", type_="buy", symbol="XAUUSD", commission="-5", fee="-0.5", swap="0", profit="0"),
+        row("1", position="P1", entry="in", type_="buy", commission="-2", fee="0", swap="0", profit="0"),  # duplicate Deal
     ])
     summary = proses([src], out)
     wb = load_workbook(out, read_only=True, data_only=True)
     try:
-        by_symbol = {r[3]: r for r in values(wb["Daily"])[1:]}
-        assert by_symbol["XAUUSD"][6] == -2, "P1: merged Commission must be exactly the 'in' row's -2"
-        assert by_symbol["XAUUSD"][4] == 1, "Deals must stay 1, not 2"
-        assert by_symbol["XAUUSD"][5] == 1.25, "Volume must not double"
-        assert by_symbol["EURUSD"][6] == -5 and by_symbol["EURUSD"][7] == -0.5, \
-            "P2 first Out (EURUSD, file order) must claim the whole 'in' Commission/Fee"
-        assert by_symbol["GBPUSD"][6] == 0 and by_symbol["GBPUSD"][7] == 0, \
-            "P2 second Out (GBPUSD, partial close) must NOT also get the 'in' Commission"
+        out_rows = values(wb["Daily"])[1:]
+        in_rows = {r[3]: r for r in values(wb["Daily - In"])[1:]}
+        assert [r[3:] for r in out_rows] == [("EURUSD", 1, 1.25, 0, 0, 0, 10, "USD")], \
+            "'out' sheet must show the 'out' row exactly as MT5 (no merged commission)"
+        assert in_rows["EURUSD"][4:10] == (1, 1.25, -2, 0, 0, 0)
+        assert in_rows["XAUUSD"][6] == -5 and in_rows["XAUUSD"][7] == -0.5
         verification = dict(values(wb["Verifikasi"])[2:])
-        assert verification["Entry = in (merged onto matching Out by Position)"] == \
-            "3 seen, 2 rows merged onto a matching Out row"
-        assert verification["In-row commission with no matching Out in this upload (Position still open?)"] == \
-            "1 positions, 1 'in' rows"
+        assert verification["Total Commission ('out' rows)"] == 0
+        assert verification["Total Commission ('in' rows)"] == -7
+        assert verification["Duplicate non-empty Deal IDs (dropped)"] == 1
+        assert summary["dipakai"] == 1 and summary["dipakai_in"] == 2
     finally:
         wb.close()
 
-# A duplicate Out Deal must not become the opening-cost target and then be
-# discarded. Target selection must use the same first-seen Deal dedup rule.
+# A multi-sheet XLSX (sheet IN + sheet OUT, like the Malaysia team's check file) must be
+# read in full: every sheet with Deals History columns, columns matched by NAME, other
+# sheets skipped and reported.
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
-    opening, kept, duplicate = tmp / "opening.csv", tmp / "kept.csv", tmp / "duplicate.csv"
-    write_csv(opening, [row("in", position="PD", entry="in", time="2026.01.01 00:00:00",
-                            commission="-9", fee="0", swap="0", profit="0")])
-    write_csv(kept, [row("same-deal", position="PD", entry="out", time="2026.02.01 00:00:00",
-                         symbol="KEPT", commission="0", fee="0", swap="0", profit="2")])
-    write_csv(duplicate, [row("same-deal", position="PD", entry="out", time="2026.01.15 00:00:00",
-                              symbol="DUPLICATE", commission="0", fee="0", swap="0", profit="1")])
-    out = tmp / "dedup-target.xlsx"
-    proses([opening, kept, duplicate], out)
+    src, out = tmp / "two-sheets.xlsx", tmp / "two-sheets-out.xlsx"
+    workbook = Workbook()
+    ws_in, ws_out = workbook.active, workbook.create_sheet("OUT")
+    ws_in.title = "IN"
+    ws_in.append(HEADERS)
+    ws_in.append(row("1", entry="in", commission="-3", profit="0"))
+    swapped = ["Login", "Deal"] + [h for h in HEADERS if h not in ("Login", "Deal")]  # other column order
+    ws_out.append(swapped)
+    r = dict(zip(HEADERS, row("2", entry="out", type_="sell", commission="0", profit="8")))
+    ws_out.append([r[h] for h in swapped])
+    workbook.create_sheet("Notes").append(["just", "a", "note"])
+    workbook.save(src)
+    workbook.close()
+    summary = proses([src], out)
     wb = load_workbook(out, read_only=True, data_only=True)
     try:
-        rows = values(wb["Daily"])[1:]
-        assert len(rows) == 1
-        assert rows[0][3] == "KEPT" and rows[0][6] == -9, rows
-    finally:
-        wb.close()
-
-# Upload order must not decide which partial close receives the opening costs.
-# The earliest Out by Time owns them, even when its file is uploaded second.
-with TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
-    opening, later, earlier = tmp / "opening.csv", tmp / "later.csv", tmp / "earlier.csv"
-    write_csv(opening, [
-        row("10", position="PX", entry="in", time="2026.01.01 00:00:00",
-            commission="-12", fee="0", swap="0", profit="0"),
-    ])
-    write_csv(later, [
-        row("12", position="PX", entry="out", time="2026.02.01 00:00:00",
-            symbol="LATER", commission="0", fee="0", swap="0", profit="2"),
-    ])
-    write_csv(earlier, [
-        row("11", position="PX", entry="out", time="2026.01.15 00:00:00",
-            symbol="EARLIER", commission="0", fee="0", swap="0", profit="1"),
-    ])
-    results = []
-    for order in ([opening, later, earlier], [earlier, later, opening]):
-        out = tmp / f"order-{len(results)}.xlsx"
-        proses(order, out)
-        wb = load_workbook(out, read_only=True, data_only=True)
-        try:
-            by_symbol = {r[3]: r[6] for r in values(wb["Daily"])[1:]}
-            results.append(by_symbol)
-        finally:
-            wb.close()
-    assert results == [
-        {"EARLIER": -12, "LATER": 0},
-        {"EARLIER": -12, "LATER": 0},
-    ], results
-
-# Position identifiers are not globally unique across client accounts. Opening
-# charges must only merge into an Out row owned by the same Login.
-with TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
-    src, out = tmp / "cross-login.csv", tmp / "cross-login.xlsx"
-    write_csv(src, [
-        row("in-100", position="SHARED", login="100", entry="in",
-            commission="-9", fee="-1", swap="-2", profit="0"),
-        row("out-200", position="SHARED", login="200", entry="out",
-            commission="0", fee="0", swap="0", profit="10"),
-    ])
-    proses([src], out)
-    wb = load_workbook(out, read_only=True, data_only=True)
-    try:
-        output = values(wb["Daily"])[1]
-        assert output[0] == "200"
-        assert output[6:9] == (0, 0, 0), output
+        assert values(wb["Daily - In"])[1][6] == -3
+        assert values(wb["Daily"])[1][9] == 8
         verification = dict(values(wb["Verifikasi"])[2:])
-        assert verification["In-row commission with no matching Out in this upload (Position still open?)"] == \
-            "1 positions, 1 'in' rows"
-    finally:
-        wb.close()
-
-# Non-zero opening costs without Position cannot be matched safely. Reject the
-# batch instead of silently dropping financial values from the report.
-expect_error([
-    row("blank-position", position="", entry="in", commission="-7", fee="-1", swap="-2", profit="0"),
-    row("closing", position="", entry="out", commission="0", fee="0", swap="0", profit="10"),
-], "STOP:", "blank Position", "row 2")
-
-# A single output row has one native Currency. Opening charges in another
-# currency cannot be added to it without corrupting the native totals.
-expect_error([
-    row("cross-currency-in", position="PC", entry="in", currency="JPY",
-        commission="-100", fee="0", swap="0", profit="0"),
-    row("cross-currency-out", position="PC", entry="out", currency="EUR",
-        commission="0", fee="0", swap="0", profit="10"),
-], "STOP:", "opening Currency", "JPY", "closing Currency", "EUR")
-
-with TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
-    src, out = tmp / "zero-cross-currency.csv", tmp / "zero-cross-currency.xlsx"
-    write_csv(src, [
-        row("zero-in", position="PZ", entry="in", currency="JPY",
-            commission="0", fee="0", swap="0", profit="0"),
-        row("zero-out", position="PZ", entry="out", currency="EUR",
-            commission="0", fee="0", swap="0", profit="10"),
-    ])
-    proses([src], out)
-    wb = load_workbook(out, read_only=True, data_only=True)
-    try:
-        assert values(wb["Daily"])[1][6:9] == (0, 0, 0)
-    finally:
-        wb.close()
-
-# Grouping identifiers are financial dimensions; blank Login would collapse
-# unrelated unidentified accounts into one aggregate.
-expect_error([row("blank-login", login="")], "STOP:", "blank Login", "row 2")
-expect_error([
-    row("blank-login-in", login="", position="PBL", entry="in",
-        commission="-9", fee="-1", swap="-2", profit="0"),
-    row("valid-close", login="100", position="PBL", entry="out",
-        commission="0", fee="0", swap="0", profit="10"),
-], "STOP:", "blank Login", "financial charges", "row 2")
-
-# Volume is not money and must retain source precision.
-with TemporaryDirectory() as tmp:
-    tmp = Path(tmp)
-    src, out = tmp / "volume.csv", tmp / "volume.xlsx"
-    write_csv(src, [row("small-volume", volume="0.001")])
-    proses([src], out)
-    wb = load_workbook(out, read_only=True, data_only=True)
-    try:
-        assert values(wb["Daily"])[1][5] == 0.001
+        assert verification["      sheet 'IN'"] == "1 rows read"
+        assert verification["      sheet 'OUT'"] == "1 rows read"
+        assert any("skipped" in k and v == "Notes" for k, v in verification.items()), verification
+        assert summary["dipakai"] == 1 and summary["dipakai_in"] == 1
     finally:
         wb.close()
 
@@ -356,6 +242,8 @@ with TemporaryDirectory() as tmp:
             assert [cells[i].value for i in (0, 2, 3, 10)] == [
                 "=1+1", "@buy", "=EURUSD", "+USD",
             ]
+            # quotePrefix keeps the value literal in Excel WITHOUT a stray apostrophe.
+            assert all(cells[i].quotePrefix for i in (0, 2, 3, 10))
             assert all(cells[i].data_type == "s" for i in (0, 2, 3, 10))
             assert cells[1].is_date
             assert all(c.data_type == "n" for c in cells[4:10])
@@ -387,6 +275,63 @@ expect_error([row("1", time="2026.07.01 25:00:00")], "STOP:", "bad.csv", "row 2"
 expect_error([row("1", time="2026.07.01 garbage")], "STOP:", "bad.csv", "row 2", "Time")
 expect_error([row("1", time="yesterday")], "STOP:", "bad.csv", "row 2", "Time")
 expect_error([["1", "100"]], "STOP:", "bad.csv", "row 2", "expected 15 columns", "found 2 columns")
+
+# Position is not a required column, and a blank Position is kept as its own
+# row. Opening charges stay on the in sheet; they are not rejected for lacking
+# a Position to merge onto.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "no-position.csv", tmp / "no-position.xlsx"
+    headers = [h for h in HEADERS if h != "Position"]
+    sample = row("1", entry="out", commission="-3", profit="4")
+    data = [c for h, c in zip(HEADERS, sample) if h != "Position"]
+    with src.open("w", encoding="utf-8", newline="") as f:
+        csv.writer(f).writerows([headers, data])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert values(wb["Daily"])[1][6] == -3
+        assert values(wb["Daily"])[1][9] == 4
+        assert values(wb["Daily - In"])[1:] == []
+    finally:
+        wb.close()
+
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "blank-position.csv", tmp / "blank-position.xlsx"
+    write_csv(src, [
+        row("in-blank", position="", entry="in", commission="-7", fee="-1", swap="-2", profit="0"),
+        row("out-blank", position="", entry="out", commission="0", fee="0", swap="0", profit="10"),
+    ])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert values(wb["Daily"])[1][6:10] == (0, 0, 0, 10)
+        assert values(wb["Daily - In"])[1][6:9] == (-7, -1, -2)
+    finally:
+        wb.close()
+
+# Grouping identifiers are financial dimensions; blank Login would collapse
+# unrelated unidentified accounts into one aggregate.
+expect_error([row("blank-login", login="")], "STOP:", "blank Login", "row 2")
+expect_error([
+    row("blank-login-in", login="", position="PBL", entry="in",
+        commission="-9", fee="-1", swap="-2", profit="0"),
+    row("valid-close", login="100", position="PBL", entry="out",
+        commission="0", fee="0", swap="0", profit="10"),
+], "STOP:", "blank Login", "financial charges", "row 2")
+
+# Volume is not money and must retain source precision.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "volume.csv", tmp / "volume.xlsx"
+    write_csv(src, [row("small-volume", volume="0.001")])
+    proses([src], out)
+    wb = load_workbook(out, read_only=True, data_only=True)
+    try:
+        assert values(wb["Daily"])[1][5] == 0.001
+    finally:
+        wb.close()
 
 def expect_rejected_xlsx_closed(filename, populate, *message_parts):
     with TemporaryDirectory() as tmp:
@@ -447,7 +392,7 @@ with TemporaryDirectory() as tmp:
 
 print("OK deal segregator engine")
 
-# OOM regression: high-cardinality Deal/Position state must live on disk, not RAM.
+# OOM regression: high-cardinality Deal IDs must live on disk, not RAM.
 # 150k unique closing rows + 150k opening rows must stay far below the ~3x footprint
 # the old in-memory sets/dicts needed (production was OOM-killed at 7.2 GB).
 import resource

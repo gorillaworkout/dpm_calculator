@@ -323,7 +323,7 @@ DOC = {
                    "Client Equity FX workbook. File types are detected automatically.",
         "siapkan": [
             "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
-            "Each file must contain Deal, Position, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns. Group and Country are ignored and are not required.",
+            "Each file (or each sheet of an Excel file) must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns. Group and Country are ignored and are not required.",
             "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
             "format with sheet <code>Query result</code> and columns <code>date</code>, "
             "<code>Currency</code>, <code>rate</code>. Select it together with the Deals files.",
@@ -334,17 +334,19 @@ DOC = {
             "<em>Processing</em>. Duplicate Deal IDs are removed within each run.",
         ],
         "langkah": [
-            "Rows from every file are pooled. Only <code>Entry = out</code> rows become output rows. "
-            "Commission, Fee and Swap recorded on the matching <code>Entry = in</code> opening row are "
-            "added onto that closing row, so opening charges are never lost; Volume and the deal count "
-            "stay exactly as the closing row reports them.",
+            "Rows from every file, and from every sheet of an Excel file, are pooled. "
+            "<code>Entry = out</code> rows (closing trades) and <code>Entry = in</code> rows (opening trades) "
+            "are kept on <strong>separate sheets</strong> with the same layout. Nothing is merged between "
+            "them: each row keeps its own Volume, Commission, Fee, Swap and Profit exactly as MT5 reports it. "
+            "The <code>in</code> and <code>out</code> of one trade share the same Volume, so do not add the "
+            "Volume of the two sheets together.",
             "Repeated non-empty Deal IDs are removed, then Daily and Monthly Summary totals are grouped by account, period, type, symbol and currency. Group and Country are deliberately ignored.",
             "When Client Equity FX is included, Commission, Fee, Swap and Profit are converted "
             "to USD by exact Date + Currency. Missing rates stay blank and are highlighted yellow.",
         ],
         "hasil": "One <code>.zip</code> containing two workbooks:",
-        "sheets": [("Deals - Daily.xlsx", "Daily aggregates, USD columns when FX is supplied, plus Verifikasi."),
-                   ("Deals - Monthly Summary.xlsx", "Monthly aggregates, USD columns when FX is supplied, plus Verifikasi.")],
+        "sheets": [("Deals - Daily.xlsx", "<code>Daily</code> (out rows), <code>Daily - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi."),
+                   ("Deals - Monthly Summary.xlsx", "<code>Monthly Summary</code> (out rows), <code>Monthly Summary - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi.")],
         "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.", CATATAN_ASLI],
     },
 }
@@ -549,7 +551,7 @@ def run(slug, company="dpm"):
                            dst, periode, saldo_jw, saldo_ch),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
-    return redirect(url_for(endpoint, job_id=job_id))
+    return redirect(url_for(endpoint, job_id=job_id), code=303)
 
 
 @app.post("/kvb/tool/<slug>")
