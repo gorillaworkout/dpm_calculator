@@ -44,7 +44,7 @@ for off in range(0, len(data), CHUNK):
 
 r = c.post("/tool/segregate", data={"upload_id": uid},
            content_type="multipart/form-data")
-assert r.status_code == 302, (r.status_code, r.data[:500])
+assert r.status_code == 303, (r.status_code, r.data[:500])
 job_id = r.headers["Location"].rstrip("/").split("/")[-1]
 
 deadline = time.time() + 900

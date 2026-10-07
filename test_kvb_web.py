@@ -53,7 +53,7 @@ try:
         "file": (io.BytesIO(b"fake"), "KVB Plus.xlsx"),
         "bulan": "8", "tahun": "2026",
     }, content_type="multipart/form-data")
-    assert response.status_code == 302, (response.status_code, response.data[:500])
+    assert response.status_code == 303, (response.status_code, response.data[:500])
     job_id, state = wait(response.headers["Location"])
     assert state["state"] == "done", state
     assert state["company"] == "kvb"

@@ -19,9 +19,7 @@ def write_deals(path):
     with path.open("w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(HEADERS)
-        # Position unik per baris (beda dari Deal manapun) supaya tidak ikut
-        # kena logika merge Entry='in'->'out' (lihat test_deal_segregator.py) --
-        # fokus tes ini murni konversi FX, bukan penggabungan in/out.
+        # Fokus tes ini murni konversi FX. Baris 'in' dan 'out' tidak digabung.
         w.writerow(["1", "P1", "100", r"real\DPMKT-15", "MY", "2026.07.01 01:02:03.004",
                     "buy", "out", "EURUSD", "1", "-2", "-1", "-4", "20", "JPY"])
         w.writerow(["2", "P2", "100", r"real\DPMKT-15", "MY", "2026.07.02 01:02:03.004",
@@ -80,8 +78,8 @@ with TemporaryDirectory() as tmp:
 
 print("OK Deal + Client Equity FX")
 
-# Opening costs belong to the opening date's FX rate, even though they are
-# displayed on the matching closing row. Closing-row costs use the close rate.
+# Each row is converted with the FX rate of ITS OWN date: the 'in' row (opening leg,
+# own sheet 'Daily - In') uses the opening date's rate, the 'out' row uses the close rate.
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     deals, fx, out = tmp / "deals.csv", tmp / "fx.xlsx", tmp / "result.zip"
@@ -103,14 +101,16 @@ with TemporaryDirectory() as tmp:
     with zipfile.ZipFile(out) as z:
         wb = load_workbook(io.BytesIO(z.read("Deals - Daily.xlsx")), data_only=True)
         headers = [c.value for c in wb["Daily"][1]]
-        row = {headers[i]: c.value for i, c in enumerate(wb["Daily"][2])}
+        row_out = {headers[i]: c.value for i, c in enumerate(wb["Daily"][2])}
+        row_in = {headers[i]: c.value for i, c in enumerate(wb["Daily - In"][2])}
         wb.close()
-    assert row["Commission"] == -18 and row["Commission (USD)"] == -7
-    assert row["Fee"] == -6 and row["Fee (USD)"] == -2
-    assert row["Swap"] == -16 and row["Swap (USD)"] == -5
-    assert row["Profit (USD)"] == 10
+    assert row_out["Commission"] == -8 and row_out["Commission (USD)"] == -2
+    assert row_out["Fee (USD)"] == -1 and row_out["Swap (USD)"] == -3
+    assert row_out["Profit (USD)"] == 10
+    assert row_in["Commission"] == -10 and row_in["Commission (USD)"] == -5
+    assert row_in["Fee (USD)"] == -1 and row_in["Swap (USD)"] == -2
 
-print("OK opening-date FX")
+print("OK per-row-date FX")
 
 
 def expect_bad_fx(rows, *parts):

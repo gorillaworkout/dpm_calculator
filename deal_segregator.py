@@ -9,27 +9,35 @@ mis. upload Juni dan Juli sebagai dua file terpisah, hasilnya DIGABUNG jadi
 satu laporan. Cocok untuk laporan yang mencakup beberapa bulan tapi
 diekspor per bulan dari MT5.
 
-Tahap 1 (dikonfirmasi user 11 Sep 2026, direvisi 12, 12 & 24 Sep 2026):
-  - Baris output tetap satu per "out" (baris yang MENUTUP posisi -> yang
-    punya Profit realized). Baris kosong/lainnya dibuang.
-  - Baris "in" (buka posisi) TIDAK jadi baris sendiri, tapi Commission/Fee/
-    Swap-nya DIGABUNG ke baris "out" yang sama Position-nya (dikonfirmasi
-    user 24 Sep 2026: tim Malaysia menemukan sebagian Commission cuma
-    tercatat di baris "in", jadi hilang kalau baris "in" dibuang begitu saja
-    -- lihat _kumpulkan_komisi_in()). TIDAK menyertakan baris "in" sebagai
-    baris terpisah karena Volume-nya HAMPIR SELALU SAMA dengan baris "out"
-    pasangannya (position yang sama) -- kalau ikut disertakan, Volume
-    laporan akan terhitung dua kali untuk hampir setiap trade.
+Tahap 1 (dikonfirmasi user 11 Sep 2026, direvisi 12, 12, 24 Sep & 6 Okt 2026):
+  - Baris "out" (yang MENUTUP posisi -> punya Profit realized) dan baris "in"
+    (yang MEMBUKA posisi) sama-sama diproses, tapi di SHEET TERPISAH:
+    "Daily"/"Monthly Summary" = out saja, "Daily - In"/"Monthly Summary - In" =
+    in saja. Layout kolom kedua sheet SAMA. Tidak ada penggabungan antar
+    keduanya (keputusan user 6 Okt 2026, opsi 2 + 'Opsi A': tim Malaysia mau
+    bisa mengecek bahwa in DAN out sama-sama masuk). Commission/Fee/Swap baris
+    "in" tinggal di sheet "in" apa adanya dari MT5, TIDAK ditempel ke baris
+    "out" (cara lama 24 Sep, dihapus supaya komisi tidak terhitung dua kali).
+  - File .xlsx boleh punya beberapa sheet (mis. sheet IN dan sheet OUT): SEMUA
+    sheet yang punya kolom Deals History dibaca, bukan cuma sheet aktif.
   - "Group" dan "Country" diabaikan sepenuhnya (keputusan user 24 Sep 2026).
     Keduanya tidak wajib, tidak ditulis ke output, dan tidak menjadi grouping.
+  - "Position" tidak wajib (6 Okt 2026): tidak dipakai untuk menggabungkan in/out.
   - "Time" dipangkas jadi TANGGAL saja (jam/menit/detik dibuang).
   - Kalau ada beberapa file, baris dengan "Deal" ID yang SAMA (dari file
     manapun) hanya dihitung SEKALI -- jaga-jaga kalau dua file yang diupload
     ternyata tumpang tindih tanggalnya.
   - Hasilnya berupa .zip berisi Deals - Daily.xlsx dan
-    Deals - Monthly Summary.xlsx; masing-masing punya sheet Verifikasi.
-    Baris dengan kunci yang sama pada level masing-masing digabung, kolom
-    numerik dijumlah, kolom "Deals" mencatat berapa baris asli yang tergabung.
+    Deals - Monthly Summary.xlsx; masing-masing punya sheet out, sheet in, dan
+    Verifikasi. Baris dengan kunci yang sama pada level masing-masing
+    digabung, kolom numerik dijumlah, kolom "Deals" mencatat berapa baris asli
+    yang tergabung.
+
+Skalabilitas (tetap dari perbaikan OOM di main, bukan dari salinan 6 Okt):
+  - ID Deal yang sudah terpakai disimpan di SQLite di disk, bukan set Python,
+    supaya run multi-GB tidak menumpuk ratusan juta ID di RAM.
+  - Workbook ditulis write-only dan di-stream ke file sementara sebelum masuk
+    zip, supaya ukuran output tidak ikut membesar di memori.
 
 File sumber MT5 "Deals History" biasanya diekspor sebagai UTF-16LE
 tab-delimited (bukan CSV koma biasa) -- encoding & pemisah kolom dideteksi
@@ -52,7 +60,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-KOLOM_WAJIB = ["Deal", "Position", "Login", "Time", "Type", "Entry",
+KOLOM_WAJIB = ["Deal", "Login", "Time", "Type", "Entry",
                "Symbol", "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"]
 
 KOLOM_HASIL = ["Login", "{PERIODE}", "Type", "Symbol", "Deals",
@@ -61,6 +69,7 @@ KOLOM_USD = ["Commission (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
 
 KOLOM_JUMLAH = ["Volume", "Commission", "Fee", "Swap", "Profit"]
 KOLOM_TEKS = {"Login", "Type", "Symbol", "Currency"}
+KOLOM_UANG = ("Commission", "Fee", "Swap", "Profit")
 
 # Label Inggris untuk ringkasan yang DITAMPILKAN ke user (log job di web app).
 # Kunci dict hasil tetap dipakai internal oleh pemanggil lain.
@@ -71,10 +80,14 @@ LABEL_RINGKASAN = {
     "harian": "Daily rows",
     "bulanan": "Monthly Summary rows",
     "login_unik": "unique logins",
+    "harian_in": "Daily 'in' rows",
+    "bulanan_in": "Monthly Summary 'in' rows",
+    "dipakai_in": "'in' rows kept",
 }
 
-ENTRY_DIPAKAI = "out"
+ENTRY_DIPAKAI = ("out", "in")
 FX_SHEET = "QUERY RESULT"
+_DEAL_COMMIT_EVERY = 10000
 
 
 # --------------------------------------------------------------------- baca file
@@ -109,32 +122,60 @@ def _baca_csv(path: Path):
 
 
 def _baca_xlsx(path: Path):
+    """Baca SEMUA sheet yang berisi kolom Deals History (bukan cuma sheet aktif).
+    Sheet lain (tanpa kolom wajib) dilewati. Baris tiap sheet disusun ulang
+    mengikuti urutan kolom sheet pertama yang cocok, jadi sheet dengan urutan
+    kolom berbeda tetap terbaca benar. -> header, rows, close, info"""
     wb = None
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb.active
-        it = ws.iter_rows(values_only=True)
-        header = [_teks(v) for v in next(it)]
+        sheets, dilewati, header_pertama = [], [], []
+        for ws in wb.worksheets:
+            it = ws.iter_rows(values_only=True)
+            first = next(it, None)
+            header = [_teks(v) for v in first] if first else []
+            if header and not header_pertama:
+                header_pertama = header
+            if all(k in header for k in KOLOM_WAJIB):
+                sheets.append((ws.title, header, it))
+            else:
+                dilewati.append(ws.title)
     except Exception as exc:
         if wb is not None:
             wb.close()
-        detail = "the file has no header row" if isinstance(exc, StopIteration) else str(exc)
-        sys.exit(f"STOP: could not read the header in '{path.name}': {detail}")
+        sys.exit(f"STOP: could not read the header in '{path.name}': {exc}")
+    info = {"dibaca": {}, "dilewati": dilewati}
+    if not sheets:
+        wb.close()
+        if not header_pertama:
+            sys.exit(f"STOP: could not read the header in '{path.name}': the file has no header row")
+        return header_pertama, iter(()), None, info
+    kanon = sheets[0][1]
+
     def rows():
         try:
-            for nomor, row in enumerate(it, start=2):
-                if any(v is not None and _teks(v) != "" for v in row):
-                    yield nomor, list(row)
+            for nama, header, it in sheets:
+                posisi = [header.index(k) if k in header else None for k in kanon]
+                n = 0
+                for nomor, row in enumerate(it, start=2):
+                    if any(v is not None and _teks(v) != "" for v in row):
+                        n += 1
+                        yield nomor, [row[i] if i is not None and i < len(row) else None
+                                      for i in posisi]
+                info["dibaca"][nama] = n
         finally:
             wb.close()
-    return header, rows(), wb.close
+    return kanon, rows(), wb.close, info
 
 
 def baca_file(path: Path):
-    """Baca satu file export Deals History (.csv atau .xlsx/.xlsm). -> (idx, rows)."""
+    """Baca satu file export Deals History (.csv atau .xlsx/.xlsm). -> (idx, rows, info).
+    info['dibaca'] = {nama_sheet: jumlah_baris} untuk .xlsx; baru terisi setelah
+    rows habis dibaca. Kosong untuk .csv."""
     suffix = path.suffix.lower()
+    info = {"dibaca": {}, "dilewati": []}
     if suffix in (".xlsx", ".xlsm"):
-        header, rows, close = _baca_xlsx(path)
+        header, rows, close, info = _baca_xlsx(path)
     else:
         header, rows, close = _baca_csv(path)
     idx = {name: i for i, name in enumerate(header)}
@@ -147,7 +188,7 @@ def baca_file(path: Path):
             f"Header that was read ({len(header)} columns): {header}\n"
             "Make sure this file is a 'Deals History' export from MT5, not another file."
         )
-    return idx, rows
+    return idx, rows, info
 
 
 # ------------------------------------------------------------------- normalisasi
@@ -261,227 +302,98 @@ def _kunci_tanggal(v):
     return v if isinstance(v, datetime.date) else datetime.date.min
 
 
-def _kunci_waktu(v):
-    """Comparable full timestamp used to choose the earliest partial close."""
-    if isinstance(v, datetime.datetime):
-        return v
-    if isinstance(v, datetime.date):
-        return datetime.datetime.combine(v, datetime.time())
-    teks = _teks(v)
-    for fmt in ("%Y.%m.%d %H:%M:%S.%f", "%Y.%m.%d %H:%M:%S"):
-        try:
-            return datetime.datetime.strptime(teks, fmt)
-        except ValueError:
-            pass
-    return datetime.datetime.max
+class _DiskDeals:
+    """Deal IDs already kept, stored on disk so multi-GB uploads stay bounded."""
 
-
-# --------------------------------------------------------------------- pipeline
-class _DiskState:
-    """Disk-backed high-cardinality state; RAM stays bounded for multi-GB runs."""
     def __init__(self, path):
         self.db = sqlite3.connect(path)
         self.db.executescript("""
-            PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA temp_store=FILE;
-            CREATE TABLE in_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
-            CREATE TABLE out_scan_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
-            CREATE TABLE out_used_deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
-            CREATE TABLE openings (
-                login TEXT, position TEXT, commission REAL, fee REAL, swap REAL, rows INTEGER,
-                PRIMARY KEY(login, position)) WITHOUT ROWID;
-            CREATE TABLE legs (
-                login TEXT, position TEXT, date TEXT, currency TEXT,
-                commission REAL, fee REAL, swap REAL);
-            CREATE INDEX legs_key ON legs(login, position);
-            CREATE TABLE targets (
-                login TEXT, position TEXT, sort_key TEXT, path TEXT, row_number INTEGER,
-                PRIMARY KEY(login, position)) WITHOUT ROWID;
+            PRAGMA journal_mode=OFF;
+            PRAGMA synchronous=OFF;
+            PRAGMA temp_store=FILE;
+            CREATE TABLE deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
         """)
+        self._pending = 0
 
-    def add_deal(self, table, deal):
+    def add_deal(self, deal):
+        """True when this non-empty Deal ID is seen for the first time."""
         if not deal:
             return True
-        return self.db.execute(f"INSERT OR IGNORE INTO {table}(deal) VALUES(?)", (deal,)).rowcount == 1
+        inserted = self.db.execute(
+            "INSERT OR IGNORE INTO deals(deal) VALUES(?)", (deal,)).rowcount == 1
+        self._pending += 1
+        if self._pending >= _DEAL_COMMIT_EVERY:
+            self.commit()
+        return inserted
 
-    def has_in_deal(self, deal):
-        return bool(deal and self.db.execute(
-            "SELECT 1 FROM in_deals WHERE deal=?", (deal,)).fetchone())
-
-    def add_opening(self, login, position, date, currency, commission, fee, swap):
-        self.db.execute("""INSERT INTO openings VALUES(?,?,?,?,?,1)
-            ON CONFLICT(login,position) DO UPDATE SET
-            commission=commission+excluded.commission, fee=fee+excluded.fee,
-            swap=swap+excluded.swap, rows=rows+1""",
-            (login, position, commission, fee, swap))
-        self.db.execute("INSERT INTO legs VALUES(?,?,?,?,?,?,?)",
-                        (login, position, date.isoformat(), currency, commission, fee, swap))
-
-    def consider_target(self, login, position, sort_key, path, row_number):
-        self.db.execute("""INSERT INTO targets VALUES(?,?,?,?,?)
-            ON CONFLICT(login,position) DO UPDATE SET
-            sort_key=excluded.sort_key,path=excluded.path,row_number=excluded.row_number
-            WHERE excluded.sort_key < targets.sort_key""",
-            (login, position, sort_key, str(path), row_number))
-
-    def take_opening(self, login, position, path, row_number):
-        target = self.db.execute("SELECT path,row_number FROM targets WHERE login=? AND position=?",
-                                 (login, position)).fetchone()
-        if target != (str(path), row_number):
-            return None
-        row = self.db.execute("SELECT commission,fee,swap,rows FROM openings WHERE login=? AND position=?",
-                              (login, position)).fetchone()
-        if not row:
-            return None
-        legs = [{"Date": datetime.date.fromisoformat(d), "Currency": c,
-                 "Commission": commission, "Fee": fee, "Swap": swap}
-                for d, c, commission, fee, swap in self.db.execute(
-                    "SELECT date,currency,commission,fee,swap FROM legs WHERE login=? AND position=?",
-                    (login, position))]
-        self.db.execute("DELETE FROM openings WHERE login=? AND position=?", (login, position))
-        self.db.execute("DELETE FROM legs WHERE login=? AND position=?", (login, position))
-        return {"Commission": row[0], "Fee": row[1], "Swap": row[2],
-                "_rows": row[3], "_fx_legs": legs}
-
-    def unmatched(self):
-        positions, rows = self.db.execute(
-            "SELECT COUNT(*),COALESCE(SUM(rows),0) FROM openings").fetchone()
-        return positions, rows
+    def commit(self):
+        self.db.commit()
+        self._pending = 0
 
     def close(self):
         self.db.close()
 
 
-def _kumpulkan_komisi_in(deal_paths, state):
-    """PASS 1 (dikonfirmasi user 24 Sep 2026, opsi 'merge onto the closing
-    row'): baca ULANG semua file Deals History, kali ini cuma mengumpulkan
-    Commission/Fee/Swap dari baris Entry='in', dijumlah per Position.
-
-    Dijalankan SEBELUM pass 'out' (_normalisasi_satu_file) supaya baris 'out'
-    mana pun -- dari file manapun, dalam urutan upload apapun -- sudah bisa
-    langsung menemukan komisi 'in' pasangannya sejak baris pertama diproses.
-    Position bisa saja baru MUNCUL di file yang diupload BELAKANGAN (mis.
-    "in" ada di file Januari, "out" di file Februari), jadi tidak cukup
-    mengandalkan urutan baca satu file.
-
-    Dedup pakai 'deal_id_terpakai' yang SAMA dengan pass 'out' (Deal ID unik
-    per baris apa pun jenisnya, jadi berbagi satu set aman) -- supaya file
-    yang sama diupload dua kali tidak melipatgandakan komisi.
-    Login is part of the key because Position is not globally unique across
-    client accounts.
-    -> dict {(Login, Position): {"Commission","Fee","Swap"}}, counts by key"""
-    for path in deal_paths:
-        idx, rows = baca_file(path)
-        for nomor, row in rows:
-            if len(row) != len(idx):
-                sys.exit(f"STOP: invalid column count in '{path.name}', row {nomor}: "
-                         f"expected {len(idx)} columns, found {len(row)} columns")
-            entry = _teks(row[idx["Entry"]]).lower()
-            posisi = _teks(row[idx["Position"]])
-            login = _teks(row[idx["Login"]])
-            position_key = (login, posisi)
-            if entry == "out" and posisi:
-                if not login:
-                    sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
-                deal_id = _teks(row[idx["Deal"]])
-
-                # Match pass 2's first-seen Deal dedup. A later duplicate must
-                # never become the target and then be discarded, or opening
-                # costs would remain stranded in in_extra.
-                if state.has_in_deal(deal_id) or not state.add_deal("out_scan_deals", deal_id):
-                    continue
-                candidate = (_kunci_waktu(row[idx["Time"]]).isoformat(),
-                             _teks(row[idx["Deal"]]), path.name, f"{nomor:012d}")
-                state.consider_target(login, posisi, "\0".join(candidate), path, nomor)
-            if entry != "in":
-                continue
-            deal_id = _teks(row[idx["Deal"]])
-            if not state.add_deal("in_deals", deal_id):
-                continue
-            commission = _angka(row[idx["Commission"]], path, nomor, "Commission")
-            fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
-            swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
-            if not login and any((commission, fee, swap)):
-                sys.exit(f"STOP: blank Login on Entry = 'in' with financial charges "
-                         f"in '{path.name}', row {nomor}")
-            if not posisi:
-                if any((commission, fee, swap)):
-                    sys.exit(f"STOP: blank Position on Entry = 'in' with financial charges "
-                             f"in '{path.name}', row {nomor}")
-                continue
-            state.add_opening(login, posisi, tanggal_dari_waktu(row[idx["Time"]], path, nomor),
-                              _norm(row[idx["Currency"]]), commission, fee, swap)
-        state.db.commit()
-
-
-def _normalisasi_satu_file(path: Path, state, pakai_baris):
-    """PASS 2: baris 'out' seperti sebelumnya, TAPI Commission/Fee/Swap-nya
-    sekarang ditambah dengan komisi 'in' pasangannya (dicari lewat
-    'in_extra', hasil _kumpulkan_komisi_in, dikunci per Position).
-
-    Kalau satu Position punya LEBIH DARI SATU baris 'out' (partial close --
-    jarang, ~0,5% posisi di data uji), komisi 'in'-nya HANYA ditambahkan ke
-    baris 'out' PERTAMA yang ditemukan (in_extra.pop -- entry-nya dibuang
-    setelah dipakai), supaya tidak dobel ke setiap partial close. Posisi yang
-    dipakai dicatat di 'posisi_dipakai' supaya sisa yang TIDAK PERNAH ketemu
-    baris 'out'-nya bisa dilaporkan (lihat proses())."""
-    idx, rows = baca_file(path)
-    total = entry_out = entry_in = entry_lain = duplikat = 0
+def _normalisasi_satu_file(path: Path, deals, pakai_baris):
+    """Baca satu file; tiap baris Entry 'out' atau 'in' dikirim ke pakai_baris
+    (dengan b['Entry'] = 'out'/'in'). Baris dengan Entry lain/kosong dibuang.
+    Deal ID yang sudah pernah muncul (file manapun, jenis baris manapun) dibuang.
+    Login kosong ditolak: itu kunci grouping, dan akun tak dikenal akan
+    tertumpuk jadi satu baris kalau dibiarkan."""
+    idx, rows, info = baca_file(path)
+    total = n_out = n_in = lain = dup_out = dup_in = 0
     for nomor, row in rows:
         total += 1
         if len(row) != len(idx):
             sys.exit(f"STOP: invalid column count in '{path.name}', row {nomor}: "
                      f"expected {len(idx)} columns, found {len(row)} columns")
         entry = _teks(row[idx["Entry"]]).lower()
+        if entry not in ENTRY_DIPAKAI:
+            lain += 1
+            continue
         if entry == "in":
-            entry_in += 1
-            continue
-        if entry != ENTRY_DIPAKAI:
-            entry_lain += 1
-            continue
-        entry_out += 1
+            n_in += 1
+        else:
+            n_out += 1
         deal_id = _teks(row[idx["Deal"]])
-        if state.has_in_deal(deal_id) or not state.add_deal("out_used_deals", deal_id):
-            duplikat += 1
+        if deal_id and not deals.add_deal(deal_id):
+            if entry == "in":
+                dup_in += 1
+            else:
+                dup_out += 1
             continue
-        posisi = _teks(row[idx["Position"]])
         login = _teks(row[idx["Login"]])
-        if not login:
-            sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
-        position_key = (login, posisi)
-        tambahan = state.take_opening(login, posisi, path, nomor) if posisi else None
-        komisi = _angka(row[idx["Commission"]], path, nomor, "Commission")
+        tanggal = tanggal_dari_waktu(row[idx["Time"]], path, nomor)
+        # Volume before the money columns, matching the source-file order, so a
+        # bad Volume is reported before a bad Fee on the same row.
+        volume = _angka(row[idx["Volume"]], path, nomor, "Volume")
+        commission = _angka(row[idx["Commission"]], path, nomor, "Commission")
         fee = _angka(row[idx["Fee"]], path, nomor, "Fee")
         swap = _angka(row[idx["Swap"]], path, nomor, "Swap")
-        if tambahan:
-            closing_currency = _norm(row[idx["Currency"]])
-            opening_currencies = {
-                leg["Currency"] for leg in tambahan["_fx_legs"]
-                if any(leg[name] for name in ("Commission", "Fee", "Swap"))
-            }
-            if opening_currencies and opening_currencies != {closing_currency}:
-                names = ", ".join(sorted(opening_currencies)) or "(blank)"
-                sys.exit(f"STOP: opening Currency {names} does not match closing Currency "
-                         f"{closing_currency or '(blank)'} in '{path.name}', row {nomor}")
-            komisi += tambahan["Commission"]
-            fee += tambahan["Fee"]
-            swap += tambahan["Swap"]
-
+        profit = _angka(row[idx["Profit"]], path, nomor, "Profit")
+        if not login and entry == "in" and any((commission, fee, swap)):
+            sys.exit(f"STOP: blank Login on Entry = 'in' with financial charges "
+                     f"in '{path.name}', row {nomor}")
+        if not login:
+            sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
         pakai_baris({
-            "Login": _teks(row[idx["Login"]]),
-            "Date": tanggal_dari_waktu(row[idx["Time"]], path, nomor),
+            "Entry": entry,
+            "Login": login,
+            "Date": tanggal,
             "Type": _teks(row[idx["Type"]]),
             "Symbol": _teks(row[idx["Symbol"]]),
-            "Volume": _angka(row[idx["Volume"]], path, nomor, "Volume"),
-            "Commission": komisi,
+            "Volume": volume,
+            "Commission": commission,
             "Fee": fee,
             "Swap": swap,
-            "Profit": _angka(row[idx["Profit"]], path, nomor, "Profit"),
+            "Profit": profit,
             "Currency": _teks(row[idx["Currency"]]),
-            "_opening_fx_legs": tambahan["_fx_legs"] if tambahan else [],
         })
-    state.db.commit()
-    return {"nama": path.name, "total": total, "out": entry_out, "in": entry_in,
-            "lain": entry_lain, "duplikat": duplikat}
+    deals.commit()
+    return {"nama": path.name, "total": total, "out": n_out, "in": n_in,
+            "lain": lain, "dup_out": dup_out, "dup_in": dup_in,
+            "duplikat": dup_out + dup_in, "sheets": info["dibaca"],
+            "sheets_dilewati": info["dilewati"]}
 
 
 def _tambah_agregat(kelompok, b, level, pakai_fx=False):
@@ -526,8 +438,10 @@ def _hasil_agregat(kelompok):
 
 
 def proses(paths_in, path_out: Path) -> dict:
-    """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP."""
+    """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
+    'out' and 'in' rows go to separate sheets of each workbook."""
     paths_in = [Path(p) for p in paths_in]
+    path_out = Path(path_out)
     fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
     deal_paths = [p for p in paths_in if p not in fx_paths]
     if len(fx_paths) > 1:
@@ -540,83 +454,79 @@ def proses(paths_in, path_out: Path) -> dict:
     pakai_fx = bool(fx_paths)
     kurs_kurang = defaultdict(int)
 
-    kelompok_harian, kelompok_bulanan = {}, {}
+    harian = {"out": {}, "in": {}}
+    bulanan = {"out": {}, "in": {}}
     login_unik = set()
-    dipakai = 0
-    jumlah_profit = 0.0
+    dipakai = {"out": 0, "in": 0}
+    jumlah = {"out": defaultdict(float), "in": defaultdict(float)}
 
     def pakai_baris(b):
-        nonlocal dipakai, jumlah_profit
-        dipakai += 1
+        e = b["Entry"]
+        dipakai[e] += 1
         login_unik.add(b["Login"])
-        jumlah_profit += b["Profit"]
+        for kol in ("Volume", "Commission", "Fee", "Swap", "Profit"):
+            jumlah[e][kol] += b[kol]
         if pakai_fx:
             marker = object()
-            close_key = (b["Date"], _norm(b["Currency"]))
-            rate = fx.get(close_key, marker)
-            opening_legs = b.get("_opening_fx_legs", [])
-            missing = []
+            key = (b["Date"], _norm(b["Currency"]))
+            rate = fx.get(key, marker)
             if rate is marker or rate == 0:
-                missing.append(close_key)
-            for leg in opening_legs:
-                key = (leg["Date"], leg["Currency"])
-                leg_rate = fx.get(key, marker)
-                if leg_rate is marker or leg_rate == 0:
-                    missing.append(key)
-            if missing:
                 b["_kurs_kurang"] = True
-                for key in set(missing):
-                    kurs_kurang[key] += 1
+                kurs_kurang[key] += 1
                 for name in KOLOM_USD:
                     b[name] = None
             else:
                 b["_kurs_kurang"] = False
-                close_divisor = 1.0 if rate is None else rate
+                pembagi = 1.0 if rate is None else rate
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
-                    opening_native = sum(leg.get(source, 0.0) for leg in opening_legs)
-                    value = (b[source] - opening_native) / close_divisor
-                    for leg in opening_legs:
-                        leg_rate = fx[(leg["Date"], leg["Currency"])]
-                        value += leg.get(source, 0.0) / (1.0 if leg_rate is None else leg_rate)
-                    b[target] = value
-        _tambah_agregat(kelompok_harian, b, "hari", pakai_fx)
-        _tambah_agregat(kelompok_bulanan, b, "bulan", pakai_fx)
+                    b[target] = b[source] / pembagi
+        _tambah_agregat(harian[e], b, "hari", pakai_fx)
+        _tambah_agregat(bulanan[e], b, "bulan", pakai_fx)
 
+    path_out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
-        state = _DiskState(Path(state_dir) / "state.sqlite")
+        deals = _DiskDeals(Path(state_dir) / "deals.sqlite")
         try:
-            _kumpulkan_komisi_in(deal_paths, state)
-            per_file = [_normalisasi_satu_file(path, state, pakai_baris)
+            per_file = [_normalisasi_satu_file(path, deals, pakai_baris)
                         for path in deal_paths]
-            unmatched_positions, n_in_belum_ketemu = state.unmatched()
         finally:
-            state.close()
+            deals.close()
 
     total = sum(r["total"] for r in per_file)
-    entry_in = sum(r["in"] for r in per_file)
     entry_lain = sum(r["lain"] for r in per_file)
-    duplikat = sum(r["duplikat"] for r in per_file)
-    if not dipakai:
+    dup_out = sum(r["dup_out"] for r in per_file)
+    dup_in = sum(r["dup_in"] for r in per_file)
+    duplikat = dup_out + dup_in
+    if not (dipakai["out"] or dipakai["in"]):
         sys.exit(
-            "STOP: no row with Entry = 'out' was found.\n"
-            f"Across {len(deal_paths)} Deals History file(s), {total} rows in total: "
-            f"{entry_in} 'in', {entry_lain} other/empty.\n"
+            "STOP: no row with Entry = 'out' or 'in' was found.\n"
+            f"Across {len(deal_paths)} Deals History file(s), {total} rows in total, "
+            f"all {entry_lain} with another/empty Entry.\n"
             "Check that these files are the correct Deals History exports."
         )
 
-    harian = _hasil_agregat(kelompok_harian)
-    bulanan = _hasil_agregat(kelompok_bulanan)
+    h_out, h_in = _hasil_agregat(harian["out"]), _hasil_agregat(harian["in"])
+    b_out, b_in = _hasil_agregat(bulanan["out"]), _hasil_agregat(bulanan["in"])
 
     ringkasan = {"Uploaded files": len(paths_in)}
+    yellow_labels = set()
     for r in per_file:
-        ringkasan[f"  - {r['nama']}"] = (f"{r['total']} rows, {r['out']} 'out' kept"
-                                          + (f", {r['duplikat']} duplicates dropped" if r["duplikat"] else ""))
+        ringkasan[f"  - {r['nama']}"] = (
+            f"{r['total']} rows, {r['out']} 'out' + {r['in']} 'in' kept"
+            + (f", {r['duplikat']} duplicates dropped" if r["duplikat"] else ""))
+        for nama, n in r["sheets"].items():
+            ringkasan[f"      sheet '{nama}'"] = f"{n} rows read"
+        if r["sheets_dilewati"]:
+            ringkasan[f"      sheets skipped in {r['nama']} (no Deals History columns)"] = \
+                ", ".join(r["sheets_dilewati"])
+        if not (r["out"] or r["in"]):
+            ringkasan[f"  - {r['nama']}"] = f"{r['total']} rows, 0 'out' + 0 'in' (no usable rows)"
+            yellow_labels.add(f"  - {r['nama']}")
     for path in fx_paths:
-        ringkasan[f"  - {path.name} (Client Equity FX)"] = f"FX table, {len(baca_fx(path)):,} date/currency rates"
+        ringkasan[f"  - {path.name} (Client Equity FX)"] = f"FX table, {len(fx):,} date/currency rates"
     ringkasan["USD conversion (Commission/Fee/Swap/Profit)"] = (
         f"applied using {len(fx):,} date/currency rates" if pakai_fx
         else "not applied — no Client Equity FX file uploaded")
-    yellow_labels = set()
     if kurs_kurang:
         label = "Missing FX rates (date+currency; USD cells highlighted yellow)"
         ordered = sorted(kurs_kurang, key=lambda item: (_kunci_tanggal(item[0]), item[1]))
@@ -624,40 +534,40 @@ def proses(paths_in, path_out: Path) -> dict:
             f"{date} {currency} ({kurs_kurang[(date, currency)]} rows)"
             for date, currency in ordered[:15])
         yellow_labels.add(label)
-    # Posisi yang sisa di in_extra SETELAH pass 'out' = baris 'in' yang komisinya
-    # tidak pernah ketemu baris 'out' pasangannya di batch ini (posisi masih
-    # terbuka, atau baris 'out'-nya ada di file yang tidak ikut diupload).
-    # Dilaporkan (kuning), BUKAN error -- supaya tidak ada komisi yang hilang
-    # tanpa jejak begitu batch berikutnya (yang memuat 'out'-nya) diupload.
-    n_in_terpakai = entry_in - n_in_belum_ketemu
-    ringkasan["Entry = in (merged onto matching Out by Position)"] = (
-        f"{entry_in} seen, {n_in_terpakai} rows merged onto a matching Out row")
-    if unmatched_positions:
-        label = "In-row commission with no matching Out in this upload (Position still open?)"
-        ringkasan[label] = f"{unmatched_positions:,} positions, {n_in_belum_ketemu:,} 'in' rows"
-        yellow_labels.add(label)
     ringkasan.update({
         "Total source rows (all files)": total,
-        "Entry = out (before deduplication)": dipakai + duplikat,
+        "Entry = out (before deduplication)": dipakai["out"] + dup_out,
+        "Entry = in (before deduplication)": dipakai["in"] + dup_in,
         "Entry empty/other (dropped)": entry_lain,
         "Duplicate non-empty Deal IDs (dropped)": duplikat,
-        "Unique rows kept": dipakai,
+        "Unique 'out' rows kept": dipakai["out"],
+        "Unique 'in' rows kept": dipakai["in"],
         # Label lists every grouping dimension, Currency included -- see _tambah_agregat.
-        "Daily output rows (Login+Date+Type+Symbol+Currency)": len(harian),
-        "Monthly Summary output rows (Login+Month+Type+Symbol+Currency)": len(bulanan),
+        "Daily 'out' rows (Login+Date+Type+Symbol+Currency)": len(h_out),
+        "Daily 'in' rows (same grouping, sheet 'Daily - In')": len(h_in),
+        "Monthly Summary 'out' rows (Login+Month+Type+Symbol+Currency)": len(b_out),
+        "Monthly Summary 'in' rows (same grouping, sheet 'Monthly Summary - In')": len(b_in),
         "Unique logins": len(login_unik),
-        "Total Profit (all kept rows)": round(jumlah_profit, 2),
+        "Total Profit ('out' rows)": round(jumlah["out"]["Profit"], 2),
+        "Total Profit ('in' rows)": round(jumlah["in"]["Profit"], 2),
+        "Total Commission ('out' rows)": round(jumlah["out"]["Commission"], 2),
+        "Total Commission ('in' rows)": round(jumlah["in"]["Commission"], 2),
+        # Volume is not money; keep source precision (do not round to 2 decimals).
+        "Total Volume ('out' rows)": jumlah["out"]["Volume"],
+        "Total Volume ('in' rows) - same trades as 'out'; do not add the two": jumlah["in"]["Volume"],
     })
 
     if path_out.suffix.lower() == ".zip":
-        _tulis_zip(harian, bulanan, path_out, ringkasan, pakai_fx, yellow_labels)
+        _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels)
     elif pakai_fx:
         sys.exit("STOP: Client Equity FX output must use a .zip filename.")
     else:
-        _tulis_workbook(harian, bulanan, path_out, ringkasan)
+        _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan)
 
-    result = {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai,
-              "harian": len(harian), "bulanan": len(bulanan),
+    result = {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai["out"],
+              "dipakai_in": dipakai["in"],
+              "harian": len(h_out), "bulanan": len(b_out),
+              "harian_in": len(h_in), "bulanan_in": len(b_in),
               "login_unik": len(login_unik)}
     if pakai_fx:
         result.update(pakai_fx=True, kurs_kurang=sum(kurs_kurang.values()))
@@ -698,15 +608,17 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
             if missing_fx:
                 nilai = None
             teks_tidak_aman = False
-            if key in ("Commission", "Fee", "Swap", "Profit") or key in KOLOM_USD:
+            if key in KOLOM_UANG or key in KOLOM_USD:
                 if isinstance(nilai, float):
                     nilai = round(nilai, 2)
-            elif key in KOLOM_TEKS and nilai.startswith(("=", "+", "-", "@")):
-                # Force string storage; quotePrefix alone still serializes '=...' as <f>.
+            elif key in KOLOM_TEKS and isinstance(nilai, str) and nilai.startswith(("=", "+", "-", "@")):
+                # quotePrefix marks the cell literal in Excel. data_type "s" is
+                # required as well: quotePrefix alone still serializes '=...' as <f>.
                 teks_tidak_aman = True
             sel = WriteOnlyCell(ws, value=nilai)
             if teks_tidak_aman:
                 sel.data_type = "s"
+                sel.quotePrefix = True
             if missing_fx:
                 sel.fill = KUNING
             if name == kolom_periode and isinstance(d["Periode"], datetime.date):
@@ -716,7 +628,7 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
 
 
 def _tulis_verifikasi(ws, ringkasan: dict, yellow_labels=frozenset()):
-    ws.column_dimensions["A"].width = 52
+    ws.column_dimensions["A"].width = 78
     ws.column_dimensions["B"].width = 22
     title = WriteOnlyCell(ws, value="Summary - Deal Segregator")
     title.font = Font(bold=True, size=13)
@@ -729,13 +641,15 @@ def _tulis_verifikasi(ws, ringkasan: dict, yellow_labels=frozenset()):
         ws.append([first, second])
 
 
-def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
+def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict):
     """Legacy one-workbook writer kept for direct callers."""
     wb = Workbook(write_only=True)
     daily = wb.create_sheet("Daily")
     _tulis_sheet(daily, harian, "Date", "dd mmm yyyy")
+    _tulis_sheet(wb.create_sheet("Daily - In"), harian_in, "Date", "dd mmm yyyy")
     monthly = wb.create_sheet("Monthly Summary")
     _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy")
+    _tulis_sheet(wb.create_sheet("Monthly Summary - In"), bulanan_in, "Month", "mmm yyyy")
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -744,11 +658,12 @@ def _tulis_workbook(harian, bulanan, path_out: Path, ringkasan: dict):
         wb.close()
 
 
-def _write_split_workbook(path, title, rows, period_name, period_format, summary,
+def _write_split_workbook(path, title, rows, rows_in, period_name, period_format, summary,
                           pakai_fx, yellow_labels):
     wb = Workbook(write_only=True)
     ws = wb.create_sheet(title)
     _tulis_sheet(ws, rows, period_name, period_format, pakai_fx)
+    _tulis_sheet(wb.create_sheet(f"{title} - In"), rows_in, period_name, period_format, pakai_fx)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:
         wb.save(path)
@@ -756,14 +671,14 @@ def _write_split_workbook(path, title, rows, period_name, period_format, summary
         wb.close()
 
 
-def _tulis_zip(harian, bulanan, path_out, summary, pakai_fx, yellow_labels):
+def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels):
     path_out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path_out.parent) as folder:
         daily = Path(folder) / "Deals - Daily.xlsx"
         monthly = Path(folder) / "Deals - Monthly Summary.xlsx"
-        _write_split_workbook(daily, "Daily", harian, "Date", "dd mmm yyyy",
+        _write_split_workbook(daily, "Daily", harian, harian_in, "Date", "dd mmm yyyy",
                               summary, pakai_fx, yellow_labels)
-        _write_split_workbook(monthly, "Monthly Summary", bulanan, "Month", "mmm yyyy",
+        _write_split_workbook(monthly, "Monthly Summary", bulanan, bulanan_in, "Month", "mmm yyyy",
                               summary, pakai_fx, yellow_labels)
         with zipfile.ZipFile(path_out, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(daily, daily.name)

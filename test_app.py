@@ -1,6 +1,6 @@
 """Smoke test: python3 test_app.py  (butuh 'Template D&W.xlsx' + 'D&W JUN 2026.xlsx')
 
-Model app-nya ASINKRON sejak 28 Aug 2026: POST -> 302 ke /job/<id>, kerjanya di
+Model app-nya ASINKRON sejak 28 Aug 2026: POST -> 303 ke /job/<id>, kerjanya di
 thread, lalu /job/<id>/download. Jadi tes ini POST, ambil job id dari header
 Location, tunggu state 'done'/'failed', baru unduh.
 """
@@ -47,7 +47,7 @@ def kirim(nama_file, fh, **tambahan):
     data = {"file": (fh, nama_file)}
     data.update(tambahan)
     r = c.post("/tool/dw", data=data)
-    if r.status_code != 302:
+    if r.status_code != 303:
         return None, r.status_code, r
     job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
     for _ in range(600):                       # maksimal 5 menit
@@ -149,7 +149,7 @@ assert empty.status_code == 400 and b"Empty files cannot be processed" in empty.
 def kirim_segregate(files):
     r = c.post("/tool/segregate", data={"file": files},
                content_type="multipart/form-data")
-    assert r.status_code == 302, (r.status_code, r.data[:500])
+    assert r.status_code == 303, (r.status_code, r.data[:500])
     job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
     for _ in range(600):
         info = A._read_state(job_id)
@@ -172,7 +172,7 @@ A.threading.Thread = CapturingThread
 try:
     r = c.post("/tool/segregate", data={"file": (io.BytesIO(b"x"), "交易.xlsx")},
                content_type="multipart/form-data")
-    assert r.status_code == 302
+    assert r.status_code == 303
     unicode_job_id = r.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
     assert captured["sources"][0].suffix == ".xlsx", captured["sources"][0]
 finally:
@@ -192,8 +192,9 @@ with zipfile.ZipFile(io.BytesIO(r.data)) as archive:
     assert archive.namelist() == ["Deals - Daily.xlsx", "Deals - Monthly Summary.xlsx"]
     wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True, data_only=True)
     try:
-        assert wb.sheetnames == ["Daily", "Verifikasi"]
+        assert wb.sheetnames == ["Daily", "Daily - In", "Verifikasi"]
         assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == 9418
+        assert sum(1 for _ in wb["Daily - In"].iter_rows(values_only=True)) > 1
     finally:
         wb.close()
 
