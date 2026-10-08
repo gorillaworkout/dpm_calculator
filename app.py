@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+from collections import defaultdict, deque
 from pathlib import Path
 
 from flask import (Flask, abort, redirect, render_template, request, send_file,
@@ -430,6 +431,7 @@ KVB_DOC = {
 KVB_SEGREGATE_HINT = (
     "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). "
     "MT4 Raw Report is optional and is detected from the file contents, not the file name. "
+    "Each MT4 file needs a currency: USD or USC, default USD. "
     "You may also include one Client Equity FX workbook (.xlsx, sheet 'Query result')."
 )
 KVB_SEGREGATE_DOC = {
@@ -442,6 +444,8 @@ KVB_SEGREGATE_DOC = {
         "Optional: one or more MT4 Manager <strong>Raw Report</strong> files "
         "(semicolon-separated, starting with <code>Raw Report for ...</code>). "
         "MT4 Raw Report is optional. If you do not upload one, the result is the same MT5 workbook as before.",
+        "Each MT4 file is one currency, <strong>USD</strong> or <strong>USC</strong>, chosen next to the file. "
+        "The default is USD. The Raw Report has no currency column, and symbol, title, login and profit size cannot tell the two apart.",
         "Each MT5 file must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency. Group and Country are ignored.",
         "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
         "format with sheet <code>Query result</code> and columns <code>date</code>, "
@@ -453,28 +457,29 @@ KVB_SEGREGATE_DOC = {
     "langkah": [
         "MT5 <code>Entry = out</code> and <code>Entry = in</code> stay on separate sheets. "
         "Nothing is merged between them, and Commission is never copied from an opening row onto a closing row.",
-        "An MT4 closed buy/sell becomes an out row at Close Time (Profit, Swap, Commission, Taxes as Fee, and Agent in its own column). "
-        "An opening row is added only when Open Time falls inside that file's report period, and it carries volume only. "
-        "Cancelled pending orders, balance/credit rows and the footer are excluded and counted on Verifikasi.",
-        "MT4 results are written to their own sheets (<code>Daily - MT4</code>, <code>Daily - MT4 In</code>, and the monthly pair) "
-        "so an MT4 login is never added to an MT5 login with the same number. "
-        "MT4 has no Currency column; every MT4 row is marked USD and Verifikasi lists that as an open question.",
-        "When Client Equity FX is included, Commission, Fee, Swap, Profit and MT4 Agent are converted "
-        "to USD by exact Date + Currency. Missing rates stay blank and are highlighted yellow.",
+        "An MT4 closed buy/sell becomes an out row at Close Time (Profit, Swap, Commission, and Taxes as Fee). "
+        "Opening rows are not written. Agent is left out of Profit, Commission and Fee. "
+        "Cancelled pending orders, balance/credit rows (CRM swap, deposit, withdrawal, transfer) and the footer are excluded, "
+        "the same rule as an MT5 row whose Entry is not in or out. They are counted on Verifikasi.",
+        "When an MT4 file is uploaded, its out rows join the same <code>Daily</code> and <code>Monthly Summary</code> sheets as MT5, "
+        "with a Platform column (<code>MT5</code> / <code>MT4</code>). Rows are grouped by Platform and Login, "
+        "so the same login number on both platforms stays two rows. An MT5-only upload does not add that column.",
+        "USC on an MT4 file is converted with Client Equity FX the same way as an MT5 USC row. "
+        "Missing rates stay blank and are highlighted yellow.",
     ],
     "hasil": "One <code>.zip</code> containing two workbooks:",
     "sheets": [
         ("Deals - Daily.xlsx",
-         "<code>Daily</code> and <code>Daily - In</code> for MT5. "
-         "When an MT4 Raw Report was uploaded, also <code>Daily - MT4</code> and <code>Daily - MT4 In</code>. "
-         "Plus Verifikasi."),
+         "<code>Daily</code> (closing rows) and <code>Daily - In</code> (MT5 opening rows) on separate sheets. "
+         "When an MT4 Raw Report was uploaded, MT4 closing rows are on <code>Daily</code> too and every row has a Platform column. "
+         "Plus Verifikasi, with totals per platform and a combined total."),
         ("Deals - Monthly Summary.xlsx",
-         "<code>Monthly Summary</code> and <code>Monthly Summary - In</code> for MT5, "
-         "plus <code>Monthly Summary - MT4</code> and <code>Monthly Summary - MT4 In</code> when MT4 was uploaded. "
-         "Plus Verifikasi."),
+         "<code>Monthly Summary</code> and <code>Monthly Summary - In</code> on separate sheets, "
+         "with the same Platform column when MT4 was uploaded. Plus Verifikasi."),
     ],
     "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals. "
-                "MT4 currency, balance rows and Agent are called out there as open questions.",
+                "It records the currency chosen for each MT4 file. "
+                "Agent is listed there as information and is not part of Profit, Commission or Fee.",
                 CATATAN_ASLI],
 }
 
@@ -584,6 +589,12 @@ def run(slug, company="dpm"):
         if invalid:
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
                           f"{', '.join(invalid)}")
+        if company == "kvb":
+            _mt4_pilihan, _mt4_salah = _mt4_currency_from_form(request.form.get("mt4_currency"))
+            if _mt4_salah:
+                return _gagal(_mt4_salah)
+        else:
+            _mt4_pilihan = []
         periode = saldo_jw = saldo_ch = None
     elif slug == "pl-desk":
         names = [u.filename for u in uploads] + [orig for _p, orig in (staged or [])]
@@ -690,10 +701,20 @@ def run(slug, company="dpm"):
                  periode=periode, saldo_jw=saldo_jw or None,
                  saldo_ch_baris=(len([x for x in saldo_ch.splitlines() if x.strip()])
                                  if saldo_ch else None))
+    mt4_flags = None
+    if company == "kvb" and slug == "segregate" and _mt4_pilihan:
+        antrian = defaultdict(deque)
+        for original, cur in _mt4_pilihan:
+            antrian[original].append(cur)
+        mt4_flags = []
+        for path, original in zip(sources, nama_asli):
+            queue = antrian.get(original)
+            if queue:
+                mt4_flags.append(f"{path.name}={queue.popleft()}")
     threading.Thread(target=_process_job,
                      args=(job_id, company, slug, job,
                            sources if slug in ("segregate", "pl-desk") else src,
-                           dst, periode, saldo_jw, saldo_ch),
+                           dst, periode, saldo_jw, saldo_ch, mt4_flags),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
     return redirect(url_for(endpoint, job_id=job_id), code=303)
@@ -716,7 +737,25 @@ def _cleanup_completed_job(job, result):
             entry.unlink(missing_ok=True)
 
 
-def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None, saldo_ch=None):
+def _mt4_currency_from_form(raw):
+    """Baris `namafile|USD`. Kosong = tidak ada pilihan (mesin memakai USD)."""
+    pilihan = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        name, sep, cur = line.rpartition("|")
+        if not sep or not name.strip():
+            return None, "Each MT4 currency must look like filename|USD or filename|USC."
+        cur = cur.strip().upper()
+        if cur not in ("USD", "USC"):
+            return None, f"MT4 currency must be USD or USC, not '{cur}'."
+        pilihan.append((name.strip(), cur))
+    return pilihan, None
+
+
+def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
+                 saldo_ch=None, mt4_currency=None):
     """Run the pipeline in the background and record the outcome."""
     # Tabel saldo channel yang ditempel disimpan sebagai file di folder job -- ikut
     # terhapus bersama job-nya, jadi tidak ada sisa data keuangan yang menetap.
@@ -745,6 +784,8 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
                 perintah.append(KVB_ARG[script])
             if company == "kvb" and script == "deal_segregator.py":
                 perintah.append("--allow-mt4")
+                for item in mt4_currency or []:
+                    perintah += ["--mt4-currency", item]
             flag_ch = CHANNEL_ARG.get(script)
             if f_ch and flag_ch:
                 perintah += [flag_ch, str(f_ch)]

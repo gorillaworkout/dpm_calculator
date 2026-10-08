@@ -33,26 +33,27 @@ MT4_HEADER = [
     "Gateway Volume", "Open Price Delta", "Close Price Delta", "Agent",
     "Commission", "Taxes", "Swap", "Profit", "Points", "Comment",
 ]
-MT4_RESULT = [
-    "Login", "Date", "Type", "Symbol", "Deals", "Volume",
-    "Commission", "Agent", "Fee", "Swap", "Profit", "Currency",
+COMBINED = [
+    "Platform", "Login", "Date", "Type", "Symbol", "Deals", "Volume",
+    "Commission", "Fee", "Swap", "Profit", "Currency",
 ]
 
 K_BAL = "MT4 balance/credit rows dropped (same rule as MT5 non-trade Entry)"
 K_CAN = "MT4 cancelled pending orders dropped"
 K_FOOT = "MT4 footer/summary lines dropped"
-K_OPEN_OUT = "MT4 opening legs outside the report period (in row skipped)"
 K_OUT = "MT4 closed buy/sell kept"
-K_IN = "MT4 opening legs kept (volume only, inside the report period)"
 K_DUP = "MT4 duplicate Deal IDs dropped"
 K_OTHER = "MT4 other rows dropped"
-K_CUR = "MT4 currency assumption (open question)"
-K_QUEST = "MT4 open questions for KVB"
 K_PROFIT = "MT4 Total Profit (closed buy/sell)"
-K_AGENT_SUM = "MT4 Total Agent (closed buy/sell)"
+K_COMM = "MT4 Total Commission (closed buy/sell)"
 K_FEE = "MT4 Total Fee (Taxes, closed buy/sell)"
-K_DAILY = "Daily MT4 rows (Login+Date+Type+Symbol+Currency)"
-K_DAILY_IN = "Daily MT4 in rows (sheet 'Daily - MT4 In')"
+K_AGENT = "MT4 Agent column (sum of kept rows; not included in Profit, Commission, or Fee)"
+K_DAILY = "Daily 'out' rows (Platform+Login+Date+Type+Symbol+Currency)"
+K_DAILY_IN = "Daily 'in' rows (Platform+Login+Date+Type+Symbol+Currency, sheet 'Daily - In')"
+K_COMB_P = "Combined Total Profit (MT5 + MT4 out rows)"
+K_COMB_C = "Combined Total Commission (MT5 + MT4 out rows)"
+K_WHY = "MT4 currency is chosen per file"
+SHEETS = ["Daily", "Daily - In", "Verifikasi"]
 
 
 def write_mt5(path, rows):
@@ -114,11 +115,16 @@ def verification(rows):
     return {r[0]: r[1] for r in rows if r and r[0]}
 
 
-def run(paths, allow_mt4=False):
+def run(paths, allow_mt4=False, mt4_currency=None):
     folder = Path(tempfile.mkdtemp())
     out = folder / "hasil.zip"
-    summary = proses([Path(p) for p in paths], out, allow_mt4=allow_mt4)
+    summary = proses([Path(p) for p in paths], out, allow_mt4=allow_mt4,
+                     mt4_currency=mt4_currency)
     return summary, books(out), out
+
+
+def row_map(headers, values):
+    return {headers[i]: values[i] for i in range(len(headers))}
 
 
 # The attached MT5 export is UTF-16, tab-separated, and ends with a Total row
@@ -127,8 +133,9 @@ def run(paths, allow_mt4=False):
 assert MT5_FIXTURE.is_file() and MT4_FIXTURE.is_file()
 summary, hasil, _ = run([MT5_FIXTURE], allow_mt4=False)
 daily = hasil["Deals - Daily.xlsx"]
-assert daily["__sheets__"] == ["Daily", "Daily - In", "Verifikasi"]
-assert "Daily - MT4" not in daily
+assert daily["__sheets__"] == SHEETS
+assert daily["Daily"][0][0] == "Login"
+assert "Platform" not in daily["Daily"][0]
 currencies = {r[10] for r in daily["Daily"][1:]}
 assert "USC" in currencies and "USD" in currencies
 v = verification(daily["Verifikasi"])
@@ -136,10 +143,11 @@ assert v["Total source rows (all files)"] == 7
 assert v["Entry empty/other (dropped)"] == 3
 assert v["Unique 'out' rows kept"] == 2
 assert v["Unique 'in' rows kept"] == 2
-assert K_OUT not in v and K_CUR not in v
+assert v["Daily 'out' rows (Login+Date+Type+Symbol+Currency)"] == summary["harian"]
+assert K_OUT not in v and K_WHY not in v and "Platform" not in "".join(v)
 assert summary["dipakai"] == 2 and summary["dipakai_in"] == 2
 assert "mt4_dipakai" not in summary
-print("OK MT5 fixture already parsed (USC kept, footer dropped)")
+print("OK MT5 fixture already parsed (USC kept, footer dropped, no Platform column)")
 
 # Same MT5 file, KVB flag on, must not grow sheets or change verification text.
 _, dengan_flag, _ = run([MT5_FIXTURE], allow_mt4=True)
@@ -166,13 +174,13 @@ with tempfile.TemporaryDirectory() as tmp:
     else:
         raise AssertionError("DPM accepted an MT4 Raw Report")
     summary, hasil, _ = run([mt5], allow_mt4=False)
-    assert hasil["Deals - Daily.xlsx"]["__sheets__"] == ["Daily", "Daily - In", "Verifikasi"]
+    assert hasil["Deals - Daily.xlsx"]["__sheets__"] == SHEETS
     assert hasil["Deals - Daily.xlsx"]["Daily"][1][0] == "100"
 print("OK DPM rejects MT4 by content and still reads a misnamed MT5 file")
 
-# Closed buy/sell -> out at Close Time. Taxes land in Fee. Agent stays its own
-# column. Same Login+Date+Type+Symbol aggregates. An in row is volume-only and
-# only when Open Time falls inside the report period.
+# Closed buy/sell -> out at Close Time only. Taxes land in Fee. Agent is not a
+# column and is not added to Commission. Same Login+Date+Type+Symbol aggregates.
+# Balance/credit, cancelled pending orders and the footer stay dropped.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     src = tmp / "notes.csv"
@@ -202,39 +210,43 @@ with tempfile.TemporaryDirectory() as tmp:
     ])
     summary, hasil, _ = run([src], allow_mt4=True)
     daily = hasil["Deals - Daily.xlsx"]
-    assert daily["__sheets__"] == ["Daily - MT4", "Daily - MT4 In", "Verifikasi"]
+    assert daily["__sheets__"] == SHEETS
+    assert "Daily - MT4" not in daily and "Daily - MT4 In" not in daily
     monthly = hasil["Deals - Monthly Summary.xlsx"]
     assert monthly["__sheets__"] == [
-        "Monthly Summary - MT4", "Monthly Summary - MT4 In", "Verifikasi"]
-    assert len("Monthly Summary - MT4 In") <= 31
-    assert daily["Daily - MT4"][0] == tuple(MT4_RESULT)
-    assert daily["Daily - MT4"][1:] == [
-        ("100", datetime.datetime(2026, 10, 4), "buy", "BTCUSD", 2, 1.02, -0.17, 2, -1.5, -0.25, 4.98, "USD"),
-        ("200", datetime.datetime(2026, 10, 4), "sell", "ETHUSD", 1, 0.5, -0.4, 0.5, 0, 0, -8, "USD"),
+        "Monthly Summary", "Monthly Summary - In", "Verifikasi"]
+    assert daily["Daily"][0] == tuple(COMBINED)
+    assert "Agent" not in daily["Daily"][0]
+    assert daily["Daily"][1:] == [
+        ("MT4", "100", datetime.datetime(2026, 10, 4), "buy", "BTCUSD", 2, 1.02,
+         -0.17, -1.5, -0.25, 4.98, "USD"),
+        ("MT4", "200", datetime.datetime(2026, 10, 4), "sell", "ETHUSD", 1, 0.5,
+         -0.4, 0, 0, -8, "USD"),
     ]
-    assert daily["Daily - MT4 In"][1:] == [
-        ("200", datetime.datetime(2026, 10, 4), "sell", "ETHUSD", 1, 0.5, 0, 0, 0, 0, 0, "USD"),
-    ]
+    assert daily["Daily - In"] == [tuple(COMBINED)]
     v = verification(daily["Verifikasi"])
-    assert v[K_OUT] == 3 and v[K_IN] == 1
+    assert v[K_OUT] == 3
     assert v[K_BAL] == 2 and v[K_CAN] == 2 and v[K_FOOT] == 5
-    assert v[K_OPEN_OUT] == 2 and v[K_DUP] == 0 and v[K_OTHER] == 0
+    assert v[K_DUP] == 0 and v[K_OTHER] == 0
     assert v[K_PROFIT] == round(3.98 + 1 - 8, 2)
-    assert v[K_AGENT_SUM] == 2.5
+    assert v[K_AGENT] == 2.5
     assert v[K_FEE] == -1.5
-    assert v[K_DAILY] == 2 and v[K_DAILY_IN] == 1
-    assert str(v[K_CUR]).startswith("USD")
-    assert "open question" in K_CUR and "Agent" in v[K_QUEST] and "balance" in v[K_QUEST].lower()
-    assert "Commission" in v["MT4 Agent commission"]
+    assert v[K_COMM] == round(-0.17 + -0.4, 2)
+    assert v[K_DAILY] == 2 and v[K_DAILY_IN] == 0
+    assert v[K_COMB_P] == v[K_PROFIT]
+    assert v[K_COMB_C] == v[K_COMM]
+    assert "open question" not in v
+    assert "cannot separate USD from USC" in v[K_WHY]
+    assert "Balance and credit" in v[K_WHY]
     assert v["MT4 balance/credit Profit excluded"] == round(-2.35 + 9, 2)
-    assert summary["mt4_dipakai"] == 3 and summary["mt4_dipakai_in"] == 1
-    # Money on the in row stays zero, so it is not added to the close.
-    assert v["MT4 Total Commission (closed buy/sell)"] == round(-0.17 - 0.4, 2)
+    assert summary["mt4_dipakai"] == 3 and "mt4_dipakai_in" not in summary
     file_line = next(val for key, val in v.items() if "notes.csv" in key and "MT4" in key)
+    assert "currency USD (default; no currency was selected for this file)" in file_line
     assert "balance/credit" in file_line and "cancelled" in file_line
-print("OK MT4 parsing, footer, cancelled orders, balance rows, in-row rule")
+    assert "opening" not in file_line
+print("OK MT4 out-only rows, Agent excluded, balance rows dropped")
 
-# Period boundaries are inclusive. 1 Oct is inside a 1–4 Oct report; 30 Sep is not.
+# A close is kept even when Open Time is outside the report period. No in row.
 with tempfile.TemporaryDirectory() as tmp:
     src = Path(tmp) / "week.csv"
     write_mt4(src, [
@@ -245,9 +257,11 @@ with tempfile.TemporaryDirectory() as tmp:
     ], start="2026.10.01", end="2026.10.04", footer=False)
     _, hasil, _ = run([src], allow_mt4=True)
     daily = hasil["Deals - Daily.xlsx"]
-    assert [r[0] for r in daily["Daily - MT4 In"][1:]] == ["1"]
-    assert verification(daily["Verifikasi"])[K_OPEN_OUT] == 1
-print("OK report-period boundaries")
+    assert [r[1] for r in daily["Daily"][1:]] == ["1", "2"]
+    assert daily["Daily - In"] == [tuple(COMBINED)]
+    assert K_DAILY_IN not in verification(daily["Verifikasi"]) or \
+        verification(daily["Verifikasi"])[K_DAILY_IN] == 0
+print("OK closes outside the open window are still out rows")
 
 # Duplicate Deal IDs across two MT4 files count once. Blank Login on a trade stops.
 with tempfile.TemporaryDirectory() as tmp:
@@ -258,7 +272,7 @@ with tempfile.TemporaryDirectory() as tmp:
     _, hasil, _ = run([first, second], allow_mt4=True)
     v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
     assert v[K_DUP] == 1 and v[K_OUT] == 1
-    assert hasil["Deals - Daily.xlsx"]["Daily - MT4"][1][10] == 4  # Profit, not 99
+    assert hasil["Deals - Daily.xlsx"]["Daily"][1][10] == 4
     blank = tmp / "blank.csv"
     write_mt4(blank, [mt4_trade("z", login="", profit="1")], footer=False)
     try:
@@ -269,88 +283,179 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError("blank MT4 Login was accepted")
 print("OK MT4 duplicate deals and blank Login")
 
-# MT4 and MT5 logins and Deal IDs can overlap. They stay on separate sheets.
+# The same login and Deal ID on MT4 and MT5 stay two rows, grouped by Platform.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     mt5, mt4 = tmp / "mt5.csv", tmp / "mt4.csv"
-    write_mt5(mt5, [mt5_row(deal="42", login="100", symbol="EURUSD", profit="10")])
+    write_mt5(mt5, [mt5_row(deal="42", login="100", symbol="EURUSD", profit="10",
+                            commission="-1")])
     write_mt4(mt4, [mt4_trade("42", login="100", symbol="eurusd", profit="3", volume="2",
                               agent="1.25", commission="-0.5")], footer=False)
     summary, hasil, _ = run([mt5, mt4], allow_mt4=True)
     daily = hasil["Deals - Daily.xlsx"]
-    assert daily["__sheets__"] == [
-        "Daily", "Daily - In", "Daily - MT4", "Daily - MT4 In", "Verifikasi"]
-    assert daily["Daily"][1][9] == 10 and daily["Daily"][1][3] == "EURUSD"
+    assert daily["__sheets__"] == SHEETS
+    assert daily["Daily"][0] == tuple(COMBINED)
     assert "Agent" not in daily["Daily"][0]
-    mt4_row = daily["Daily - MT4"][1]
-    assert mt4_row[0] == "100" and mt4_row[10] == 3 and mt4_row[7] == 1.25
-    assert mt4_row[6] == -0.5  # Commission is not Commission+Agent
+    mt5_row_out = row_map(daily["Daily"][0], daily["Daily"][1])
+    mt4_row_out = row_map(daily["Daily"][0], daily["Daily"][2])
+    assert mt5_row_out["Platform"] == "MT5" and mt5_row_out["Profit"] == 10
+    assert mt5_row_out["Symbol"] == "EURUSD" and mt5_row_out["Commission"] == -1
+    assert mt4_row_out["Platform"] == "MT4" and mt4_row_out["Profit"] == 3
+    assert mt4_row_out["Commission"] == -0.5
+    assert daily["Daily - In"][0][0] == "Platform"
     v = verification(daily["Verifikasi"])
     assert v["Unique logins"] == 1 and v["Unique MT4 logins"] == 1
     assert v["Total Profit ('out' rows)"] == 10
     assert v[K_PROFIT] == 3
+    assert v[K_COMB_P] == 13
+    assert v[K_COMB_C] == round(-1 + -0.5, 2)
+    assert v[K_AGENT] == 1.25
     assert summary["dipakai"] == 1 and summary["mt4_dipakai"] == 1
-print("OK mixed MT4+MT5 do not merge overlapping logins or Deal IDs")
+    assert summary["harian"] == 2
+print("OK mixed MT4+MT5 stay apart by Platform and combine on one sheet")
 
-# FX converts MT4 money, including Agent, with the row's own close date.
+# Per-file currency. USC divides by the Client Equity FX rate, like an MT5 USC row.
+# A missing USC rate is yellow, not treated as 1. Agent is not converted.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     deals, fx = tmp / "mt4.csv", tmp / "fx.xlsx"
     write_mt4(deals, [mt4_trade(
         "1", login="8", open_time="2026.10.04 01:00:00",
         close_time="2026.10.04 09:00:00", profit="10", agent="4",
-        commission="-2", taxes="-1", swap="-0.5", volume="1")], footer=False)
+        commission="-2", taxes="-1", swap="-1", volume="1")], footer=False)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Query result"
+    ws.append(["date", "Currency", "rate"])
+    ws.append([datetime.date(2026, 10, 4), "USC", 100])
+    wb.save(fx)
+    wb.close()
+    _, hasil, out = run([deals, fx], allow_mt4=True, mt4_currency={deals.name: "USC"})
+    wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
+    try:
+        headers = [c.value for c in wb["Daily"][1]]
+        assert "Agent" not in headers and "Agent (USD)" not in headers
+        assert "Profit (USD)" in headers
+        row = {headers[i]: c.value for i, c in enumerate(wb["Daily"][2])}
+        assert row["Currency"] == "USC"
+        assert row["Platform"] == "MT4"
+        assert row["Profit"] == 10 and row["Commission"] == -2
+        assert row["Profit (USD)"] == 0.1
+        assert row["Commission (USD)"] == -0.02
+        assert row["Fee (USD)"] == -0.01
+        assert row["Swap (USD)"] == -0.01
+    finally:
+        wb.close()
+    v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
+    line = next(val for key, val in v.items() if "mt4.csv" in key)
+    assert "currency USC (selected for this file)" in line
+
+    # Explicit USD is recorded as selected, and still converts with the USD rate.
     wb = Workbook()
     ws = wb.active
     ws.title = "Query result"
     ws.append(["date", "Currency", "rate"])
     ws.append([datetime.date(2026, 10, 4), "USD", 2])
-    wb.save(fx)
+    usd_fx = tmp / "usd-fx.xlsx"
+    wb.save(usd_fx)
     wb.close()
-    _, hasil, out = run([deals, fx], allow_mt4=True)
+    _, hasil, out = run([deals, usd_fx], allow_mt4=True, mt4_currency={deals.name: "USD"})
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
-        headers = [c.value for c in wb["Daily - MT4"][1]]
-        assert "Agent (USD)" in headers and "Commission (USD)" in headers
-        row = {headers[i]: c.value for i, c in enumerate(wb["Daily - MT4"][2])}
-        assert row["Profit (USD)"] == 5
-        assert row["Agent (USD)"] == 2
-        assert row["Commission (USD)"] == -1
-        assert row["Fee (USD)"] == -0.5
-        assert row["Swap (USD)"] == -0.25
-        in_headers = [c.value for c in wb["Daily - MT4 In"][1]]
-        in_row = {in_headers[i]: c.value for i, c in enumerate(wb["Daily - MT4 In"][2])}
-        assert in_row["Agent"] == 0 and in_row["Agent (USD)"] == 0
+        headers = [c.value for c in wb["Daily"][1]]
+        row = {headers[i]: c.value for i, c in enumerate(wb["Daily"][2])}
+        assert row["Currency"] == "USD" and row["Profit (USD)"] == 5
     finally:
         wb.close()
-print("OK MT4 FX includes Agent")
+    chosen = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
+    assert "currency USD (selected for this file)" in next(
+        val for key, val in chosen.items() if "mt4.csv" in key)
+
+    # Blank/missing USC rate is not 1.
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Query result"
+    ws.append(["date", "Currency", "rate"])
+    ws.append([datetime.date(2026, 10, 4), "USD", None])
+    missing = tmp / "missing-fx.xlsx"
+    wb.save(missing)
+    wb.close()
+    _, _, out = run([deals, missing], allow_mt4=True, mt4_currency={deals.name: "USC"})
+    wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
+    try:
+        headers = [c.value for c in wb["Daily"][1]]
+        cells = list(wb["Daily"][2])
+        profit_usd = cells[headers.index("Profit (USD)")]
+        assert profit_usd.value is None
+        assert profit_usd.fill.fgColor.rgb.endswith("FFFF00")
+    finally:
+        wb.close()
+print("OK MT4 USD/USC choice and FX")
+
+# Two MT4 files keep their own currency, so the same login does not merge.
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    usd, usc = tmp / "usd.csv", tmp / "usc.csv"
+    trade = dict(login="77", symbol="btcusd", volume="1", profit="10",
+                  close_time="2026.10.04 02:00:00")
+    write_mt4(usd, [mt4_trade("1", **trade)], footer=False)
+    write_mt4(usc, [mt4_trade("2", profit="1000", **{k: v for k, v in trade.items() if k != "profit"})],
+              footer=False)
+    _, hasil, _ = run([usd, usc], allow_mt4=True, mt4_currency={usc.name: "USC"})
+    rows = hasil["Deals - Daily.xlsx"]["Daily"][1:]
+    assert [(r[0], r[1], r[10], r[11]) for r in rows] == [
+        ("MT4", "77", 10, "USD"),
+        ("MT4", "77", 1000, "USC"),
+    ]
+    v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
+    usd_line = next(val for key, val in v.items() if key.strip().startswith("- usd.csv"))
+    usc_line = next(val for key, val in v.items() if "usc.csv" in key)
+    assert "currency USD (default; no currency was selected for this file)" in usd_line
+    assert "currency USC (selected for this file)" in usc_line
+print("OK two MT4 files do not share a currency")
+
+# A currency meant for a non-MT4 file is ignored. A bad MT4 currency stops the run.
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    mt5 = tmp / "deals.csv"
+    write_mt5(mt5, [mt5_row(currency="USD")])
+    _, hasil, _ = run([mt5], allow_mt4=True, mt4_currency={mt5.name: "USC"})
+    assert hasil["Deals - Daily.xlsx"]["Daily"][1][10] == "USD"
+    assert hasil["Deals - Daily.xlsx"]["Daily"][0][0] == "Login"
+    bad = tmp / "raw.csv"
+    write_mt4(bad, [mt4_trade("1", profit="1")], footer=False)
+    try:
+        proses([bad], tmp / "out.zip", allow_mt4=True, mt4_currency={bad.name: "EUR"})
+    except SystemExit as exc:
+        assert "USD or USC" in str(exc) and "EUR" in str(exc)
+    else:
+        raise AssertionError("EUR was accepted as an MT4 currency")
+print("OK currency map ignores MT5 files and rejects a bad MT4 currency")
 
 # Trimmed copies of the attached 2026-10-04 samples.
 summary, hasil, _ = run([MT5_FIXTURE, MT4_FIXTURE], allow_mt4=True)
 daily = hasil["Deals - Daily.xlsx"]
-assert daily["__sheets__"] == [
-    "Daily", "Daily - In", "Daily - MT4", "Daily - MT4 In", "Verifikasi"]
-symbols = {r[3] for r in daily["Daily - MT4"][1:]}
-assert symbols == {"BTCUSD"}
-logins = {r[0] for r in daily["Daily - MT4"][1:]}
+assert daily["__sheets__"] == SHEETS
+mt4_rows = [r for r in daily["Daily"][1:] if r[0] == "MT4"]
+assert {r[4] for r in mt4_rows} == {"BTCUSD"}
+logins = {r[1] for r in mt4_rows}
 assert "603477" in logins and "20033032" not in logins and "20023282" not in logins
-# Opened the day before the report: out only.
-opened_earlier = [r for r in daily["Daily - MT4"][1:] if r[0] == "603477"]
+opened_earlier = [r for r in mt4_rows if r[1] == "603477"]
 assert opened_earlier and opened_earlier[0][10] == 3.98
-assert all(r[0] != "603477" for r in daily["Daily - MT4 In"][1:])
-# Same-day open is on the in sheet, volume only.
-same_day = [r for r in daily["Daily - MT4 In"][1:] if r[0] == "20038203"]
-assert same_day == [("20038203", datetime.datetime(2026, 10, 4), "buy", "BTCUSD",
-                     1, 0.01, 0, 0, 0, 0, 0, "USD")]
+same_day = [r for r in mt4_rows if r[1] == "20038203"]
+assert same_day and same_day[0][10] == 2.77
+assert all(r[0] != "MT4" for r in daily["Daily - In"][1:])
+assert all(r[1] != "603477" and r[1] != "20038203" for r in daily["Daily - In"][1:])
 v = verification(daily["Verifikasi"])
 assert v[K_BAL] == 2 and v[K_CAN] == 2 and v[K_FOOT] == 7
-assert v[K_OPEN_OUT] == 1 and v[K_OUT] == 3 and v[K_IN] == 2
-assert v["Entry empty/other (dropped)"] == 3  # MT5 footer, unchanged
-assert "USC" in {r[10] for r in daily["Daily"][1:]}
+assert v[K_OUT] == 3 and v[K_DAILY_IN] == 2  # the two MT5 in rows only
+assert v["Entry empty/other (dropped)"] == 3
+assert "USC" in {r[11] for r in daily["Daily"][1:] if r[0] == "MT5"}
+assert v[K_COMB_P] == round(v["Total Profit ('out' rows)"] + v[K_PROFIT], 2)
 assert summary["dipakai"] == 2 and summary["mt4_dipakai"] == 3
 print("OK trimmed KVB MT4+MT5 fixture")
 
-# Formula-like Login stays literal on the MT4 sheet.
+# Formula-like Login stays literal. Platform is the first column.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     src = tmp / "formula.csv"
@@ -358,7 +463,8 @@ with tempfile.TemporaryDirectory() as tmp:
     _, _, out = run([src], allow_mt4=True)
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
-        login, _date, _type, symbol = list(wb["Daily - MT4"][2])[:4]
+        platform, login, _date, _type, symbol = list(wb["Daily"][2])[:5]
+        assert platform.value == "MT4"
         assert login.value == "=1+1" and symbol.value == "=EURUSD"
         assert login.quotePrefix and login.data_type == "s"
         assert symbol.quotePrefix and symbol.data_type == "s"
@@ -388,13 +494,18 @@ client.environ_base["HTTP_ACCEPT"] = "text/html"
 kvb_page = client.get("/kvb/tool/segregate")
 assert kvb_page.status_code == 200
 assert b"MT4 Raw Report is optional" in kvb_page.data
+assert b"mt4-currency" in kvb_page.data
+assert b'value="USC"' in kvb_page.data
+assert b"separate sheets" in kvb_page.data
 dpm_page = client.get("/tool/segregate")
 assert dpm_page.status_code == 200
 assert b"MT4 Raw Report is optional" not in dpm_page.data
+assert b"mt4-currency" not in dpm_page.data
 assert b"Drop Deals History files here" in dpm_page.data
 kvb_home = client.get("/kvb")
 assert b"MT4 Raw Report is optional" in kvb_home.data
-print("OK KVB tool page mentions optional MT4; DPM page does not")
+assert b"Platform column" in kvb_home.data
+print("OK KVB tool page offers USD/USC per MT4 file; DPM page does not")
 
 mt4_body = (
     "Raw Report for 'abcc' from 2026.10.04 to 2026.10.04\n"
@@ -404,7 +515,17 @@ mt4_body = (
     + "\n"
 ).encode()
 
-dpm = client.post("/tool/segregate", data={"file": (io.BytesIO(mt4_body), "Deals History.csv")},
+bad_currency = client.post(
+    "/kvb/tool/segregate",
+    data={"file": (io.BytesIO(mt4_body), "whatever.csv"),
+          "mt4_currency": "whatever.csv|EUR"},
+    content_type="multipart/form-data")
+assert bad_currency.status_code == 400, bad_currency.status_code
+assert b"USD or USC" in bad_currency.data
+
+dpm = client.post("/tool/segregate",
+                  data={"file": (io.BytesIO(mt4_body), "Deals History.csv"),
+                        "mt4_currency": "Deals History.csv|USC"},
                   content_type="multipart/form-data")
 assert dpm.status_code == 303, (dpm.status_code, dpm.data[:300])
 _, dpm_state = wait(client, dpm.headers["Location"])
@@ -424,15 +545,18 @@ def capture(command, **kwargs):
 A.subprocess.run = capture
 try:
     kvb = client.post("/kvb/tool/segregate",
-                      data={"file": (io.BytesIO(mt4_body), "whatever.csv")},
+                      data={"file": (io.BytesIO(mt4_body), "whatever.csv"),
+                            "mt4_currency": "whatever.csv|USC"},
                       content_type="multipart/form-data")
     assert kvb.status_code == 303, (kvb.status_code, kvb.data[:300])
     _, kvb_state = wait(client, kvb.headers["Location"])
     assert kvb_state["state"] == "done", kvb_state
     assert commands and "--allow-mt4" in commands[-1]
+    assert "--mt4-currency" in commands[-1]
+    assert "whatever.csv=USC" in commands[-1]
     assert Path(commands[-1][1]).name == "deal_segregator.py"
 finally:
     A.subprocess.run = real_run
-print("OK KVB runs MT4 and DPM's job rejects it")
+print("OK KVB runs MT4 with the chosen currency and DPM's job rejects it")
 
 print("OK deal segregator MT4")
