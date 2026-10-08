@@ -55,9 +55,15 @@ shows the file in its download list.</p>
 <p class="lede">The FinanceOS settlement and the Metabase workbook are being reconciled.
 This page refreshes itself. A problem in either file stops the run and no workbook is produced.</p>
 {% elif info.slug == 'segregate' %}
+{% if company == 'kvb' %}
+<p class="lede">Your MT5 Deals History files are being classified. MT4 Raw Report is optional.
+Client Equity FX is optional too. Large batches can take a few minutes &mdash; this page refreshes itself, and you
+can safely return to this same job URL later.</p>
+{% else %}
 <p class="lede">Your Deals History and optional Client Equity FX files are being classified,
 combined, converted, and verified on the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
 can safely return to this same job URL later.</p>
+{% endif %}
 {% else %}
 <p class="lede">Your workbook is being calculated on the server. Large files
 (20&ndash;40&nbsp;MB) can take a few minutes &mdash; this page refreshes itself, so just

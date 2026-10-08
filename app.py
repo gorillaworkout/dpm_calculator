@@ -95,7 +95,10 @@ KVB_TOOLS = {
     "dw": ("Generate D&W", "Upload a KVB Plus workbook and generate the finished monthly "
            "D&W report in one run.",
            ("siapkan_kvb.py", "isi_template.py", "hitung_dw.py"), True),
-    "segregate": _SEGREGATE,
+    "segregate": ("Deal Segregator",
+                  "Combine MT5 Deals History files. MT4 Raw Report is optional. "
+                  "You can also add a Client Equity FX workbook for USD-converted financial totals.",
+                  ("deal_segregator.py",), True),
 }
 
 
@@ -424,10 +427,64 @@ KVB_DOC = {
 }
 
 
+KVB_SEGREGATE_HINT = (
+    "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). "
+    "MT4 Raw Report is optional and is detected from the file contents, not the file name. "
+    "You may also include one Client Equity FX workbook (.xlsx, sheet 'Query result')."
+)
+KVB_SEGREGATE_DOC = {
+    "judul": "Deal Segregator — MT5, with optional MT4",
+    "ringkas": "Upload one or more MT5 Deals History exports. MT4 Raw Report is optional. "
+               "A Client Equity FX workbook is optional too. File types are detected from "
+               "their contents, not from the file name.",
+    "siapkan": [
+        "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
+        "Optional: one or more MT4 Manager <strong>Raw Report</strong> files "
+        "(semicolon-separated, starting with <code>Raw Report for ...</code>). "
+        "MT4 Raw Report is optional. If you do not upload one, the result is the same MT5 workbook as before.",
+        "Each MT5 file must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency. Group and Country are ignored.",
+        "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
+        "format with sheet <code>Query result</code> and columns <code>date</code>, "
+        "<code>Currency</code>, <code>rate</code>.",
+        "There is a <strong>5 GB total upload limit</strong> and a "
+        "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
+        "in pieces automatically.",
+    ],
+    "langkah": [
+        "MT5 <code>Entry = out</code> and <code>Entry = in</code> stay on separate sheets. "
+        "Nothing is merged between them, and Commission is never copied from an opening row onto a closing row.",
+        "An MT4 closed buy/sell becomes an out row at Close Time (Profit, Swap, Commission, Taxes as Fee, and Agent in its own column). "
+        "An opening row is added only when Open Time falls inside that file's report period, and it carries volume only. "
+        "Cancelled pending orders, balance/credit rows and the footer are excluded and counted on Verifikasi.",
+        "MT4 results are written to their own sheets (<code>Daily - MT4</code>, <code>Daily - MT4 In</code>, and the monthly pair) "
+        "so an MT4 login is never added to an MT5 login with the same number. "
+        "MT4 has no Currency column; every MT4 row is marked USD and Verifikasi lists that as an open question.",
+        "When Client Equity FX is included, Commission, Fee, Swap, Profit and MT4 Agent are converted "
+        "to USD by exact Date + Currency. Missing rates stay blank and are highlighted yellow.",
+    ],
+    "hasil": "One <code>.zip</code> containing two workbooks:",
+    "sheets": [
+        ("Deals - Daily.xlsx",
+         "<code>Daily</code> and <code>Daily - In</code> for MT5. "
+         "When an MT4 Raw Report was uploaded, also <code>Daily - MT4</code> and <code>Daily - MT4 In</code>. "
+         "Plus Verifikasi."),
+        ("Deals - Monthly Summary.xlsx",
+         "<code>Monthly Summary</code> and <code>Monthly Summary - In</code> for MT5, "
+         "plus <code>Monthly Summary - MT4</code> and <code>Monthly Summary - MT4 In</code> when MT4 was uploaded. "
+         "Plus Verifikasi."),
+    ],
+    "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals. "
+                "MT4 currency, balance rows and Agent are called out there as open questions.",
+                CATATAN_ASLI],
+}
+
+
 def _copy_for(company, slug):
-    """Hint and guide for a tool page. Only KVB Generate D&W has its own copy."""
+    """Hint and guide for a tool page. KVB Generate D&W and KVB Deal Segregator differ from DPM."""
     if company == "kvb" and slug == "dw":
         return KVB_HINT, KVB_DOC
+    if company == "kvb" and slug == "segregate":
+        return KVB_SEGREGATE_HINT, KVB_SEGREGATE_DOC
     return HINT.get(slug), DOC.get(slug)
 
 
@@ -686,6 +743,8 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
                 perintah += [flag_saldo, saldo_jw]
             if company == "kvb" and KVB_ARG.get(script):
                 perintah.append(KVB_ARG[script])
+            if company == "kvb" and script == "deal_segregator.py":
+                perintah.append("--allow-mt4")
             flag_ch = CHANNEL_ARG.get(script)
             if f_ch and flag_ch:
                 perintah += [flag_ch, str(f_ch)]

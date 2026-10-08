@@ -3,6 +3,7 @@
 !Template KVB Plus.xlsx
 *.xlsm
 *.csv
+!fixtures/kvb/*.csv
 *.zip
 *.pdf
 

@@ -42,11 +42,17 @@ Skalabilitas (tetap dari perbaikan OOM di main, bukan dari salinan 6 Okt):
 File sumber MT5 "Deals History" biasanya diekspor sebagai UTF-16LE
 tab-delimited (bukan CSV koma biasa) -- encoding & pemisah kolom dideteksi
 otomatis dari file, jadi export UTF-8/koma biasa dan file .xlsx juga tetap terbaca.
+
+MT4 (KVB saja, flag --allow-mt4): file "Raw Report" dikenali dari baris judul
+dan header, bukan dari nama file. Hasilnya sheet terpisah (Daily - MT4, ...)
+supaya login/Deal yang kebetulan sama dengan MT5 tidak tergabung. Tanpa file
+MT4, sheet dan angka MT5 tidak berubah.
 """
 import argparse
 import csv
 import datetime
 import math
+import re
 import sqlite3
 import tempfile
 import sys
@@ -67,9 +73,22 @@ KOLOM_HASIL = ["Login", "{PERIODE}", "Type", "Symbol", "Deals",
                "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"]
 KOLOM_USD = ["Commission (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
 
+KOLOM_HASIL_MT4 = ["Login", "{PERIODE}", "Type", "Symbol", "Deals",
+                   "Volume", "Commission", "Agent", "Fee", "Swap", "Profit", "Currency"]
+KOLOM_USD_MT4 = ["Commission (USD)", "Agent (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
+
 KOLOM_JUMLAH = ["Volume", "Commission", "Fee", "Swap", "Profit"]
 KOLOM_TEKS = {"Login", "Type", "Symbol", "Currency"}
-KOLOM_UANG = ("Commission", "Fee", "Swap", "Profit")
+KOLOM_UANG = ("Commission", "Fee", "Swap", "Profit", "Agent")
+
+# MT4 Manager "Raw Report". Judul + header, bukan nama file.
+_MT4_JUDUL = re.compile(
+    r"^Raw Report for ['\"][^'\"]*['\"] from (\d{4}\.\d{2}\.\d{2}) to (\d{4}\.\d{2}\.\d{2})\s*$",
+    re.IGNORECASE,
+)
+_MT4_WAJIB = ["Deal", "Login", "Open Time", "Type", "Symbol", "Volume",
+              "Close Time", "Agent", "Commission", "Taxes", "Swap", "Profit"]
+_MT4_CURRENCY = "USD"
 
 # Label Inggris untuk ringkasan yang DITAMPILKAN ke user (log job di web app).
 # Kunci dict hasil tetap dipakai internal oleh pemanggil lain.
@@ -278,7 +297,7 @@ def desk_dari_group(group: str) -> str:
     return g
 
 
-def tanggal_dari_waktu(waktu, path=None, nomor=None):
+def tanggal_dari_waktu(waktu, path=None, nomor=None, kolom="Time"):
     """Terima string MT5 ('2026.07.31 01:10:35.454') ATAU objek datetime/date
     (kalau dibaca dari .xlsx yang selnya sudah bertipe tanggal). -> date.
     Nilai kosong, format asing, dan tanggal mustahil ditolak."""
@@ -293,7 +312,7 @@ def tanggal_dari_waktu(waktu, path=None, nomor=None):
         except ValueError:
             pass
     lokasi = f" in '{path.name}', row {nomor}" if path is not None else ""
-    sys.exit(f"STOP: invalid Time value{lokasi}: {teks!r}")
+    sys.exit(f"STOP: invalid {kolom} value{lokasi}: {teks!r}")
 
 
 def _kunci_tanggal(v):
@@ -332,6 +351,236 @@ class _DiskDeals:
 
     def close(self):
         self.db.close()
+
+
+def _pemisah_mt4(baris: str):
+    if baris.count(";") > 0 and baris.count(";") >= baris.count("\t"):
+        return ";"
+    if baris.count("\t") > 0:
+        return "\t"
+    return None
+
+
+def _dua_baris_awal(path: Path):
+    """Dua baris non-kosong pertama. ('csv', [baris, baris]) atau ('xlsx', [tuple, tuple])."""
+    suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xlsm"):
+        wb = None
+        try:
+            wb = load_workbook(path, read_only=True, data_only=True)
+            ws = wb.worksheets[0] if wb.worksheets else None
+            rows = []
+            if ws is not None:
+                for row in ws.iter_rows(max_row=2, values_only=True):
+                    rows.append(tuple(_teks(v) for v in row))
+            while len(rows) < 2:
+                rows.append(())
+            return "xlsx", rows
+        except Exception:
+            return "csv", []
+        finally:
+            if wb is not None:
+                wb.close()
+    enc = _deteksi_encoding(path)
+    lines = []
+    with open(path, encoding=enc, newline="") as f:
+        for line in f:
+            if line.strip():
+                lines.append(line.strip("\ufeff\r\n"))
+            if len(lines) == 2:
+                break
+    return "csv", lines
+
+
+def _info_mt4(path: Path):
+    """None kalau bukan Raw Report. sys.exit kalau judulnya cocok tapi headernya rusak."""
+    kind, awal = _dua_baris_awal(path)
+    if kind == "xlsx":
+        if not awal or not awal[0]:
+            return None
+        cocok = _MT4_JUDUL.match(awal[0][0].strip())
+        if not cocok:
+            return None
+        header = list(awal[1])
+        pemisah = None
+    else:
+        if len(awal) < 2:
+            return None
+        cocok = _MT4_JUDUL.match(awal[0].strip())
+        if not cocok:
+            return None
+        pemisah = _pemisah_mt4(awal[1])
+        if not pemisah:
+            sys.exit(f"STOP: '{path.name}' looks like an MT4 Raw Report but the header "
+                     "is not semicolon- or tab-separated.")
+        header = next(csv.reader([awal[1]], delimiter=pemisah))
+    header = [_teks(h) for h in header]
+    hilang = [k for k in _MT4_WAJIB if k not in header]
+    if hilang:
+        sys.exit(f"STOP: '{path.name}' looks like an MT4 Raw Report but is missing "
+                 f"columns: {hilang}")
+    mulai = datetime.datetime.strptime(cocok.group(1), "%Y.%m.%d").date()
+    akhir = datetime.datetime.strptime(cocok.group(2), "%Y.%m.%d").date()
+    if akhir < mulai:
+        sys.exit(f"STOP: MT4 Raw Report period is backwards in '{path.name}': "
+                 f"{mulai} to {akhir}")
+    return {"awal": mulai, "akhir": akhir, "pemisah": pemisah,
+            "header": header, "kind": kind}
+
+
+def _macam_mt4(tipe: str, comment: str) -> str:
+    """trade / balance / cancelled / other. Balance mengikuti aturan MT5:
+    yang bukan kaki in/out tidak masuk sheet transaksi."""
+    t = tipe.strip().lower()
+    if t in ("balance", "credit"):
+        return "balance"
+    if t in ("buy", "sell"):
+        return "trade"
+    if "limit" in t or "stop" in t or comment.strip().lower() == "cancelled":
+        return "cancelled"
+    return "other"
+
+
+def _angka_longgar(v) -> float:
+    """Angka pada baris yang dibuang (balance/footer). Kosong atau rusak = 0."""
+    teks = _teks(v)
+    if not teks:
+        return 0.0
+    try:
+        angka = float(teks)
+    except ValueError:
+        return 0.0
+    return angka if math.isfinite(angka) else 0.0
+
+
+def _iter_mt4(path: Path, info: dict):
+    """(nomor_baris, row) untuk isi file, tanpa judul dan header."""
+    if info["kind"] == "xlsx":
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            it = wb.worksheets[0].iter_rows(values_only=True)
+            next(it, None)
+            next(it, None)
+            for nomor, row in enumerate(it, start=3):
+                if any(v is not None and _teks(v) != "" for v in row):
+                    yield nomor, list(row)
+        finally:
+            wb.close()
+        return
+    enc = _deteksi_encoding(path)
+    with open(path, encoding=enc, newline="") as f:
+        reader = csv.reader(f, delimiter=info["pemisah"])
+        next(reader, None)
+        next(reader, None)
+        nomor = 2
+        for row in reader:
+            nomor += 1
+            if any(_teks(c) for c in row):
+                yield nomor, row
+
+
+def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris):
+    """Satu Raw Report -> baris out (Close Time, semua uang) dan, kalau Open Time
+    jatuh di dalam periode laporan, baris in (volume saja, uang nol).
+
+    Kaki in sengaja tidak menyalin Commission/Taxes/Swap/Profit/Agent: MT4
+    menaruh uang itu sekali pada tiket yang sudah ditutup. Menyalinnya ke in
+    akan menghitung dua kali. Open Time di luar periode tidak jadi baris in
+    (bukan aktivitas buka di jendela laporan ini) tapi tiketnya tetap jadi out.
+    Deal ID dideduplikasi sebelum kedua kaki ditulis, di database terpisah dari
+    MT5, supaya ID yang kebetulan sama tidak saling meniadakan.
+    """
+    header = info["header"]
+    idx = {name: i for i, name in enumerate(header)}
+    awal, akhir = info["awal"], info["akhir"]
+    total = n_out = n_in = n_bal = n_can = n_foot = n_lain = n_dup = n_luar = 0
+    profit_balance = 0.0
+
+    def sel(row, nama):
+        i = idx.get(nama)
+        if i is None or i >= len(row):
+            return ""
+        return row[i]
+
+    for nomor, row in _iter_mt4(path, info):
+        total += 1
+        if len(row) < len(header):
+            row = list(row) + [""] * (len(header) - len(row))
+        deal_id = _teks(sel(row, "Deal"))
+        login = _teks(sel(row, "Login"))
+        if not deal_id and not login:
+            n_foot += 1
+            continue
+        if len(row) > len(header) and not deal_id and not login:
+            n_foot += 1
+            continue
+        tipe = _teks(sel(row, "Type"))
+        comment = _teks(sel(row, "Comment"))
+        macam = _macam_mt4(tipe, comment)
+        if macam == "balance":
+            n_bal += 1
+            profit_balance += _angka_longgar(sel(row, "Profit"))
+            continue
+        if macam == "cancelled":
+            n_can += 1
+            continue
+        if macam != "trade":
+            n_lain += 1
+            continue
+        if deal_id and not deals.add_deal(deal_id):
+            n_dup += 1
+            continue
+        if not login:
+            sys.exit(f"STOP: blank Login in '{path.name}', row {nomor}")
+        buka = tanggal_dari_waktu(sel(row, "Open Time"), path, nomor, "Open Time")
+        tutup = tanggal_dari_waktu(sel(row, "Close Time"), path, nomor, "Close Time")
+        volume = _angka(sel(row, "Volume"), path, nomor, "Volume")
+        commission = _angka(sel(row, "Commission"), path, nomor, "Commission")
+        fee = _angka(sel(row, "Taxes"), path, nomor, "Taxes")
+        swap = _angka(sel(row, "Swap"), path, nomor, "Swap")
+        profit = _angka(sel(row, "Profit"), path, nomor, "Profit")
+        agent = _angka(sel(row, "Agent"), path, nomor, "Agent")
+        symbol = _teks(sel(row, "Symbol")).upper()
+        tipe_out = tipe.strip().lower()
+        n_out += 1
+        pakai_baris({
+            "Entry": "out",
+            "Login": login,
+            "Date": tutup,
+            "Type": tipe_out,
+            "Symbol": symbol,
+            "Volume": volume,
+            "Commission": commission,
+            "Agent": agent,
+            "Fee": fee,
+            "Swap": swap,
+            "Profit": profit,
+            "Currency": _MT4_CURRENCY,
+        }, "mt4")
+        if awal <= buka <= akhir:
+            n_in += 1
+            pakai_baris({
+                "Entry": "in",
+                "Login": login,
+                "Date": buka,
+                "Type": tipe_out,
+                "Symbol": symbol,
+                "Volume": volume,
+                "Commission": 0.0,
+                "Agent": 0.0,
+                "Fee": 0.0,
+                "Swap": 0.0,
+                "Profit": 0.0,
+                "Currency": _MT4_CURRENCY,
+            }, "mt4")
+        else:
+            n_luar += 1
+    deals.commit()
+    return {"nama": path.name, "platform": "mt4", "total": total,
+            "out": n_out, "in": n_in, "balance": n_bal, "cancelled": n_can,
+            "footer": n_foot, "lain": n_lain, "duplikat": n_dup,
+            "open_luar": n_luar, "balance_profit": profit_balance,
+            "sheets": {}, "sheets_dilewati": []}
 
 
 def _normalisasi_satu_file(path: Path, deals, pakai_baris):
@@ -396,29 +645,45 @@ def _normalisasi_satu_file(path: Path, deals, pakai_baris):
             "sheets_dilewati": info["dilewati"]}
 
 
+def _kolom_usd(b):
+    return KOLOM_USD_MT4 if "Agent" in b else KOLOM_USD
+
+
+def _sumber_usd(b):
+    if "Agent" in b:
+        return ("Commission", "Agent", "Fee", "Swap", "Profit")
+    return ("Commission", "Fee", "Swap", "Profit")
+
+
 def _tambah_agregat(kelompok, b, level, pakai_fx=False):
     """Tambahkan satu baris ke agregat harian atau bulanan."""
     tgl = b["Date"]
     periode = tgl.replace(day=1) if level == "bulan" else tgl
     kunci = (b["Login"], periode, b["Type"], b["Symbol"], b["Currency"])
+    ada_agent = "Agent" in b
+    usd = _kolom_usd(b)
     if kunci not in kelompok:
         kelompok[kunci] = {"Login": b["Login"], "Periode": periode,
                            "Type": b["Type"], "Symbol": b["Symbol"],
                            "Deals": 0, "Volume": 0.0, "Commission": 0.0, "Fee": 0.0,
                            "Swap": 0.0, "Profit": 0.0, "Currency": b["Currency"],
                            "_kurs_kurang": 0, "_ada_usd_valid": False}
+        if ada_agent:
+            kelompok[kunci]["Agent"] = 0.0
         if pakai_fx:
-            kelompok[kunci].update({name: 0.0 for name in KOLOM_USD})
+            kelompok[kunci].update({name: 0.0 for name in usd})
     d = kelompok[kunci]
     d["Deals"] += 1
     for kol in KOLOM_JUMLAH:
         d[kol] += b[kol]
+    if ada_agent:
+        d["Agent"] += b["Agent"]
     if pakai_fx:
         if b.get("_kurs_kurang"):
             d["_kurs_kurang"] += 1
         else:
             d["_ada_usd_valid"] = True
-            for kol in KOLOM_USD:
+            for kol in usd:
                 d[kol] += b[kol]
 
 
@@ -437,9 +702,10 @@ def _hasil_agregat(kelompok):
     return hasil
 
 
-def proses(paths_in, path_out: Path) -> dict:
+def proses(paths_in, path_out: Path, allow_mt4=False) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
-    'out' and 'in' rows go to separate sheets of each workbook."""
+    'out' and 'in' rows go to separate sheets of each workbook.
+    MT4 Raw Report files are accepted only when allow_mt4 is true (KVB)."""
     paths_in = [Path(p) for p in paths_in]
     path_out = Path(path_out)
     fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
@@ -448,6 +714,15 @@ def proses(paths_in, path_out: Path) -> dict:
         sys.exit("STOP: upload only one Client Equity FX workbook per run.")
     if not deal_paths:
         sys.exit("STOP: no Deals History file was uploaded; only Client Equity FX file(s) were found.")
+    klasifikasi = [(path, _info_mt4(path)) for path in deal_paths]
+    mt4_paths = [path for path, info in klasifikasi if info]
+    if mt4_paths and not allow_mt4:
+        names = ", ".join(path.name for path in mt4_paths)
+        sys.exit(
+            "STOP: DPM Deal Segregator accepts MT5 Deals History only. "
+            f"MT4 Raw Report is not used on this page: {names}. "
+            "Upload MT4 on the KVB Deal Segregator."
+        )
     fx = {}
     for path in fx_paths:
         fx.update(baca_fx(path))
@@ -456,61 +731,96 @@ def proses(paths_in, path_out: Path) -> dict:
 
     harian = {"out": {}, "in": {}}
     bulanan = {"out": {}, "in": {}}
+    harian_mt4 = {"out": {}, "in": {}}
+    bulanan_mt4 = {"out": {}, "in": {}}
     login_unik = set()
+    login_mt4 = set()
     dipakai = {"out": 0, "in": 0}
+    dipakai_mt4 = {"out": 0, "in": 0}
     jumlah = {"out": defaultdict(float), "in": defaultdict(float)}
+    jumlah_mt4 = {"out": defaultdict(float), "in": defaultdict(float)}
 
-    def pakai_baris(b):
+    def pakai_baris(b, platform="mt5"):
+        if platform == "mt4":
+            harian_t, bulanan_t = harian_mt4, bulanan_mt4
+            dipakai_t, jumlah_t, login_t = dipakai_mt4, jumlah_mt4, login_mt4
+        else:
+            harian_t, bulanan_t = harian, bulanan
+            dipakai_t, jumlah_t, login_t = dipakai, jumlah, login_unik
         e = b["Entry"]
-        dipakai[e] += 1
-        login_unik.add(b["Login"])
-        for kol in ("Volume", "Commission", "Fee", "Swap", "Profit"):
-            jumlah[e][kol] += b[kol]
+        dipakai_t[e] += 1
+        login_t.add(b["Login"])
+        kolom = ("Volume", "Commission", "Fee", "Swap", "Profit")
+        if "Agent" in b:
+            kolom = kolom + ("Agent",)
+        for kol in kolom:
+            jumlah_t[e][kol] += b[kol]
         if pakai_fx:
             marker = object()
             key = (b["Date"], _norm(b["Currency"]))
             rate = fx.get(key, marker)
+            usd = _kolom_usd(b)
             if rate is marker or rate == 0:
                 b["_kurs_kurang"] = True
                 kurs_kurang[key] += 1
-                for name in KOLOM_USD:
+                for name in usd:
                     b[name] = None
             else:
                 b["_kurs_kurang"] = False
                 pembagi = 1.0 if rate is None else rate
-                for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                for source, target in zip(_sumber_usd(b), usd):
                     b[target] = b[source] / pembagi
-        _tambah_agregat(harian[e], b, "hari", pakai_fx)
-        _tambah_agregat(bulanan[e], b, "bulan", pakai_fx)
+        _tambah_agregat(harian_t[e], b, "hari", pakai_fx)
+        _tambah_agregat(bulanan_t[e], b, "bulan", pakai_fx)
 
     path_out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
         deals = _DiskDeals(Path(state_dir) / "deals.sqlite")
+        deals_mt4 = (_DiskDeals(Path(state_dir) / "deals-mt4.sqlite")
+                     if mt4_paths else None)
         try:
-            per_file = [_normalisasi_satu_file(path, deals, pakai_baris)
-                        for path in deal_paths]
+            per_file = []
+            for path, info in klasifikasi:
+                if info:
+                    per_file.append(_normalisasi_mt4(path, info, deals_mt4, pakai_baris))
+                else:
+                    per_file.append(_normalisasi_satu_file(path, deals, pakai_baris))
         finally:
             deals.close()
+            if deals_mt4 is not None:
+                deals_mt4.close()
 
-    total = sum(r["total"] for r in per_file)
-    entry_lain = sum(r["lain"] for r in per_file)
-    dup_out = sum(r["dup_out"] for r in per_file)
-    dup_in = sum(r["dup_in"] for r in per_file)
+    berkas_mt5 = [r for r in per_file if r.get("platform") != "mt4"]
+    berkas_mt4 = [r for r in per_file if r.get("platform") == "mt4"]
+    ada_mt5, ada_mt4 = bool(berkas_mt5), bool(berkas_mt4)
+    total = sum(r["total"] for r in berkas_mt5)
+    entry_lain = sum(r["lain"] for r in berkas_mt5)
+    dup_out = sum(r["dup_out"] for r in berkas_mt5)
+    dup_in = sum(r["dup_in"] for r in berkas_mt5)
     duplikat = dup_out + dup_in
-    if not (dipakai["out"] or dipakai["in"]):
-        sys.exit(
-            "STOP: no row with Entry = 'out' or 'in' was found.\n"
-            f"Across {len(deal_paths)} Deals History file(s), {total} rows in total, "
-            f"all {entry_lain} with another/empty Entry.\n"
-            "Check that these files are the correct Deals History exports."
-        )
+    if not (dipakai["out"] or dipakai["in"] or dipakai_mt4["out"] or dipakai_mt4["in"]):
+        if not ada_mt4:
+            sys.exit(
+                "STOP: no row with Entry = 'out' or 'in' was found.\n"
+                f"Across {len(berkas_mt5)} Deals History file(s), {total} rows in total, "
+                f"all {entry_lain} with another/empty Entry.\n"
+                "Check that these files are the correct Deals History exports."
+            )
 
     h_out, h_in = _hasil_agregat(harian["out"]), _hasil_agregat(harian["in"])
     b_out, b_in = _hasil_agregat(bulanan["out"]), _hasil_agregat(bulanan["in"])
+    h_out_mt4, h_in_mt4 = _hasil_agregat(harian_mt4["out"]), _hasil_agregat(harian_mt4["in"])
+    b_out_mt4, b_in_mt4 = _hasil_agregat(bulanan_mt4["out"]), _hasil_agregat(bulanan_mt4["in"])
 
     ringkasan = {"Uploaded files": len(paths_in)}
     yellow_labels = set()
     for r in per_file:
+        if r.get("platform") == "mt4":
+            ringkasan[f"  - {r['nama']} (MT4 Raw Report)"] = (
+                f"{r['total']} rows, {r['out']} closed buy/sell, {r['in']} opening legs, "
+                f"{r['balance']} balance/credit dropped, {r['cancelled']} cancelled pending dropped, "
+                f"{r['footer']} footer/summary dropped")
+            continue
         ringkasan[f"  - {r['nama']}"] = (
             f"{r['total']} rows, {r['out']} 'out' + {r['in']} 'in' kept"
             + (f", {r['duplikat']} duplicates dropped" if r["duplikat"] else ""))
@@ -534,35 +844,79 @@ def proses(paths_in, path_out: Path) -> dict:
             f"{date} {currency} ({kurs_kurang[(date, currency)]} rows)"
             for date, currency in ordered[:15])
         yellow_labels.add(label)
-    ringkasan.update({
-        "Total source rows (all files)": total,
-        "Entry = out (before deduplication)": dipakai["out"] + dup_out,
-        "Entry = in (before deduplication)": dipakai["in"] + dup_in,
-        "Entry empty/other (dropped)": entry_lain,
-        "Duplicate non-empty Deal IDs (dropped)": duplikat,
-        "Unique 'out' rows kept": dipakai["out"],
-        "Unique 'in' rows kept": dipakai["in"],
-        # Label lists every grouping dimension, Currency included -- see _tambah_agregat.
-        "Daily 'out' rows (Login+Date+Type+Symbol+Currency)": len(h_out),
-        "Daily 'in' rows (same grouping, sheet 'Daily - In')": len(h_in),
-        "Monthly Summary 'out' rows (Login+Month+Type+Symbol+Currency)": len(b_out),
-        "Monthly Summary 'in' rows (same grouping, sheet 'Monthly Summary - In')": len(b_in),
-        "Unique logins": len(login_unik),
-        "Total Profit ('out' rows)": round(jumlah["out"]["Profit"], 2),
-        "Total Profit ('in' rows)": round(jumlah["in"]["Profit"], 2),
-        "Total Commission ('out' rows)": round(jumlah["out"]["Commission"], 2),
-        "Total Commission ('in' rows)": round(jumlah["in"]["Commission"], 2),
-        # Volume is not money; keep source precision (do not round to 2 decimals).
-        "Total Volume ('out' rows)": jumlah["out"]["Volume"],
-        "Total Volume ('in' rows) - same trades as 'out'; do not add the two": jumlah["in"]["Volume"],
-    })
+    if ada_mt5:
+        ringkasan.update({
+            ("MT5 source rows" if ada_mt4 else "Total source rows (all files)"): total,
+            "Entry = out (before deduplication)": dipakai["out"] + dup_out,
+            "Entry = in (before deduplication)": dipakai["in"] + dup_in,
+            "Entry empty/other (dropped)": entry_lain,
+            "Duplicate non-empty Deal IDs (dropped)": duplikat,
+            "Unique 'out' rows kept": dipakai["out"],
+            "Unique 'in' rows kept": dipakai["in"],
+            # Label lists every grouping dimension, Currency included -- see _tambah_agregat.
+            "Daily 'out' rows (Login+Date+Type+Symbol+Currency)": len(h_out),
+            "Daily 'in' rows (same grouping, sheet 'Daily - In')": len(h_in),
+            "Monthly Summary 'out' rows (Login+Month+Type+Symbol+Currency)": len(b_out),
+            "Monthly Summary 'in' rows (same grouping, sheet 'Monthly Summary - In')": len(b_in),
+            "Unique logins": len(login_unik),
+            "Total Profit ('out' rows)": round(jumlah["out"]["Profit"], 2),
+            "Total Profit ('in' rows)": round(jumlah["in"]["Profit"], 2),
+            "Total Commission ('out' rows)": round(jumlah["out"]["Commission"], 2),
+            "Total Commission ('in' rows)": round(jumlah["in"]["Commission"], 2),
+            # Volume is not money; keep source precision (do not round to 2 decimals).
+            "Total Volume ('out' rows)": jumlah["out"]["Volume"],
+            "Total Volume ('in' rows) - same trades as 'out'; do not add the two": jumlah["in"]["Volume"],
+        })
+    if ada_mt4:
+        label_currency = "MT4 currency assumption (open question)"
+        label_questions = "MT4 open questions for KVB"
+        ringkasan.update({
+            "MT4 source rows": sum(r["total"] for r in berkas_mt4),
+            "MT4 closed buy/sell kept": dipakai_mt4["out"],
+            "MT4 opening legs kept (volume only, inside the report period)": dipakai_mt4["in"],
+            "MT4 balance/credit rows dropped (same rule as MT5 non-trade Entry)":
+                sum(r["balance"] for r in berkas_mt4),
+            "MT4 cancelled pending orders dropped": sum(r["cancelled"] for r in berkas_mt4),
+            "MT4 footer/summary lines dropped": sum(r["footer"] for r in berkas_mt4),
+            "MT4 opening legs outside the report period (in row skipped)":
+                sum(r["open_luar"] for r in berkas_mt4),
+            "MT4 duplicate Deal IDs dropped": sum(r["duplikat"] for r in berkas_mt4),
+            "MT4 other rows dropped": sum(r["lain"] for r in berkas_mt4),
+            "MT4 balance/credit Profit excluded": round(sum(r["balance_profit"] for r in berkas_mt4), 2),
+            "Daily MT4 rows (Login+Date+Type+Symbol+Currency)": len(h_out_mt4),
+            "Daily MT4 in rows (sheet 'Daily - MT4 In')": len(h_in_mt4),
+            "Monthly Summary MT4 rows (Login+Month+Type+Symbol+Currency)": len(b_out_mt4),
+            "Monthly Summary MT4 in rows (sheet 'Monthly Summary - MT4 In')": len(b_in_mt4),
+            "Unique MT4 logins": len(login_mt4),
+            "MT4 Total Profit (closed buy/sell)": round(jumlah_mt4["out"]["Profit"], 2),
+            "MT4 Total Commission (closed buy/sell)": round(jumlah_mt4["out"]["Commission"], 2),
+            "MT4 Total Agent (closed buy/sell)": round(jumlah_mt4["out"]["Agent"], 2),
+            "MT4 Total Fee (Taxes, closed buy/sell)": round(jumlah_mt4["out"]["Fee"], 2),
+            "MT4 Total Swap (closed buy/sell)": round(jumlah_mt4["out"]["Swap"], 2),
+            "MT4 Total Volume (closed buy/sell)": jumlah_mt4["out"]["Volume"],
+            "MT4 Total Volume (opening legs) - do not add to closed volume": jumlah_mt4["in"]["Volume"],
+            "MT4 Agent commission":
+                "Kept in its own column on the MT4 sheets and not added to Commission.",
+            label_currency:
+                "USD on every MT4 row. The Raw Report has no Currency column, and login "
+                "numbers are not matched to MT5 because the same login can exist on both platforms.",
+            label_questions:
+                "Confirm with KVB: currency (USD assumption); whether balance rows "
+                "(deposits, withdrawals, swaps, transfers) should stay excluded; whether "
+                "Agent commission should stay separate from Commission; whether opening "
+                "legs should stay volume-only and only inside the report period.",
+        })
+        yellow_labels.update((label_currency, label_questions))
 
+    mt4_payload = (h_out_mt4, h_in_mt4, b_out_mt4, b_in_mt4) if ada_mt4 else None
     if path_out.suffix.lower() == ".zip":
-        _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels)
+        _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
+                   mt4_payload, ada_mt5)
     elif pakai_fx:
         sys.exit("STOP: Client Equity FX output must use a .zip filename.")
     else:
-        _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan)
+        _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
+                        mt4_payload, ada_mt5)
 
     result = {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai["out"],
               "dipakai_in": dipakai["in"],
@@ -571,6 +925,8 @@ def proses(paths_in, path_out: Path) -> dict:
               "login_unik": len(login_unik)}
     if pakai_fx:
         result.update(pakai_fx=True, kurs_kurang=sum(kurs_kurang.values()))
+    if ada_mt4:
+        result.update(mt4_dipakai=dipakai_mt4["out"], mt4_dipakai_in=dipakai_mt4["in"])
     return result
 
 
@@ -578,11 +934,16 @@ def proses(paths_in, path_out: Path) -> dict:
 KUNING = PatternFill("solid", fgColor="FFFF00")
 
 
-def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
+def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
+                 kolom_hasil=None, kolom_usd=None):
     """Stream rows into a write-only sheet so memory does not scale with row count."""
+    if kolom_hasil is None:
+        kolom_hasil = KOLOM_HASIL
+    if kolom_usd is None:
+        kolom_usd = KOLOM_USD
     kolom = [kolom_periode if k == "{PERIODE}" else k
-             for k in KOLOM_HASIL + (KOLOM_USD if pakai_fx else [])]
-    usd_indexes = {kolom.index(k) + 1 for k in KOLOM_USD} if pakai_fx else set()
+             for k in kolom_hasil + (kolom_usd if pakai_fx else [])]
+    usd_indexes = {kolom.index(k) + 1 for k in kolom_usd} if pakai_fx else set()
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
     for j, name in enumerate(kolom, start=1):
@@ -608,7 +969,7 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False):
             if missing_fx:
                 nilai = None
             teks_tidak_aman = False
-            if key in KOLOM_UANG or key in KOLOM_USD:
+            if key in KOLOM_UANG or key in kolom_usd:
                 if isinstance(nilai, float):
                     nilai = round(nilai, 2)
             elif key in KOLOM_TEKS and isinstance(nilai, str) and nilai.startswith(("=", "+", "-", "@")):
@@ -641,15 +1002,27 @@ def _tulis_verifikasi(ws, ringkasan: dict, yellow_labels=frozenset()):
         ws.append([first, second])
 
 
-def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict):
+def _tambah_sheet_mt4(wb, title, rows, rows_in, period_name, period_format, pakai_fx):
+    _tulis_sheet(wb.create_sheet(f"{title} - MT4"), rows, period_name, period_format,
+                 pakai_fx, KOLOM_HASIL_MT4, KOLOM_USD_MT4)
+    _tulis_sheet(wb.create_sheet(f"{title} - MT4 In"), rows_in, period_name, period_format,
+                 pakai_fx, KOLOM_HASIL_MT4, KOLOM_USD_MT4)
+
+
+def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict,
+                    mt4=None, tulis_mt5=True):
     """Legacy one-workbook writer kept for direct callers."""
     wb = Workbook(write_only=True)
-    daily = wb.create_sheet("Daily")
-    _tulis_sheet(daily, harian, "Date", "dd mmm yyyy")
-    _tulis_sheet(wb.create_sheet("Daily - In"), harian_in, "Date", "dd mmm yyyy")
-    monthly = wb.create_sheet("Monthly Summary")
-    _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy")
-    _tulis_sheet(wb.create_sheet("Monthly Summary - In"), bulanan_in, "Month", "mmm yyyy")
+    if tulis_mt5:
+        daily = wb.create_sheet("Daily")
+        _tulis_sheet(daily, harian, "Date", "dd mmm yyyy")
+        _tulis_sheet(wb.create_sheet("Daily - In"), harian_in, "Date", "dd mmm yyyy")
+        monthly = wb.create_sheet("Monthly Summary")
+        _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy")
+        _tulis_sheet(wb.create_sheet("Monthly Summary - In"), bulanan_in, "Month", "mmm yyyy")
+    if mt4 is not None:
+        _tambah_sheet_mt4(wb, "Daily", mt4[0], mt4[1], "Date", "dd mmm yyyy", False)
+        _tambah_sheet_mt4(wb, "Monthly Summary", mt4[2], mt4[3], "Month", "mmm yyyy", False)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -659,11 +1032,14 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
 
 
 def _write_split_workbook(path, title, rows, rows_in, period_name, period_format, summary,
-                          pakai_fx, yellow_labels):
+                          pakai_fx, yellow_labels, mt4=None, tulis_utama=True):
     wb = Workbook(write_only=True)
-    ws = wb.create_sheet(title)
-    _tulis_sheet(ws, rows, period_name, period_format, pakai_fx)
-    _tulis_sheet(wb.create_sheet(f"{title} - In"), rows_in, period_name, period_format, pakai_fx)
+    if tulis_utama:
+        ws = wb.create_sheet(title)
+        _tulis_sheet(ws, rows, period_name, period_format, pakai_fx)
+        _tulis_sheet(wb.create_sheet(f"{title} - In"), rows_in, period_name, period_format, pakai_fx)
+    if mt4 is not None:
+        _tambah_sheet_mt4(wb, title, mt4[0], mt4[1], period_name, period_format, pakai_fx)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:
         wb.save(path)
@@ -671,15 +1047,18 @@ def _write_split_workbook(path, title, rows, rows_in, period_name, period_format
         wb.close()
 
 
-def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels):
+def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels,
+               mt4=None, tulis_mt5=True):
     path_out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path_out.parent) as folder:
         daily = Path(folder) / "Deals - Daily.xlsx"
         monthly = Path(folder) / "Deals - Monthly Summary.xlsx"
+        daily_mt4 = None if mt4 is None else (mt4[0], mt4[1])
+        monthly_mt4 = None if mt4 is None else (mt4[2], mt4[3])
         _write_split_workbook(daily, "Daily", harian, harian_in, "Date", "dd mmm yyyy",
-                              summary, pakai_fx, yellow_labels)
+                              summary, pakai_fx, yellow_labels, daily_mt4, tulis_mt5)
         _write_split_workbook(monthly, "Monthly Summary", bulanan, bulanan_in, "Month", "mmm yyyy",
-                              summary, pakai_fx, yellow_labels)
+                              summary, pakai_fx, yellow_labels, monthly_mt4, tulis_mt5)
         with zipfile.ZipFile(path_out, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.write(daily, daily.name)
             archive.write(monthly, monthly.name)
@@ -689,6 +1068,8 @@ def main():
     ap = argparse.ArgumentParser(description="Deal Segregator -- segregate Deals History per Login")
     ap.add_argument("input", nargs="+", help="one or more Deals History files (.csv, .xlsx or .xlsm)")
     ap.add_argument("-o", "--output", help="result .zip file (default: <input>-hasil.zip)")
+    ap.add_argument("--allow-mt4", action="store_true",
+                    help="accept an MT4 Manager Raw Report as well (KVB). DPM must leave this off.")
     args = ap.parse_args()
 
     paths_in = [Path(p) for p in args.input]
@@ -697,7 +1078,7 @@ def main():
             sys.exit(f"STOP: file not found: {p}")
     path_out = Path(args.output) if args.output else paths_in[0].with_name(f"{paths_in[0].stem}-hasil.zip")
 
-    ringkasan = proses(paths_in, path_out)
+    ringkasan = proses(paths_in, path_out, allow_mt4=args.allow_mt4)
     print("=== STAGE 1 DONE ===")
     for k, v in ringkasan.items():
         print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")

@@ -19,6 +19,19 @@
       <input id="metabase-file" type="file" name="file" accept=".xlsx,.xlsm" required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    {% elif slug == "segregate" and company == "kvb" %}
+    <label for="deals-file">Deals files <span class="opt">— MT5 Deals History; MT4 Raw Report is optional</span></label>
+    <div id="deals-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop MT5 Deals History here</strong><br><span>MT4 Raw Report is optional. Click to choose one or more files.</span>
+      <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
+    <div id="equity-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
+      <input id="equity-file" type="file" name="file" accept=".xlsx,.xlsm">
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
     {% elif slug == "segregate" %}
     <label for="deals-file">Deals History <span class="opt">— one or more files, 50 files maximum</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
