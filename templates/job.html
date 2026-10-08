@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Processing · Dupoin DPM Tools{% endblock %}
+{% block title %}Processing · {{ 'KVB Tools' if company == 'kvb' else 'Dupoin DPM Tools' }}{% endblock %}
 {% block body %}
 {% if info.state == 'collected' %}
 <h1>Download finished</h1>

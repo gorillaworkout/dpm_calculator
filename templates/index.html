@@ -1,12 +1,43 @@
 {% extends "base.html" %}
+{% block title %}{{ 'KVB Tools' if company == 'kvb' else 'Dupoin DPM Tools' }}{% endblock %}
 {% block wide %} wide{% endblock %}
 {% block body %}
 {% if company == 'kvb' %}
 <h1><span>KVB</span> Tools</h1>
-<p class="lede">Upload one KVB Plus workbook. The app translates the KVB fields, prepares the clean D&amp;W template, then calculates the finished monthly report. Your original file is never modified.</p>
+<p class="lede">Upload one KVB Plus workbook. The app translates the KVB fields, prepares the clean D&amp;W template, then calculates the finished monthly report. Deal Segregator reads the default MT5 Deals History export. Your original files are never modified.</p>
 <div class="grid">
   <a class="card" href="/kvb/tool/dw"><span class="tag">Ready</span><h3>Generate D&amp;W</h3><p>One upload runs KVB preparation, template preparation, and the D&amp;W calculation.</p></a>
+  <a class="card" href="/kvb/tool/segregate"><span class="tag">Ready</span><h3>Deal Segregator</h3><p>Combine MT5 Deals History files and optionally add a Client Equity FX workbook for USD-converted financial totals.</p></a>
 </div>
+
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">Deal Segregator</h2>
+<p class="lede">Upload one or more MT5 Deals History exports &mdash; for example one file per
+month. Closing trades (<code>Entry = out</code>) and opening trades (<code>Entry = in</code>) are
+written to separate sheets, repeated Deal IDs across files are counted once, and the rows
+are grouped by account, period, type, symbol and currency.</p>
+
+<div class="card">
+  <table style="width:100%; border-collapse:collapse; font-size:13.5px">
+    <tbody>
+      <tr>
+        <td style="padding:9px 0; width:170px; color:var(--ink); font-weight:600"><code>Daily</code></td>
+        <td style="padding:9px 0; color:var(--mute)">Day-by-day totals for Volume, Commission, Fee, Swap and Profit</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600"><code>Monthly Summary</code></td>
+        <td style="padding:9px 0; color:var(--mute)">The same figures rolled up per month, without the daily detail</td>
+      </tr>
+      <tr>
+        <td style="padding:9px 0; color:var(--ink); font-weight:600"><code>Verifikasi</code></td>
+        <td style="padding:9px 0; color:var(--mute)">Row counts per file, rows dropped, duplicates removed and overall totals</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<p class="lede" style="margin:16px 0 0">Generate D&amp;W returns one XLSX workbook. Deal Segregator
+returns one ZIP containing two XLSX workbooks. Results download straight to your browser and
+are removed from the server after a completed download.</p>
 {% else %}
 <h1>Dupoin <span>DPM</span> Tools</h1>
 <p class="lede">Reporting tools for the DPM Malaysia team. Pick the one you need, upload

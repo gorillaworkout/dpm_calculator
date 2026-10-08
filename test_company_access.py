@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Company migration, authorization, navigation, and admin checks."""
 import base64
+import io
 import os
 import sqlite3
 import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 from werkzeug.security import generate_password_hash
@@ -28,7 +30,10 @@ os.environ.pop("DW_ADMIN_USER", None)
 os.environ.pop("DW_ADMIN_PASS", None)
 
 import auth  # noqa: E402
-from app import app  # noqa: E402
+from app import JOBS, TOOLS, KVB_TOOLS, _read_state, _write_state, app  # noqa: E402
+
+assert KVB_TOOLS["segregate"][2] == TOOLS["segregate"][2] == ("deal_segregator.py",)
+assert "pl-desk" not in KVB_TOOLS and "pl-desk" in TOOLS
 
 app.config["TESTING"] = True
 
@@ -93,10 +98,28 @@ assert clients["dpm"].get("/tool/dw").status_code == 403  # edited to KVB-only a
 c.post("/admin/users/dpm/access", headers=ADMIN, data={"can_dpm": "1"})
 assert clients["dpm"].get("/tool/dw").status_code == 200
 assert clients["dpm"].get("/kvb/tool/dw").status_code == 403
-assert clients["kvb"].get("/kvb/tool/dw").status_code == 200
+kvb_dw = clients["kvb"].get("/kvb/tool/dw")
+assert kvb_dw.status_code == 200
+assert b"KVB Plus workbook" in kvb_dw.data and b"translates KVB" in kvb_dw.data
+assert b"Generate D&amp;W \xc2\xb7 KVB Tools" in kvb_dw.data
 assert clients["kvb"].get("/tool/dw").status_code == 403
 assert clients["kvb"].get("/tool/segregate").status_code == 403
+assert clients["kvb"].get("/tool/pl-desk").status_code == 403
+assert clients["kvb"].get("/kvb/tool/pl-desk").status_code == 404
+assert clients["dpm"].get("/kvb/tool/segregate").status_code == 403
+kvb_seg = clients["kvb"].get("/kvb/tool/segregate")
+assert kvb_seg.status_code == 200
+assert b"Deal Segregator \xc2\xb7 KVB Tools" in kvb_seg.data
+assert b'id="deals-drop"' in kvb_seg.data and b'id="equity-drop"' in kvb_seg.data
+assert b"separate sheets" in kvb_seg.data
+assert b'name="bulan"' not in kvb_seg.data
+assert b"KVB Plus workbook" not in kvb_seg.data
+assert b"translates KVB" not in kvb_seg.data
+dpm_seg = clients["dpm"].get("/tool/segregate")
+assert dpm_seg.status_code == 200
+assert b"Deal Segregator \xc2\xb7 Dupoin DPM Tools" in dpm_seg.data
 assert clients["both"].get("/tool/segregate").status_code == 200
+assert clients["both"].get("/kvb/tool/segregate").status_code == 200
 assert clients["both"].get("/kvb/tool/dw").status_code == 200
 
 # A browser login for a KVB-only user lands in KVB, never on forbidden DPM.
@@ -111,8 +134,61 @@ assert b'href="/tool/dw"' in dpm_page and b'href="/tool/segregate"' in dpm_page
 assert b'data-company="kvb" aria-disabled="true"' in dpm_page
 kvb_page = clients["kvb"].get("/kvb").data
 assert b"KVB Tools" in kvb_page and b"KVB Plus" in kvb_page
-assert b"Deal Segregator" not in kvb_page
+assert b"Deal Segregator" in kvb_page and b'href="/kvb/tool/segregate"' in kvb_page
+assert b"PL by Desk" not in kvb_page
 assert b'data-company="dpm" aria-disabled="true"' in kvb_page
+
+# A KVB user can run Deal Segregator. The result stays inside KVB.
+deals = (
+    "Deal,Login,Time,Type,Entry,Symbol,Volume,Commission,Fee,Swap,Profit,Currency\n"
+    "kvb-1,100,2026.07.01 00:00:00,buy,out,EURUSD,1,-1,0,0,10,USD\n"
+).encode()
+started = clients["kvb"].post(
+    "/kvb/tool/segregate",
+    data={"file": (io.BytesIO(deals), "KVB Deals.csv")},
+    content_type="multipart/form-data")
+assert started.status_code == 303, (started.status_code, started.data[:300])
+assert started.headers["Location"].startswith("/kvb/job/")
+kvb_job = started.headers["Location"].rstrip("/").rsplit("/", 1)[-1]
+kvb_state = None
+for _ in range(200):
+    kvb_state = _read_state(kvb_job)
+    if kvb_state and kvb_state["state"] in ("done", "failed"):
+        break
+    time.sleep(0.05)
+assert kvb_state and kvb_state["state"] == "done", kvb_state
+assert kvb_state["company"] == "kvb" and kvb_state["slug"] == "segregate"
+assert kvb_state["name"] == "KVB Deals-hasil.zip"
+kvb_job_page = clients["kvb"].get(f"/kvb/job/{kvb_job}")
+assert kvb_job_page.status_code == 200
+assert b"Processing \xc2\xb7 KVB Tools" in kvb_job_page.data
+assert clients["kvb"].get(f"/job/{kvb_job}").status_code == 200
+assert clients["dpm"].get(f"/kvb/job/{kvb_job}").status_code == 403
+assert clients["dpm"].get(f"/job/{kvb_job}").status_code == 403
+assert clients["dpm"].get(f"/kvb/job/{kvb_job}/download").status_code == 403
+blocked = clients["dpm"].get(f"/job/{kvb_job}/download")
+assert blocked.status_code == 403 and b"PK" not in blocked.data
+ready = clients["kvb"].get(f"/kvb/job/{kvb_job}/download")
+assert ready.status_code == 200
+assert "KVB Deals-hasil.zip" in ready.headers["Content-Disposition"]
+with zipfile.ZipFile(io.BytesIO(ready.data)) as archive:
+    assert archive.namelist() == ["Deals - Daily.xlsx", "Deals - Monthly Summary.xlsx"]
+
+# The other direction: a KVB user cannot open or download a DPM job.
+dpm_job = "dpm-only-segregate-job"
+secret = b"DPM-SECRET-RESULT"
+(JOBS / dpm_job).mkdir(exist_ok=True)
+(JOBS / dpm_job / "hasil.zip").write_bytes(secret)
+_write_state(dpm_job, state="done", name="dpm-hasil.zip", started=time.time(),
+             error=None, log=None, path=str(JOBS / dpm_job / "hasil.zip"),
+             slug="segregate", company="dpm")
+assert clients["dpm"].get(f"/job/{dpm_job}").status_code == 200
+assert clients["kvb"].get(f"/job/{dpm_job}").status_code == 403
+assert clients["kvb"].get(f"/kvb/job/{dpm_job}").status_code == 403
+stolen = clients["kvb"].get(f"/job/{dpm_job}/download")
+assert stolen.status_code == 403 and secret not in stolen.data
+stolen_kvb_url = clients["kvb"].get(f"/kvb/job/{dpm_job}/download")
+assert stolen_kvb_url.status_code == 403 and secret not in stolen_kvb_url.data
 
 admin_page = c.get("/admin", headers=ADMIN).data
 assert b'name="can_dpm"' in admin_page and b'name="can_kvb"' in admin_page

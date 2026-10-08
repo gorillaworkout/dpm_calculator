@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ tool[0] }} · Dupoin DPM Tools{% endblock %}
+{% block title %}{{ tool[0] }} · {{ 'KVB Tools' if company == 'kvb' else 'Dupoin DPM Tools' }}{% endblock %}
 {% block body %}
 <h1>{{ tool[0] }}</h1>
 <p class="lede">{{ tool[1] }}</p>
