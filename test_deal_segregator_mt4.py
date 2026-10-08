@@ -314,8 +314,8 @@ with tempfile.TemporaryDirectory() as tmp:
     assert summary["harian"] == 2
 print("OK mixed MT4+MT5 stay apart by Platform and combine on one sheet")
 
-# Per-file currency. USC divides by the Client Equity FX rate, like an MT5 USC row.
-# A missing USC rate is yellow, not treated as 1. Agent is not converted.
+# Per-file currency. MT4 USC is divided by 100 even when an FX file gives another
+# USC rate. A missing USC rate is not yellow for that row. Agent is not converted.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     deals, fx = tmp / "mt4.csv", tmp / "fx.xlsx"
@@ -327,7 +327,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ws = wb.active
     ws.title = "Query result"
     ws.append(["date", "Currency", "rate"])
-    ws.append([datetime.date(2026, 10, 4), "USC", 100])
+    ws.append([datetime.date(2026, 10, 4), "USC", 50])
     wb.save(fx)
     wb.close()
     _, hasil, out = run([deals, fx], allow_mt4=True, mt4_currency={deals.name: "USC"})
@@ -339,7 +339,8 @@ with tempfile.TemporaryDirectory() as tmp:
         row = {headers[i]: c.value for i, c in enumerate(wb["Daily"][2])}
         assert row["Currency"] == "USC"
         assert row["Platform"] == "MT4"
-        assert row["Profit"] == 10 and row["Commission"] == -2
+        assert row["Volume"] == 1
+        assert row["Profit"] == 0.1 and row["Commission"] == -0.02
         assert row["Profit (USD)"] == 0.1
         assert row["Commission (USD)"] == -0.02
         assert row["Fee (USD)"] == -0.01
@@ -386,8 +387,9 @@ with tempfile.TemporaryDirectory() as tmp:
         headers = [c.value for c in wb["Daily"][1]]
         cells = list(wb["Daily"][2])
         profit_usd = cells[headers.index("Profit (USD)")]
-        assert profit_usd.value is None
-        assert profit_usd.fill.fgColor.rgb.endswith("FFFF00")
+        assert profit_usd.value == 0.1
+        rgb = getattr(profit_usd.fill.fgColor, "rgb", None)
+        assert not (isinstance(rgb, str) and rgb.endswith("FFFF00"))
     finally:
         wb.close()
 print("OK MT4 USD/USC choice and FX")
@@ -405,7 +407,7 @@ with tempfile.TemporaryDirectory() as tmp:
     rows = hasil["Deals - Daily.xlsx"]["Daily"][1:]
     assert [(r[0], r[1], r[10], r[11]) for r in rows] == [
         ("MT4", "77", 10, "USD"),
-        ("MT4", "77", 1000, "USC"),
+        ("MT4", "77", 10, "USC"),
     ]
     v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
     usd_line = next(val for key, val in v.items() if key.strip().startswith("- usd.csv"))
