@@ -19,6 +19,23 @@
       <input id="metabase-file" type="file" name="file" accept=".xlsx,.xlsm" required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    {% elif slug == "segregate" and company == "kvb" %}
+    <style>
+      #deals-drop .drop-files li span{flex:1}
+      select.mt4-currency{width:92px;flex:none;margin:0;padding:6px 26px 6px 8px;font-size:12px}
+    </style>
+    <label for="deals-file">Deals files <span class="opt">— MT5 Deals History; MT4 Raw Report is optional</span></label>
+    <div id="deals-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop MT5 Deals History here</strong><br><span>MT4 Raw Report is optional. Click to choose one or more files.</span>
+      <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
+    <div id="equity-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
+      <input id="equity-file" type="file" name="file" accept=".xlsx,.xlsm">
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
     {% elif slug == "segregate" %}
     <label for="deals-file">Deals History <span class="opt">— one or more files, 50 files maximum</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
@@ -158,6 +175,9 @@
             show();
           });
           item.appendChild(name);
+          {% if company == 'kvb' and slug == 'segregate' %}
+          maybeMt4Currency(item, file);
+          {% endif %}
           item.appendChild(button);
           list.appendChild(item);
         });
@@ -185,6 +205,55 @@
       });
       show();
     }
+    {% if company == 'kvb' and slug == 'segregate' %}
+    var mt4Choice = {};
+    function maybeMt4Currency(item, file) {
+      file.slice(0, 400).arrayBuffer().then(function (buf) {
+        var bytes = new Uint8Array(buf);
+        var text = '';
+        try {
+          if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+            text = new TextDecoder('utf-16le').decode(bytes);
+          } else if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+            text = new TextDecoder('utf-16be').decode(bytes);
+          } else {
+            text = new TextDecoder('utf-8').decode(bytes);
+          }
+        } catch (e) {
+          return;
+        }
+        if (!/Raw Report for/i.test(text) || !item.parentNode) return;
+        var select = document.createElement('select');
+        select.className = 'mt4-currency';
+        select.setAttribute('data-name', file.name);
+        select.setAttribute('aria-label', 'Currency for ' + file.name);
+        select.innerHTML = '<option value="USD">USD</option><option value="USC">USC</option>';
+        select.value = mt4Choice[file.name] || 'USD';
+        ['click', 'mousedown', 'keydown'].forEach(function (type) {
+          select.addEventListener(type, function (event) { event.stopPropagation(); });
+        });
+        select.addEventListener('change', function () { mt4Choice[file.name] = select.value; });
+        item.insertBefore(select, item.querySelector('.file-remove'));
+      }).catch(function () {});
+    }
+    function stampMt4Currency() {
+      var picks = form.querySelectorAll('select.mt4-currency');
+      var lines = [];
+      picks.forEach(function (sel) { lines.push(sel.getAttribute('data-name') + '|' + sel.value); });
+      var existing = form.querySelector('input[name="mt4_currency"]');
+      if (!lines.length) {
+        if (existing) existing.remove();
+        return;
+      }
+      if (!existing) {
+        existing = document.createElement('input');
+        existing.type = 'hidden';
+        existing.name = 'mt4_currency';
+        form.appendChild(existing);
+      }
+      existing.value = lines.join('\n');
+    }
+    {% endif %}
     setupDrop('deals-drop', document.getElementById('deals-file'), false);
     setupDrop('equity-drop', document.getElementById('equity-file'), true);
     setupDrop('finance-drop', document.getElementById('finance-file'), true);
@@ -262,6 +331,9 @@
     }
 
     form.addEventListener('submit', function (ev) {
+      {% if company == 'kvb' and slug == 'segregate' %}
+      stampMt4Currency();
+      {% endif %}
       var files = inputs.reduce(function (all, input) {
         return all.concat(Array.prototype.slice.call(input.files || []));
       }, []);
@@ -340,6 +412,9 @@
             hidden.value = id;
             form.appendChild(hidden);
             activeId = null; // processing route now owns and removes the staged files
+            {% if company == 'kvb' and slug == 'segregate' %}
+            stampMt4Currency();
+            {% endif %}
             form.submit();
           });
         })
