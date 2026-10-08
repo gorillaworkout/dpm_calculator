@@ -6,7 +6,20 @@
 
 <div class="card">
   <form id="uploadform" method="post" enctype="multipart/form-data">
-    {% if slug == "segregate" %}
+    {% if slug == "pl-desk" %}
+    <label for="finance-file">FinanceOS settlement <span class="opt">— PDF, or the converted Excel</span></label>
+    <div id="finance-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop the FinanceOS PDF here</strong><br><span>or click to choose the PDF or converted Excel</span>
+      <input id="finance-file" type="file" name="file" accept=".pdf,.xlsx,.xlsm" required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    <label for="metabase-file">Metabase workbook <span class="opt">— desk rebate, Desks, Target</span></label>
+    <div id="metabase-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop the Metabase workbook here</strong><br><span>or click to choose the .xlsx</span>
+      <input id="metabase-file" type="file" name="file" accept=".xlsx,.xlsm" required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    {% elif slug == "segregate" %}
     <label for="deals-file">Deals History <span class="opt">— one or more files, 50 files maximum</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Deals History files here</strong><br><span>or click to choose one or more files</span>
@@ -174,6 +187,8 @@
     }
     setupDrop('deals-drop', document.getElementById('deals-file'), false);
     setupDrop('equity-drop', document.getElementById('equity-file'), true);
+    setupDrop('finance-drop', document.getElementById('finance-file'), true);
+    setupDrop('metabase-drop', document.getElementById('metabase-file'), true);
 
     function elapsed(started) {
       var seconds = Math.max(0, Math.round((Date.now() - started) / 1000));

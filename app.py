@@ -81,6 +81,10 @@ TOOLS = {
     "segregate": ("Deal Segregator", "Combine MT5 Deals History files and optionally add "
                   "a Client Equity FX workbook for USD-converted financial totals.",
                   ("deal_segregator.py",), True),
+    # Own branch in run(): two uploads, no month dropdown, .xlsx output.
+    "pl-desk": ("PL by Desk", "Monthly P&L by sales desk. Upload the FinanceOS "
+                "settlement PDF and the Metabase desk-rebate workbook.",
+                ("pl_desk.py",), True),
 }
 
 # Separate registry: KVB never changes or extends the existing DPM pipeline.
@@ -217,6 +221,9 @@ HINT = {
     "segregate": "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). You may "
                  "also include one Client Equity FX workbook (.xlsx, sheet 'Query result'); "
                  "the two file types are detected automatically.",
+    "pl-desk": "Upload the FinanceOS settlement (PDF, or the converted Excel) and the "
+               "Metabase workbook. The workbook must contain the desk-rebate export, "
+               "the Desks sheet and the Target sheet. File types are detected by content.",
 }
 
 
@@ -349,6 +356,47 @@ DOC = {
                    ("Deals - Monthly Summary.xlsx", "<code>Monthly Summary</code> (out rows), <code>Monthly Summary - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi.")],
         "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.", CATATAN_ASLI],
     },
+    "pl-desk": {
+        "judul": "PL by Desk — monthly P&L by sales desk",
+        "ringkas": "Reconcile the FinanceOS settlement with the Metabase desk-rebate export "
+                   "and split the Metabase totals across the sales desks.",
+        "siapkan": [
+            "The <strong>FinanceOS settlement</strong> for one calendar month, "
+            "<code>CONSOLIDATED</code> USD, for DPM Malaysia. PDF is the primary input. "
+            "The team's converted Excel is accepted as a fallback and runs through the same checks.",
+            "The <strong>Metabase workbook</strong> for that same month: the "
+            "<code>Query result</code> sheet (one row per country), plus <code>Desks</code>, "
+            "<code>Target</code> and <code>Country code</code>. Desk mapping and targets are "
+            "read from this upload on every run.",
+            "The two files are recognised by their contents, so the names do not matter. "
+            "A scanned PDF is refused.",
+        ],
+        "langkah": [
+            "The settlement text layer is read and checked against its own sub-totals, "
+            "equity block and required labels. A break stops the run and no workbook is produced.",
+            "Metabase totals land in column C. FinanceOS amounts land in column B, except the "
+            "yellow rows, which stay blank. Variance is column B minus column C.",
+            "Countries missing from the Desks sheet are assigned to <strong>GEM</strong> and "
+            "listed on the Check sheet. Desk Actual columns are SUMIFS formulas, and "
+            "Completion % is Actual / Target.",
+            "Orange manual-rebate rows are left blank for key-in. Their group total is a live SUM.",
+        ],
+        "hasil": "One <code>.xlsx</code> workbook:",
+        "sheets": [
+            ("Outcome", "The monthly report. Sub-totals, variance, NDP, gross profit, desk Actual and Completion % are Excel formulas."),
+            ("FinanceOS (parsed)", "Every settlement line, with the reconciliation checks."),
+            ("Raw Metabase", "The export plus <code>desk</code> and <code>country_name</code>."),
+            ("Desks", "Copied from the upload."),
+            ("Target", "Copied from the upload."),
+            ("Country code", "Copied from the upload."),
+            ("Check", "Rounding, Diff, wrapped labels, new labels, test entries, GEM assignments, variances over 1,000, blank targets, and the desks-minus-total check."),
+        ],
+        "catatan": [
+            "Open the <strong>Check</strong> sheet first. Cash Movement column B is left blank. "
+            "Deposit and Withdrawal are compared with Metabase in the block under Gross profit.",
+            CATATAN_ASLI,
+        ],
+    },
 }
 
 KVB_HINT = ("Upload one KVB Plus workbook (.xlsx/.xlsm) containing Transfer, D, W, Xero, "
@@ -469,6 +517,27 @@ def run(slug, company="dpm"):
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
                           f"{', '.join(invalid)}")
         periode = saldo_jw = saldo_ch = None
+    elif slug == "pl-desk":
+        names = [u.filename for u in uploads] + [orig for _p, orig in (staged or [])]
+        if len(names) != 2:
+            return _gagal("Upload two files: the FinanceOS settlement (PDF or converted Excel) "
+                          "and the Metabase workbook.")
+        invalid = [n for n in names if not n.lower().endswith((".pdf", ".xlsx", ".xlsm"))]
+        if invalid:
+            return _gagal("PL by Desk accepts a .pdf and an .xlsx workbook. These files were "
+                          f"rejected: {', '.join(invalid)}")
+        empty = []
+        for upload in uploads:
+            pos = upload.stream.tell()
+            upload.stream.seek(0, os.SEEK_END)
+            size = upload.stream.tell()
+            upload.stream.seek(pos)
+            if size == 0:
+                empty.append(upload.filename)
+        empty += [original for path, original in (staged or []) if path.stat().st_size == 0]
+        if empty:
+            return _gagal("Empty files cannot be processed: " + ", ".join(empty))
+        periode = saldo_jw = saldo_ch = None
     else:
         first = uploads[0].filename if uploads else (staged[0][1] if staged else None)
         if not first or not first.lower().endswith((".xlsx", ".xlsm")):
@@ -523,7 +592,12 @@ def run(slug, company="dpm"):
     if staged:
         chunked.discard(JOBS, upload_id)
     src = sources[0]
-    dst = src.with_name(f"{src.stem}-hasil.xlsx") if slug == "dw" else job / "hasil.zip"
+    if slug == "dw":
+        dst = src.with_name(f"{src.stem}-hasil.xlsx")
+    elif slug == "pl-desk":
+        dst = job / "PL by Desk.xlsx"
+    else:
+        dst = job / "hasil.zip"
 
     # Asynchronous on purpose. A 38 MB workbook takes several minutes, and any
     # proxy in front of this app (Cloudflare caps at 100s) would kill a request
@@ -535,6 +609,8 @@ def run(slug, company="dpm"):
     # upload for different months would otherwise be indistinguishable on disk.
     if slug == "dw":
         download_name = f"{Path(nama_asli[0]).stem} - {_label_periode(periode)}-hasil.xlsx"
+    elif slug == "pl-desk":
+        download_name = "PL by Desk.xlsx"
     else:
         stems = [Path(n).stem for n in nama_asli]
         label = " - ".join(stems) if len(stems) <= 3 else f"{len(stems)} files"
@@ -547,7 +623,8 @@ def run(slug, company="dpm"):
                  saldo_ch_baris=(len([x for x in saldo_ch.splitlines() if x.strip()])
                                  if saldo_ch else None))
     threading.Thread(target=_process_job,
-                     args=(job_id, company, slug, job, sources if slug == "segregate" else src,
+                     args=(job_id, company, slug, job,
+                           sources if slug in ("segregate", "pl-desk") else src,
                            dst, periode, saldo_jw, saldo_ch),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
@@ -613,8 +690,12 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
                 return
             masuk = keluar
         _cleanup_completed_job(job, dst)
-        _write_state(job_id, state="done", path=str(dst),
-                     log="\n\n".join(log).strip())
+        done = {"state": "done", "path": str(dst), "log": "\n\n".join(log).strip()}
+        if slug == "pl-desk":
+            matched = re.search(r"(?m)^PERIOD:\s*(\d{4}-\d{2})\s*$", done["log"])
+            if matched:
+                done["name"] = f"PL by Desk - {_label_periode(matched.group(1))}.xlsx"
+        _write_state(job_id, **done)
     except Exception as exc:                       # keep the worker from dying silently
         _write_state(job_id, state="failed", error=f"{type(exc).__name__}: {exc}",
                      log="\n\n".join(log).strip() or None)

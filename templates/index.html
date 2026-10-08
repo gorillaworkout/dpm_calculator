@@ -9,7 +9,7 @@
 </div>
 {% else %}
 <h1>Dupoin <span>DPM</span> Tools</h1>
-<p class="lede">Two reporting tools for the DPM Malaysia team. Pick the one you need, upload
+<p class="lede">Reporting tools for the DPM Malaysia team. Pick the one you need, upload
 your file, and download the finished workbook. Your original files are never modified
 &mdash; the result is always a new file you download.</p>
 
@@ -89,8 +89,14 @@ are grouped by account, period, type, symbol and currency.</p>
   </table>
 </div>
 
-<p class="lede" style="margin:16px 0 0">Generate D&amp;W returns one XLSX workbook. Deal
-Segregator returns one ZIP containing two XLSX workbooks. Results download straight to your
+<h2 style="margin:40px 0 8px; font-size:20px; letter-spacing:-.4px">PL by Desk</h2>
+<p class="lede">Upload the FinanceOS settlement PDF for the month and the Metabase desk-rebate
+workbook. The report reconciles FinanceOS with Metabase and splits the Metabase totals across
+the sales desks. Countries that are not on the Desks sheet are assigned to GEM and listed on
+the Check sheet.</p>
+
+<p class="lede" style="margin:16px 0 0">Generate D&amp;W and PL by Desk each return one XLSX workbook.
+Deal Segregator returns one ZIP containing two XLSX workbooks. Results download straight to your
 browser and are removed from the server after a completed download.</p>
 {% endif %}
 {% endblock %}

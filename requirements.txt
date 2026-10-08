@@ -1,0 +1,9 @@
+# Web app (gunicorn on Ubuntu) and the PL by Desk report.
+# pdfplumber reads the FinanceOS PDF itself. It does not need poppler.
+# poppler-utils (the `pdftotext -layout` command) is an optional fallback,
+# used only when pdfplumber is not installed.
+Flask>=3
+Werkzeug>=3
+itsdangerous>=2
+openpyxl>=3.1
+pdfplumber>=0.11

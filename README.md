@@ -51,6 +51,16 @@ python3 -m pip install --user openpyxl
 ```
 Lalu double-click `Hitung DW.app`.
 
+## Server (web app)
+
+```bash
+python3 -m pip install -r requirements.txt
+```
+
+`pdfplumber` reads the FinanceOS PDF for PL by Desk and does not need poppler.
+`poppler-utils` (`pdftotext -layout`) is only a fallback, used when pdfplumber
+is not installed.
+
 ---
 
 ## Lewat Terminal / Command Prompt

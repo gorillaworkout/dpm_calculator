@@ -51,7 +51,10 @@ shows the file in its download list.</p>
 
 {% else %}
 <h1>Processing&hellip;</h1>
-{% if info.slug == 'segregate' %}
+{% if info.slug == 'pl-desk' %}
+<p class="lede">The FinanceOS settlement and the Metabase workbook are being reconciled.
+This page refreshes itself. A problem in either file stops the run and no workbook is produced.</p>
+{% elif info.slug == 'segregate' %}
 <p class="lede">Your Deals History and optional Client Equity FX files are being classified,
 combined, converted, and verified on the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
 can safely return to this same job URL later.</p>
