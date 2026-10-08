@@ -66,6 +66,11 @@ def _read_state(job_id):
 #             input langkah kedua. Tiap script dipanggil: script <input> -o <output>.
 # Sejak 24 Aug 2026 MTOATD ikut dihitung di hitung_dw.py -- SEKALI JALAN, tidak ada
 # menu tahap kedua lagi. hitung_mtoatd.py sudah dihapus.
+# Both companies export MT5 Deals History with the same default template, so Deal
+# Segregator is one shared definition. Its script list is not the D&W pipeline.
+_SEGREGATE = ("Deal Segregator", "Combine MT5 Deals History files and optionally add "
+              "a Client Equity FX workbook for USD-converted financial totals.",
+              ("deal_segregator.py",), True)
 TOOLS = {
     # SATU menu saja (permintaan user 26 Aug 2026) supaya tidak ada yang bingung.
     # isi_template.py memindahkan D, W, Fund Transfer Table, Opening Balance, kurs
@@ -78,9 +83,7 @@ TOOLS = {
            "Missing Data, Legend. Fee rates and Xero rates are always read from the file "
            "you upload, never stored here.",
            ("isi_template.py", "hitung_dw.py"), True),
-    "segregate": ("Deal Segregator", "Combine MT5 Deals History files and optionally add "
-                  "a Client Equity FX workbook for USD-converted financial totals.",
-                  ("deal_segregator.py",), True),
+    "segregate": _SEGREGATE,
     # Own branch in run(): two uploads, no month dropdown, .xlsx output.
     "pl-desk": ("PL by Desk", "Monthly P&L by sales desk. Upload the FinanceOS "
                 "settlement PDF and the Metabase desk-rebate workbook.",
@@ -92,6 +95,7 @@ KVB_TOOLS = {
     "dw": ("Generate D&W", "Upload a KVB Plus workbook and generate the finished monthly "
            "D&W report in one run.",
            ("siapkan_kvb.py", "isi_template.py", "hitung_dw.py"), True),
+    "segregate": _SEGREGATE,
 }
 
 
@@ -420,6 +424,13 @@ KVB_DOC = {
 }
 
 
+def _copy_for(company, slug):
+    """Hint and guide for a tool page. Only KVB Generate D&W has its own copy."""
+    if company == "kvb" and slug == "dw":
+        return KVB_HINT, KVB_DOC
+    return HINT.get(slug), DOC.get(slug)
+
+
 @app.context_processor
 def _nav():
     company = getattr(request, "company", "kvb" if request.path.startswith("/kvb") else "dpm")
@@ -457,9 +468,9 @@ def tool(slug, company="dpm"):
         abort(404)
     request.company = company
     pilihan = _pilihan_bulan() if slug == "dw" else {}
+    hint, doc = _copy_for(company, slug)
     return render_template("tool.html", slug=slug, tool=registry[slug],
-                           hint=KVB_HINT if company == "kvb" else HINT.get(slug),
-                           doc=KVB_DOC if company == "kvb" else DOC.get(slug), **pilihan)
+                           hint=hint, doc=doc, **pilihan)
 
 
 @app.get("/kvb/tool/<slug>")
@@ -481,9 +492,9 @@ def run(slug, company="dpm"):
         pilihan["tahun_default"] = int(request.form["tahun"])
 
     def _gagal(pesan):
+        hint, doc = _copy_for(company, slug)
         return render_template("tool.html", slug=slug, tool=registry[slug],
-                               hint=KVB_HINT if company == "kvb" else HINT.get(slug),
-                               doc=KVB_DOC if company == "kvb" else DOC.get(slug),
+                               hint=hint, doc=doc,
                                error=pesan, **pilihan), 400
 
     uploads = [u for u in request.files.getlist("file") if u and u.filename]
@@ -717,9 +728,9 @@ def job_status(job_id):
         # Keep the directory: a refresh on the error page must still show the
         # error, not a bare 404. The sweeper removes it later.
         pilihan = _pilihan_bulan() if slug == "dw" else {}
+        hint, doc = _copy_for(company, slug)
         return render_template("tool.html", slug=slug, tool=registry[slug],
-                               hint=KVB_HINT if company == "kvb" else HINT.get(slug),
-                               doc=KVB_DOC if company == "kvb" else DOC.get(slug),
+                               hint=hint, doc=doc,
                                error=info["error"],
                                log=info["log"] or "Failed with no message.",
                                **pilihan), 422
