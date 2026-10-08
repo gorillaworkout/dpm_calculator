@@ -43,15 +43,17 @@ File sumber MT5 "Deals History" biasanya diekspor sebagai UTF-16LE
 tab-delimited (bukan CSV koma biasa) -- encoding & pemisah kolom dideteksi
 otomatis dari file, jadi export UTF-8/koma biasa dan file .xlsx juga tetap terbaca.
 
-MT4 (KVB saja, flag --allow-mt4): file "Raw Report" dikenali dari baris judul
-dan header, bukan dari nama file. Hanya baris buy/sell yang sudah ditutup
-(Close Time) yang masuk, ke sheet Daily / Monthly Summary yang sama dengan MT5,
-dengan kolom Platform. Login yang sama di MT4 dan MT5 tidak digabung. Tanpa
-file MT4, sheet dan angka MT5 tidak berubah (kolom Platform tidak ditambahkan).
-Mata uang MT4 tidak ada di file; pemanggil memilih USD atau USC per file
-(default USD). Agent tidak masuk ke total manapun.
+MT4 (KVB saja, flag --allow-mt4): dikenali dari header (Deal, Open Time, Close
+Time, ...), bukan dari nama file. Dua bentuk: Raw Report berjudul (titik koma)
+dan export yang header-nya di baris pertama (koma, boleh ada kolom mata uang
+di ujung). Hanya buy/sell yang sudah ditutup (Close Time) yang masuk, ke sheet
+yang sama dengan MT5, dengan kolom Platform. Tanpa file MT4, sheet dan angka
+MT5 tidak berubah. Mata uang per baris: peta account_type (CentAccount = USC),
+lalu kolom mata uang di file, lalu pilihan USD/USC per file. USC MT4 dibagi 100
+(bukan kurs Client Equity FX). Agent tidak masuk ke total manapun.
 """
 import argparse
+import codecs
 import csv
 import datetime
 import math
@@ -356,16 +358,253 @@ class _DiskDeals:
         self.db.close()
 
 
-def _pemisah_mt4(baris: str):
-    if baris.count(";") > 0 and baris.count(";") >= baris.count("\t"):
-        return ";"
-    if baris.count("\t") > 0:
-        return "\t"
+def _kunci_akun(v) -> str:
+    """Login / account sebagai teks, tanpa '.0' dari sel Excel."""
+    teks = _teks(v).strip()
+    if re.fullmatch(r"\d+\.0+", teks):
+        return teks.split(".", 1)[0]
+    return teks
+
+
+def _encoding_mt4_penuh(path: Path) -> str:
+    """UTF-8 kalau seluruh file valid, kalau tidak cp1252.
+
+    Header Juli 2026 lolos UTF-8; byte 0xD0 baru muncul di kolom Comment.
+    Pemindaian ini hanya dipakai setelah file sudah dikenali sebagai MT4,
+    jadi export MT5 multi-GB tidak ikut terpindai.
+    """
+    dasar = _deteksi_encoding(path)
+    if dasar != "utf-8":
+        return dasar
+    dekoder = codecs.getincrementaldecoder("utf-8")()
+    with open(path, "rb") as f:
+        while True:
+            potong = f.read(1 << 20)
+            if not potong:
+                try:
+                    dekoder.decode(b"", final=True)
+                except UnicodeDecodeError:
+                    return "cp1252"
+                return "utf-8"
+            try:
+                dekoder.decode(potong, final=False)
+            except UnicodeDecodeError:
+                return "cp1252"
+
+
+def _parse_header_mt4(baris: str):
+    """(pemisah, header) kalau baris ini header MT4, kalau tidak None."""
+    calon = []
+    for pemisah in (";", "\t", ","):
+        if baris.count(pemisah) == 0:
+            continue
+        sel = next(csv.reader([baris], delimiter=pemisah))
+        header = [_teks(h) for h in sel]
+        if all(k in header for k in _MT4_WAJIB):
+            calon.append((baris.count(pemisah), pemisah, header))
+    if not calon:
+        return None
+    calon.sort(reverse=True)
+    _, pemisah, header = calon[0]
+    return pemisah, header
+
+
+def _indeks_mata_uang_mt4(header):
+    """Kolom trailing yang headernya kosong (atau bernama Currency).
+
+    Layout Juli: 23 kolom biasa, satu kolom kosong, lalu mata uang tanpa judul.
+    Satu sel kosong di ujung karena delimiter sisa tidak dihitung.
+    """
+    if not header:
+        return None
+    terakhir = header[-1].strip().lower()
+    if terakhir == "currency":
+        return len(header) - 1
+    if terakhir == "" and len(header) >= 2 and header[-2].strip() == "":
+        return len(header) - 1
     return None
 
 
+_KOLOM_PETA = ("account", "account_type")
+
+
+def _header_peta_dari_sel(cells):
+    nama = [_teks(c).strip().lower() for c in cells]
+    if all(k in nama for k in _KOLOM_PETA):
+        return {k: nama.index(k) for k in _KOLOM_PETA}
+    return None
+
+
+def _adalah_peta_akun(path: Path) -> bool:
+    """True kalau file ini peta account / account_type, bukan Deals History."""
+    try:
+        suffix = path.suffix.lower()
+        if suffix in (".xlsx", ".xlsm"):
+            wb = load_workbook(path, read_only=True, data_only=True)
+            try:
+                ws = wb.worksheets[0] if wb.worksheets else None
+                if ws is None:
+                    return False
+                pertama = next(ws.iter_rows(max_row=1, values_only=True), None)
+                return bool(pertama and _header_peta_dari_sel(pertama))
+            finally:
+                wb.close()
+        with open(path, encoding=_encoding_mt4_penuh(path), newline="") as f:
+            baris = f.readline()
+        if not baris.strip():
+            return False
+        parsed = None
+        for pemisah in (";", "\t", ","):
+            if baris.count(pemisah) == 0:
+                continue
+            sel = next(csv.reader([baris], delimiter=pemisah))
+            if _header_peta_dari_sel(sel):
+                parsed = True
+                break
+        return bool(parsed)
+    except Exception:
+        return False
+
+
+def baca_peta_akun(path: Path) -> dict:
+    """account -> 'USD' atau 'USC'. CentAccount = USC. Tipe lain = USD.
+
+    Dua tipe berbeda untuk akun yang sama menghentikan run.
+    """
+    suffix = path.suffix.lower()
+    if suffix in (".xlsx", ".xlsm"):
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            ws = wb.worksheets[0]
+            it = ws.iter_rows(values_only=True)
+            header = next(it, None)
+            if not header:
+                sys.exit(f"STOP: '{path.name}' has no MT4 account-type header.")
+            idx = _header_peta_dari_sel(header)
+            if not idx:
+                sys.exit(f"STOP: '{path.name}' needs columns account and account_type.")
+            baris_sumber = ((n, row) for n, row in enumerate(it, start=2))
+        except SystemExit:
+            wb.close()
+            raise
+        # workbook stays open until the rows are consumed
+        def tutup():
+            wb.close()
+    else:
+        enc = _encoding_mt4_penuh(path)
+        f = open(path, encoding=enc, newline="")
+        try:
+            sample = f.readline()
+            pemisah = ","
+            for calon in (";", "\t", ","):
+                if sample.count(calon) == 0:
+                    continue
+                sel = next(csv.reader([sample], delimiter=calon))
+                if _header_peta_dari_sel(sel):
+                    pemisah = calon
+                    header = sel
+                    break
+            else:
+                f.close()
+                sys.exit(f"STOP: '{path.name}' needs columns account and account_type.")
+            idx = _header_peta_dari_sel(header)
+            reader = csv.reader(f, delimiter=pemisah)
+
+            def baris_sumber():
+                for n, row in enumerate(reader, start=2):
+                    yield n, row
+
+            baris_sumber = baris_sumber()
+        except SystemExit:
+            f.close()
+            raise
+
+        def tutup():
+            f.close()
+    hasil = {}
+    try:
+        for nomor, row in baris_sumber:
+            if row is None or idx["account"] >= len(row):
+                continue
+            akun = _kunci_akun(row[idx["account"]])
+            if not akun:
+                continue
+            tipe = _teks(row[idx["account_type"]] if idx["account_type"] < len(row) else "")
+            mata = "USC" if tipe.strip().lower() == "centaccount" else "USD"
+            lama = hasil.get(akun)
+            if lama is not None and lama != mata:
+                sys.exit(f"STOP: account {akun} has conflicting account types in '{path.name}', "
+                         f"row {nomor}.")
+            hasil[akun] = mata
+    finally:
+        tutup()
+    return hasil
+
+
+def _selesaikan_mata_uang_mt4(login, kolom, fallback, akun):
+    """(mata uang, sumber, beda). Sumber: mapping, column, atau fallback.
+
+    Beda diisi kalau peta dan kolom sama-sama USD/USC tapi tidak sama.
+    Peta menang.
+    """
+    mapped = (akun or {}).get(_kunci_akun(login))
+    col = _teks(kolom).strip().upper()
+    col_ok = col in _MT4_MATA_UANG
+    if mapped:
+        beda = (_kunci_akun(login), mapped, col) if col_ok and col != mapped else None
+        return mapped, "mapping", beda
+    if col_ok:
+        return col, "column", None
+    return fallback, "fallback", None
+
+
+def _daftar_login(logins) -> str:
+    items = sorted(logins, key=lambda s: (not s.isdigit(), int(s) if s.isdigit() else 0, s))
+    if not items:
+        return "(none)"
+    shown = items[:40]
+    text = ", ".join(shown)
+    if len(items) > len(shown):
+        text += f", and {len(items) - len(shown)} more"
+    return text
+
+
+def _teks_beda_mt4(items) -> str:
+    unik = []
+    lihat = set()
+    for login, mapped, col in items:
+        kunci = (str(login), mapped, col)
+        if kunci in lihat:
+            continue
+        lihat.add(kunci)
+        unik.append(f"login {login} mapping {mapped} column {col}")
+    if not unik:
+        return "(none)"
+    shown = unik[:30]
+    text = "; ".join(shown)
+    if len(unik) > len(shown):
+        text += f"; and {len(unik) - len(shown)} more"
+    return text
+
+
+def _baris_awal_csv(path: Path, enc: str):
+    lines = []
+    with open(path, encoding=enc, newline="") as f:
+        for line in f:
+            if line.strip():
+                lines.append(line.strip("\ufeff\r\n"))
+            if len(lines) == 2:
+                break
+    return lines
+
+
 def _dua_baris_awal(path: Path):
-    """Dua baris non-kosong pertama. ('csv', [baris, baris]) atau ('xlsx', [tuple, tuple])."""
+    """Dua baris non-kosong pertama. ('csv', [baris, baris]) atau ('xlsx', [tuple, tuple]).
+
+    Deteksi hanya butuh judul/header, yang ASCII. Baris data kedua pada layout
+    header-first boleh berisi byte cp1252 (komentar), jadi UTF-8 yang gagal
+    diulang sebagai cp1252. File utuh baru dipindai setelah dikenali sebagai MT4.
+    """
     suffix = path.suffix.lower()
     if suffix in (".xlsx", ".xlsm"):
         wb = None
@@ -385,50 +624,66 @@ def _dua_baris_awal(path: Path):
             if wb is not None:
                 wb.close()
     enc = _deteksi_encoding(path)
-    lines = []
-    with open(path, encoding=enc, newline="") as f:
-        for line in f:
-            if line.strip():
-                lines.append(line.strip("\ufeff\r\n"))
-            if len(lines) == 2:
-                break
+    try:
+        lines = _baris_awal_csv(path, enc)
+    except UnicodeDecodeError:
+        if enc not in ("utf-8", "utf-8-sig"):
+            raise
+        lines = _baris_awal_csv(path, "cp1252")
     return "csv", lines
 
 
+def _bungkus_info_mt4(kind, header, pemisah, skip, mulai, akhir):
+    return {"awal": mulai, "akhir": akhir, "pemisah": pemisah, "header": header,
+            "kind": kind, "skip": skip, "currency_index": _indeks_mata_uang_mt4(header)}
+
+
 def _info_mt4(path: Path):
-    """None kalau bukan Raw Report. sys.exit kalau judulnya cocok tapi headernya rusak."""
+    """None kalau bukan export MT4. sys.exit kalau judulnya cocok tapi headernya rusak.
+
+    Dua bentuk: baris judul `Raw Report for ...` lalu header, atau header di baris
+    pertama (koma, titik koma, atau tab).
+    """
     kind, awal = _dua_baris_awal(path)
+    if not awal or not awal[0]:
+        return None
     if kind == "xlsx":
-        if not awal or not awal[0]:
-            return None
-        cocok = _MT4_JUDUL.match(awal[0][0].strip())
+        header = [_teks(c) for c in awal[0]]
+        if all(k in header for k in _MT4_WAJIB):
+            return _bungkus_info_mt4("xlsx", header, None, 1, None, None)
+        judul = _teks(awal[0][0]) if awal[0] else ""
+        cocok = _MT4_JUDUL.match(judul.strip())
         if not cocok:
             return None
-        header = list(awal[1])
-        pemisah = None
-    else:
-        if len(awal) < 2:
-            return None
-        cocok = _MT4_JUDUL.match(awal[0].strip())
-        if not cocok:
-            return None
-        pemisah = _pemisah_mt4(awal[1])
-        if not pemisah:
-            sys.exit(f"STOP: '{path.name}' looks like an MT4 Raw Report but the header "
-                     "is not semicolon- or tab-separated.")
-        header = next(csv.reader([awal[1]], delimiter=pemisah))
-    header = [_teks(h) for h in header]
-    hilang = [k for k in _MT4_WAJIB if k not in header]
-    if hilang:
+        header = [_teks(c) for c in awal[1]]
+        hilang = [k for k in _MT4_WAJIB if k not in header]
+        if hilang:
+            sys.exit(f"STOP: '{path.name}' looks like an MT4 Raw Report but is missing "
+                     f"columns: {hilang}")
+        mulai = datetime.datetime.strptime(cocok.group(1), "%Y.%m.%d").date()
+        akhir = datetime.datetime.strptime(cocok.group(2), "%Y.%m.%d").date()
+        if akhir < mulai:
+            sys.exit(f"STOP: MT4 Raw Report period is backwards in '{path.name}': "
+                     f"{mulai} to {akhir}")
+        return _bungkus_info_mt4("xlsx", header, None, 2, mulai, akhir)
+
+    parsed = _parse_header_mt4(awal[0])
+    if parsed:
+        pemisah, header = parsed
+        return _bungkus_info_mt4("csv", header, pemisah, 1, None, None)
+    cocok = _MT4_JUDUL.match(awal[0].strip())
+    if not cocok:
+        return None
+    if len(awal) < 2 or not _parse_header_mt4(awal[1]):
         sys.exit(f"STOP: '{path.name}' looks like an MT4 Raw Report but is missing "
-                 f"columns: {hilang}")
+                 f"columns: {[k for k in _MT4_WAJIB]}")
+    pemisah, header = _parse_header_mt4(awal[1])
     mulai = datetime.datetime.strptime(cocok.group(1), "%Y.%m.%d").date()
     akhir = datetime.datetime.strptime(cocok.group(2), "%Y.%m.%d").date()
     if akhir < mulai:
         sys.exit(f"STOP: MT4 Raw Report period is backwards in '{path.name}': "
                  f"{mulai} to {akhir}")
-    return {"awal": mulai, "akhir": akhir, "pemisah": pemisah,
-            "header": header, "kind": kind}
+    return _bungkus_info_mt4("csv", header, pemisah, 2, mulai, akhir)
 
 
 def _macam_mt4(tipe: str, comment: str) -> str:
@@ -462,24 +717,25 @@ def _angka_longgar(v) -> float:
 
 def _iter_mt4(path: Path, info: dict):
     """(nomor_baris, row) untuk isi file, tanpa judul dan header."""
+    skip = info.get("skip", 2)
     if info["kind"] == "xlsx":
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
             it = wb.worksheets[0].iter_rows(values_only=True)
-            next(it, None)
-            next(it, None)
-            for nomor, row in enumerate(it, start=3):
+            for _ in range(skip):
+                next(it, None)
+            for nomor, row in enumerate(it, start=skip + 1):
                 if any(v is not None and _teks(v) != "" for v in row):
                     yield nomor, list(row)
         finally:
             wb.close()
         return
-    enc = _deteksi_encoding(path)
+    enc = _encoding_mt4_penuh(path)
     with open(path, encoding=enc, newline="") as f:
         reader = csv.reader(f, delimiter=info["pemisah"])
-        next(reader, None)
-        next(reader, None)
-        nomor = 2
+        for _ in range(skip):
+            next(reader, None)
+        nomor = skip
         for row in reader:
             nomor += 1
             if any(_teks(c) for c in row):
@@ -502,25 +758,41 @@ def _mata_uang_mt4(path: Path, mt4_currency):
     return chosen, True
 
 
-def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency):
-    """Satu Raw Report -> baris out saja, pada Close Time.
+def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=None):
+    """Satu export MT4 -> baris out saja, pada Close Time.
 
-    KVB menganggap close kemarin dan open hari ini sama, jadi kaki open tidak
-    ditulis. Uang tiket (Profit, Swap, Commission, Taxes sebagai Fee) ada di
-    baris out. Agent dibaca hanya untuk catatan Verifikasi dan tidak ikut
-    dijumlah ke Commission, Fee, atau Profit. Deal ID dideduplikasi di database
-    terpisah dari MT5.
+    Mata uang tiap baris: peta account type, lalu kolom di file, lalu pilihan
+    per file. USC dibagi 100 pada Commission, Fee, Swap, dan Profit sebelum
+    diagregasi. Volume tidak dibagi. Agent hanya untuk Verifikasi.
     """
     header = info["header"]
     idx = {name: i for i, name in enumerate(header)}
+    kolom_uang = info.get("currency_index")
     total = n_out = n_bal = n_can = n_foot = n_lain = n_dup = 0
     profit_balance = agent_total = 0.0
+    raw = {"Profit": 0.0, "Commission": 0.0, "Fee": 0.0, "Swap": 0.0}
+    sumber_baris = {"mapping": 0, "column": 0, "fallback": 0}
+    sumber_login = {"mapping": set(), "column": set(), "fallback": set()}
+    beda = []
+    dipakai_peta = False
 
     def sel(row, nama):
         i = idx.get(nama)
         if i is None or i >= len(row):
             return ""
         return row[i]
+
+    def catat(login, row):
+        nonlocal dipakai_peta
+        mentah = row[kolom_uang] if kolom_uang is not None and kolom_uang < len(row) else ""
+        mata, sumber, salah = _selesaikan_mata_uang_mt4(login, mentah, currency, akun)
+        sumber_baris[sumber] += 1
+        sumber_login[sumber].add(_kunci_akun(login))
+        if salah:
+            beda.append(salah)
+        if sumber == "mapping":
+            dipakai_peta = True
+        return mata
 
     for nomor, row in _iter_mt4(path, info):
         total += 1
@@ -531,6 +803,7 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency):
         if not deal_id and not login:
             n_foot += 1
             continue
+        mata = catat(login, row) if login else currency
         tipe = _teks(sel(row, "Type"))
         comment = _teks(sel(row, "Comment"))
         macam = _macam_mt4(tipe, comment)
@@ -556,28 +829,39 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency):
         swap = _angka(sel(row, "Swap"), path, nomor, "Swap")
         profit = _angka(sel(row, "Profit"), path, nomor, "Profit")
         agent = _angka(sel(row, "Agent"), path, nomor, "Agent")
-        symbol = _teks(sel(row, "Symbol")).upper()
-        n_out += 1
-        agent_total += agent
-        pakai_baris({
+        raw["Profit"] += profit
+        raw["Commission"] += commission
+        raw["Fee"] += fee
+        raw["Swap"] += swap
+        baris = {
             "Entry": "out",
             "Login": login,
             "Date": tutup,
             "Type": tipe.strip().lower(),
-            "Symbol": symbol,
+            "Symbol": _teks(sel(row, "Symbol")).upper(),
             "Volume": volume,
             "Commission": commission,
             "Fee": fee,
             "Swap": swap,
             "Profit": profit,
-            "Currency": currency,
-        }, "mt4")
+            "Currency": mata,
+        }
+        if mata == "USC":
+            for kolom in ("Commission", "Fee", "Swap", "Profit"):
+                baris[kolom] = baris[kolom] / 100.0
+            baris["_mt4_usc"] = True
+        n_out += 1
+        agent_total += agent
+        pakai_baris(baris, "mt4")
     deals.commit()
     return {"nama": path.name, "platform": "mt4", "total": total,
             "out": n_out, "balance": n_bal, "cancelled": n_can,
             "footer": n_foot, "lain": n_lain, "duplikat": n_dup,
             "balance_profit": profit_balance, "agent": agent_total,
-            "currency": currency, "sheets": {}, "sheets_dilewati": []}
+            "currency": currency, "currency_column": kolom_uang is not None,
+            "used_mapping": dipakai_peta, "sources": sumber_baris,
+            "source_logins": sumber_login, "disagree": beda, "raw": raw,
+            "sheets": {}, "sheets_dilewati": []}
 
 
 def _normalisasi_satu_file(path: Path, deals, pakai_baris):
@@ -693,7 +977,8 @@ def _hasil_agregat(kelompok):
     return hasil
 
 
-def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict:
+def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
+           mt4_accounts=None) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
     'out' and 'in' rows go to separate sheets of each workbook.
     MT4 Raw Report files are accepted only when allow_mt4 is true (KVB).
@@ -702,7 +987,29 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
     paths_in = [Path(p) for p in paths_in]
     path_out = Path(path_out)
     fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
-    deal_paths = [p for p in paths_in if p not in fx_paths]
+    rest = [p for p in paths_in if p not in fx_paths]
+    if mt4_accounts and not allow_mt4:
+        sys.exit("STOP: MT4 account types are only used on the KVB Deal Segregator (--allow-mt4).")
+    peta_paths = []
+    if mt4_accounts:
+        peta = Path(mt4_accounts)
+        if not peta.is_file():
+            sys.exit(f"STOP: MT4 account-type file not found: {peta}")
+        peta_paths.append(peta)
+    if allow_mt4:
+        sudah = {p.resolve() for p in peta_paths}
+        for path in rest:
+            if path.resolve() in sudah:
+                continue
+            if _adalah_peta_akun(path):
+                peta_paths.append(path)
+                sudah.add(path.resolve())
+    if len(peta_paths) > 1:
+        names = ", ".join(p.name for p in peta_paths)
+        sys.exit(f"STOP: upload only one MT4 account-type file. Found: {names}.")
+    akun = baca_peta_akun(peta_paths[0]) if peta_paths else {}
+    peta_resolved = {p.resolve() for p in peta_paths}
+    deal_paths = [p for p in rest if p.resolve() not in peta_resolved]
     if len(fx_paths) > 1:
         sys.exit("STOP: upload only one Client Equity FX workbook per run.")
     if not deal_paths:
@@ -746,7 +1053,13 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
         login_t.add(b["Login"])
         for kol in KOLOM_JUMLAH:
             jumlah_t[e][kol] += b[kol]
-        if pakai_fx:
+        if b.get("_mt4_usc"):
+            # Sudah dibagi 100. Jangan pakai kurs USC di Client Equity FX.
+            if pakai_fx:
+                b["_kurs_kurang"] = False
+                for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                    b[target] = b[source]
+        elif pakai_fx:
             marker = object()
             key = (b["Date"], _norm(b["Currency"]))
             rate = fx.get(key, marker)
@@ -773,7 +1086,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
             for path, info in klasifikasi:
                 if info:
                     currency, selected = _mata_uang_mt4(path, mt4_currency)
-                    rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, currency)
+                    rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, currency, akun)
                     rec["currency_selected"] = selected
                     per_file.append(rec)
                 else:
@@ -807,11 +1120,16 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
     yellow_labels = set()
     for r in per_file:
         if r.get("platform") == "mt4":
-            how = ("selected for this file" if r["currency_selected"]
-                   else "default; no currency was selected for this file")
+            if r.get("currency_column") or r.get("used_mapping"):
+                how = ("resolved per row: account type, then the currency column, "
+                       "then the file choice")
+            elif r["currency_selected"]:
+                how = f"{r['currency']} (selected for this file)"
+            else:
+                how = f"{r['currency']} (default; no currency was selected for this file)"
             ringkasan[f"  - {r['nama']} (MT4 Raw Report)"] = (
                 f"{r['total']} rows, {r['out']} closed buy/sell, "
-                f"currency {r['currency']} ({how}), "
+                f"currency {how}, "
                 f"{r['balance']} balance/credit dropped, {r['cancelled']} cancelled pending dropped, "
                 f"{r['footer']} footer/summary dropped")
             continue
@@ -826,6 +1144,11 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
         if not (r["out"] or r["in"]):
             ringkasan[f"  - {r['nama']}"] = f"{r['total']} rows, 0 'out' + 0 'in' (no usable rows)"
             yellow_labels.add(f"  - {r['nama']}")
+    if peta_paths:
+        n_cent = sum(1 for mata in akun.values() if mata == "USC")
+        ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
+            f"{len(akun)} accounts, {n_cent} CentAccount (USC), "
+            f"{len(akun) - n_cent} other types (USD)")
     for path in fx_paths:
         ringkasan[f"  - {path.name} (Client Equity FX)"] = f"FX table, {len(fx):,} date/currency rates"
     ringkasan["USD conversion (Commission/Fee/Swap/Profit)"] = (
@@ -900,6 +1223,30 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
             "MT4 Total Fee (Taxes, closed buy/sell)": round(jumlah_mt4["out"]["Fee"], 2),
             "MT4 Total Swap (closed buy/sell)": round(jumlah_mt4["out"]["Swap"], 2),
             "MT4 Total Volume (closed buy/sell)": jumlah_mt4["out"]["Volume"],
+            "MT4 Total Profit raw (before USC ÷100)": round(sum(r["raw"]["Profit"] for r in berkas_mt4), 2),
+            "MT4 Total Commission raw (before USC ÷100)":
+                round(sum(r["raw"]["Commission"] for r in berkas_mt4), 2),
+            "MT4 Total Fee raw (before USC ÷100)": round(sum(r["raw"]["Fee"] for r in berkas_mt4), 2),
+            "MT4 Total Swap raw (before USC ÷100)": round(sum(r["raw"]["Swap"] for r in berkas_mt4), 2),
+            "MT4 currency from account-type mapping (rows)":
+                sum(r["sources"]["mapping"] for r in berkas_mt4),
+            "MT4 currency from account-type mapping (logins)":
+                len(set().union(*(r["source_logins"]["mapping"] for r in berkas_mt4))),
+            "MT4 currency from the currency column (rows)":
+                sum(r["sources"]["column"] for r in berkas_mt4),
+            "MT4 currency from the currency column (logins)":
+                len(set().union(*(r["source_logins"]["column"] for r in berkas_mt4))),
+            "MT4 currency from the per-file USD/USC choice (rows)":
+                sum(r["sources"]["fallback"] for r in berkas_mt4),
+            "MT4 currency from the per-file USD/USC choice (logins)":
+                len(set().union(*(r["source_logins"]["fallback"] for r in berkas_mt4))),
+            "MT4 logins still on the per-file currency fallback": _daftar_login(
+                set().union(*(r["source_logins"]["fallback"] for r in berkas_mt4))),
+            "MT4 account type and currency column disagree": _teks_beda_mt4(
+                [item for r in berkas_mt4 for item in r["disagree"]]),
+            "MT4 USC ÷100":
+                "Commission, Fee, Swap and Profit on USC rows are divided by 100 into USD. "
+                "Volume is not divided. Client Equity FX is not applied to MT4 USC.",
             "MT4 Agent column (sum of kept rows; not included in Profit, Commission, or Fee)":
                 round(sum(r["agent"] for r in berkas_mt4), 2),
             "Combined Total Profit (MT5 + MT4 out rows)":
@@ -913,12 +1260,15 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None) -> dict
             "Combined Total Volume (MT5 + MT4 out rows)":
                 jumlah["out"]["Volume"] + jumlah_mt4["out"]["Volume"],
             "MT4 currency is chosen per file":
-                "The Raw Report has no Currency column. Symbol suffix, the report title, "
-                "login number and profit size cannot separate USD from USC, so each file "
-                "is one currency selected on the KVB upload page (default USD). "
-                "USC uses the same Client Equity FX conversion as an MT5 USC row. "
-                "Balance and credit rows stay excluded, the same rule as MT5.",
+                "Each row uses the account-type mapping first (CentAccount is USC, every "
+                "other type is USD), then a USD or USC value in the file, then the per-file "
+                "choice (default USD). Symbol suffix, the report title, login number and "
+                "profit size cannot separate USD from USC. MT4 USC amounts on the sheet are "
+                "divided by 100. Balance and credit rows stay excluded, the same rule as MT5.",
         })
+        label_beda = "MT4 account type and currency column disagree"
+        if ringkasan.get(label_beda) not in ("(none)", "", None):
+            yellow_labels.add(label_beda)
 
     if path_out.suffix.lower() == ".zip":
         _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
@@ -1087,6 +1437,9 @@ def main():
     ap.add_argument("--mt4-currency", action="append", default=[], metavar="NAME=USD|USC",
                     help="currency for one MT4 Raw Report, matched on the file name. "
                          "Default USD. Ignored for files that are not an MT4 Raw Report.")
+    ap.add_argument("--mt4-accounts",
+                    help="optional account,account_type file. CentAccount is USC; "
+                         "every other type is USD. Used only with --allow-mt4.")
     args = ap.parse_args()
 
     paths_in = [Path(p) for p in args.input]
@@ -1096,7 +1449,8 @@ def main():
     path_out = Path(args.output) if args.output else paths_in[0].with_name(f"{paths_in[0].stem}-hasil.zip")
 
     ringkasan = proses(paths_in, path_out, allow_mt4=args.allow_mt4,
-                       mt4_currency=_mt4_currency_dari_argumen(args.mt4_currency))
+                       mt4_currency=_mt4_currency_dari_argumen(args.mt4_currency),
+                       mt4_accounts=args.mt4_accounts)
     print("=== STAGE 1 DONE ===")
     for k, v in ringkasan.items():
         print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")

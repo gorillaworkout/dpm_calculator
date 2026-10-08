@@ -30,6 +30,12 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    <label for="mt4-accounts">MT4 account types <span class="opt">— optional</span></label>
+    <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop the account-type file here</strong><br><span>Optional. Columns account and account_type. CentAccount is USC; other types are USD.</span>
+      <input id="mt4-accounts" type="file" name="mt4_accounts" accept=".csv,.xlsx,.xlsm">
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
     <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
     <div id="equity-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
@@ -255,6 +261,9 @@
     }
     {% endif %}
     setupDrop('deals-drop', document.getElementById('deals-file'), false);
+    {% if company == 'kvb' and slug == 'segregate' %}
+    setupDrop('accounts-drop', document.getElementById('mt4-accounts'), true);
+    {% endif %}
     setupDrop('equity-drop', document.getElementById('equity-file'), true);
     setupDrop('finance-drop', document.getElementById('finance-file'), true);
     setupDrop('metabase-drop', document.getElementById('metabase-file'), true);
