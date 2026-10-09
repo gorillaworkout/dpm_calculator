@@ -126,6 +126,7 @@ button:active{transform:translateY(1px)}
 button[disabled]{opacity:.6; cursor:progress}
 .hint{color:var(--mute); font-size:12.5px; margin:7px 0 0}
 .note{padding:14px 16px; border-radius:11px; font-size:14px; margin:22px 0 0; border:1px solid}
+.note.warn{color:#f3d48a; background:rgba(240,180,76,.10); border-color:rgba(240,180,76,.35); margin:0 0 22px}
 .note.ok{color:#8ff0d0; background:rgba(34,211,166,.09); border-color:rgba(34,211,166,.32)}
 .note.bad{color:#ffb4b4; background:rgba(255,107,107,.09); border-color:rgba(255,107,107,.3)}
 pre{
@@ -220,6 +221,10 @@ pre{
       </div>
     {% endif %}</div>
 </aside>
-<main><div class="inner{% block wide %}{% endblock %}">{% block body %}{% endblock %}</div></main>
+<main><div class="inner{% block wide %}{% endblock %}">
+{% with messages = get_flashed_messages() %}
+{% if messages %}<div class="note warn" role="status">{{ messages[0] }}</div>{% endif %}
+{% endwith %}
+{% block body %}{% endblock %}</div></main>
 </body>
 </html>

@@ -17,8 +17,8 @@ import time
 from functools import wraps
 from pathlib import Path
 
-from flask import (Response, current_app, redirect, render_template, request,
-                   url_for)
+from flask import (Response, current_app, get_flashed_messages, redirect,
+                   render_template, request, url_for)
 from itsdangerous import (BadSignature, SignatureExpired, URLSafeTimedSerializer)
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -226,9 +226,14 @@ def register(app):
     @app.get("/login")
     def login():
         user = current_user()
-        if user:
+        pending = get_flashed_messages()
+        # A signed-in user with no access to the page they asked for must see
+        # this form. Sending them home again would bounce forever.
+        if user and not pending:
             return redirect(_landing(user, request.args.get("next")))
-        return render_template("login.html", next=request.args.get("next", ""))
+        return render_template("login.html", next=request.args.get("next", ""),
+                               error=pending[0] if pending else None,
+                               switch_account=bool(user and pending))
 
     @app.post("/login")
     def login_post():
@@ -248,7 +253,13 @@ def register(app):
     @app.get("/logout")
     @app.post("/logout")
     def logout():
-        return clear_session(redirect(url_for("login")))
+        nxt = request.values.get("next") or ""
+        # Only a same-site path is kept, so logout cannot become an open redirect.
+        if nxt and _safe_next(nxt) == nxt:
+            response = redirect(url_for("login", next=nxt))
+        else:
+            response = redirect(url_for("login"))
+        return clear_session(response)
 
     @app.get("/admin")
     @admin_required
