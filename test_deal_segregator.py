@@ -419,3 +419,67 @@ with TemporaryDirectory() as tmp:
     assert kept == 150_000, kept
     assert rss_mb < 250, f"peak RSS {rss_mb:.0f} MB; high-cardinality state back in RAM"
 print("OK deal segregator bounded memory")
+
+# Sheet names stay put until a table passes the Excel row limit.
+contoh = {"Login": "1", "Periode": datetime.date(2026, 9, 1), "Type": "buy",
+          "Symbol": "EURUSD", "Deals": 1, "Volume": 1.0,
+          "Commission": -1.0, "Fee": 0.0, "Swap": 0.0,
+          "Profit": 2.0, "Currency": "USD", "_kurs_kurang": 0}
+banyak = []
+for i in range(5):
+    item = dict(contoh)
+    item["Login"] = str(i)
+    banyak.append(item)
+batas_asli = deal_segregator.EXCEL_DATA_MAKS
+deal_segregator.EXCEL_DATA_MAKS = 2
+try:
+    with TemporaryDirectory() as folder:
+        folder = Path(folder)
+        out = folder / "split.zip"
+        deal_segregator._tulis_zip(banyak, [], [], [], out, {}, False, set())
+        with zipfile.ZipFile(out) as archive:
+            archive.extract("Deals - Daily.xlsx", folder)
+        wb = load_workbook(folder / "Deals - Daily.xlsx", read_only=True, data_only=True)
+        try:
+            assert wb.sheetnames == ["Daily", "Daily 2", "Daily 3", "Daily - In", "Verifikasi"]
+            assert sum(1 for _ in wb["Daily"].iter_rows()) == 3
+            assert sum(1 for _ in wb["Daily 3"].iter_rows()) == 2
+            label = [r[0] for r in wb["Verifikasi"].iter_rows(values_only=True) if r]
+            assert "Excel row limit" in label
+        finally:
+            wb.close()
+finally:
+    deal_segregator.EXCEL_DATA_MAKS = batas_asli
+
+# The web app passes hapus_sumber. A direct call does not delete, and it does
+# not claim that it did.
+with TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, out = tmp / "keep.csv", tmp / "keep.zip"
+    write_csv(src, [row("9")])
+    proses([src], out)
+    assert src.is_file()
+    with zipfile.ZipFile(out) as archive:
+        archive.extract("Deals - Daily.xlsx", tmp)
+    wb = load_workbook(tmp / "Deals - Daily.xlsx", read_only=True, data_only=True)
+    try:
+        label = [r[0] for r in wb["Verifikasi"].iter_rows(values_only=True) if r]
+    finally:
+        wb.close()
+    assert "Uploaded files on the server" not in label
+    src2, out2 = tmp / "gone.csv", tmp / "gone.zip"
+    write_csv(src2, [row("10")])
+    proses([src2], out2, hapus_sumber=True)
+    assert not src2.exists() and out2.is_file()
+    (tmp / "extracted").mkdir()
+    with zipfile.ZipFile(out2) as archive:
+        archive.extract("Deals - Daily.xlsx", tmp / "extracted")
+    wb = load_workbook(tmp / "extracted" / "Deals - Daily.xlsx", read_only=True, data_only=True)
+    try:
+        verifikasi = {r[0]: r[1] for r in wb["Verifikasi"].iter_rows(values_only=True)
+                      if r and len(r) > 1 and r[0]}
+    finally:
+        wb.close()
+    assert "Deleted from the server" in verifikasi["Uploaded files on the server"]
+    assert "not changed" in verifikasi["Uploaded files on the server"]
+print("OK excel split and delete-input")

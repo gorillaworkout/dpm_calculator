@@ -119,7 +119,8 @@ assert b"multiple" in halaman_segregate.data
 assert b'name="bulan"' not in halaman_segregate.data
 assert b'name="saldo_jw"' not in halaman_segregate.data
 assert b"Download the template" not in halaman_segregate.data
-assert b"5 GB total upload limit" in halaman_segregate.data
+assert b"12 GB total upload limit" in halaman_segregate.data
+assert b"deleted from the server" in halaman_segregate.data
 assert b"50 files maximum" in halaman_segregate.data
 assert b"in pieces automatically" in halaman_segregate.data
 assert b"files.length > 50" in halaman_segregate.data

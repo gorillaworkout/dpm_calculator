@@ -499,9 +499,11 @@ assert b"MT4 Raw Report is optional" in kvb_page.data
 assert b"mt4-currency" in kvb_page.data
 assert b'value="USC"' in kvb_page.data
 assert b"separate sheets" in kvb_page.data
+assert b"deleted from the server" in kvb_page.data
 dpm_page = client.get("/tool/segregate")
 assert dpm_page.status_code == 200
 assert b"MT4 Raw Report is optional" not in dpm_page.data
+assert b"deleted from the server" in dpm_page.data
 assert b"mt4-currency" not in dpm_page.data
 assert b"Drop Deals History files here" in dpm_page.data
 kvb_home = client.get("/kvb")

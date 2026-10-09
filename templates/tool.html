@@ -125,7 +125,8 @@
   <script>
   // Cloudflare refuses any single request body over 100 MB, so large batches are
   // sliced here and sent one piece at a time. Each request stays small; the total
-  // is limited only by the 5 GB server cap. Small uploads take the plain path.
+  // is limited only by the server cap (DW_MAX_UPLOAD_GB, default 12 GB).
+  // Small uploads take the plain path.
   (function () {
     var CHUNK = 10 * 1024 * 1024;        // smaller requests survive unstable VPN/WARP links
     var DIRECT = {{ '0' if slug == 'segregate' else '80 * 1024 * 1024' }};

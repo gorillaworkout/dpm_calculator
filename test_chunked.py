@@ -5,8 +5,10 @@ Proves the pieces are reassembled byte-for-byte and that the staging area cannot
 be used to write outside itself.
 """
 import base64
+import errno
 import hashlib
 import io
+import json
 import os
 import tempfile
 import time
@@ -22,7 +24,22 @@ import chunked  # noqa: E402
 import app as web  # noqa: E402
 from app import JOBS, app  # noqa: E402
 
-assert chunked.MAX_TOTAL == 5 * 1024 * 1024 * 1024
+assert chunked.MAX_TOTAL == 12 * 1024 * 1024 * 1024
+assert chunked.batas_dari_lingkungan({}) == 12 * 1024 * 1024 * 1024
+assert chunked.batas_dari_lingkungan({"DW_MAX_UPLOAD_GB": "3"}) == 3 * 1024 * 1024 * 1024
+assert chunked.batas_dari_lingkungan({"DW_MAX_UPLOAD_GB": "nope"}) == 12 * 1024 * 1024 * 1024
+assert chunked.batas_dari_lingkungan({"DW_MAX_UPLOAD_GB": "0"}) == 12 * 1024 * 1024 * 1024
+assert chunked.batas_dari_lingkungan({"DW_MAX_UPLOAD_GB": "-4"}) == 12 * 1024 * 1024 * 1024
+
+# Measured deal-index overhead, not 2.5× the file. A 10.5 GB upload must fit
+# when 13 GiB is free. A full 12 GiB upload does not, on that same disk.
+_GIB = 1024 * 1024 * 1024
+assert chunked.ruang_dibutuhkan(int(10.5 * 10**9), False) <= 13 * _GIB
+assert chunked.ruang_dibutuhkan(int(10.5 * _GIB), False) <= 13 * _GIB
+assert chunked.ruang_dibutuhkan(int(10.5 * 10**9), False) <= 13 * 10**9
+assert chunked.ruang_dibutuhkan(int(10.5 * 10**9), False) < int(10.5 * 10**9 * 2)
+assert chunked.ruang_dibutuhkan(12 * _GIB, False) > 13 * _GIB
+assert chunked.OVERHEAD_PER_BYTE < 1
 
 app.config["TESTING"] = True
 c = app.test_client()
@@ -86,6 +103,10 @@ assert staged and len(staged) == 1, staged
 path, original = staged[0]
 assert original == "deals.csv"
 assert hashlib.sha256(path.read_bytes()).hexdigest() == digest, "reassembled bytes differ"
+# Chunks are appended to one part. They are not kept beside an assembled copy.
+bagian = [p.name for p in path.parent.iterdir() if p.name.startswith("part-")]
+assert bagian == ["part-00.csv"], bagian
+assert path.stat().st_size == len(payload)
 
 # --- 20 files keep their own identity and order -----------------------------
 payloads = [f"row-{i}".encode() for i in range(20)]
@@ -168,10 +189,23 @@ assert not stage_dir.exists(), "staging survived discard"
 uid = begin(1)
 stage_dir = JOBS / "staging" / uid
 old = time.time() - 7 * 3600
+manifest = json.loads((stage_dir / "manifest.json").read_text())
+manifest["last_chunk"] = old
+(stage_dir / "manifest.json").write_text(json.dumps(manifest))
 os.utime(stage_dir, (old, old))
 os.utime(stage_dir / "manifest.json", (old, old))
 chunked.sweep(JOBS)
 assert not stage_dir.exists(), "an abandoned upload was left on disk"
+
+# A fresh directory mtime must not protect an upload whose last chunk is old.
+uid = begin(1)
+stage_dir = JOBS / "staging" / uid
+manifest = json.loads((stage_dir / "manifest.json").read_text())
+manifest["last_chunk"] = old
+(stage_dir / "manifest.json").write_text(json.dumps(manifest))
+os.utime(stage_dir, None)
+chunked.sweep(JOBS)
+assert not stage_dir.exists(), "directory mtime kept an idle upload"
 
 # Directory mtime does not change while a chunk is appended. A recently updated
 # manifest is the activity marker and must protect a long-running upload.
@@ -189,5 +223,70 @@ os.utime(JOBS / "staging", (old, old))
 web._sweep_old_jobs()
 assert stage_dir.exists(), "generic job sweep deleted active chunk staging"
 chunked.discard(JOBS, uid)
+
+# --- disk precheck uses measured overhead and does not destroy a staged file --
+real_usage = chunked.shutil.disk_usage
+
+def _hampir_penuh(path):
+    return real_usage(path)._replace(free=1024)
+
+chunked.shutil.disk_usage = _hampir_penuh
+try:
+    r = c.post("/upload/begin", data={"bytes": str(100 * 1024 * 1024)})
+    assert r.status_code == 507, (r.status_code, r.data)
+    assert b"No file was saved" in r.data
+    assert b"2.5" not in r.data
+finally:
+    chunked.shutil.disk_usage = real_usage
+
+payload = b"Deal,Login,Time,Type,Entry,Symbol,Volume,Commission,Fee,Swap,Profit,Currency\n"
+uid = begin(len(payload))
+assert send(uid, "keep.csv", 0, 0, payload).status_code == 200
+stage_dir = JOBS / "staging" / uid
+part = stage_dir / "part-00.csv"
+assert part.is_file()
+chunked.shutil.disk_usage = _hampir_penuh
+try:
+    r = c.post("/tool/segregate", data={"upload_id": uid}, content_type="multipart/form-data")
+    assert r.status_code == 400, r.status_code
+    assert b"was not deleted" in r.data
+    assert part.is_file() and part.read_bytes() == payload
+    assert stage_dir.is_dir()
+finally:
+    chunked.shutil.disk_usage = real_usage
+chunked.discard(JOBS, uid)
+
+# A cross-device rename is refused. The upload is not copied.
+payload = b"Deal,Login\n1,2\n"
+uid = begin(len(payload))
+assert send(uid, "cross.csv", 0, 0, payload).status_code == 200
+stage_dir = JOBS / "staging" / uid
+part = next(stage_dir.glob("part-*"))
+real_replace = web.os.replace
+
+def _tolak_pindah(src, dst):
+    raise OSError(errno.EXDEV, "Invalid cross-device link")
+
+web.os.replace = _tolak_pindah
+try:
+    sebelum = {p.name for p in JOBS.iterdir()}
+    r = c.post("/tool/segregate", data={"upload_id": uid}, content_type="multipart/form-data")
+    assert r.status_code == 400, (r.status_code, r.data)
+    assert b"without" in r.data and b"not deleted" in r.data
+    assert part.is_file() and part.read_bytes() == payload
+    assert {p.name for p in JOBS.iterdir()} == sebelum
+finally:
+    web.os.replace = real_replace
+chunked.discard(JOBS, uid)
+
+# The limit named in the rejection follows MAX_TOTAL, including an override.
+old_max = chunked.MAX_TOTAL
+chunked.MAX_TOTAL = 32
+try:
+    r = c.post("/upload/begin", data={"bytes": "33"})
+    assert r.status_code == 413, r.status_code
+    assert b"32 bytes" in r.data
+finally:
+    chunked.MAX_TOTAL = old_max
 
 print("OK chunked")

@@ -17,6 +17,10 @@ Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
 <h1>Your file is ready</h1>
 <p class="lede">The download starts automatically. Keep this tab open until your browser
 shows the file in its download list.</p>
+{% if info.slug == 'segregate' %}
+<p class="lede">The uploaded file was deleted from the server when this result was ready.
+The file on your computer was not changed.</p>
+{% endif %}
 
 <div class="card">
   <p style="margin:0 0 4px; color:var(--mute); font-size:13.5px">File</p>
@@ -58,12 +62,14 @@ This page refreshes itself. A problem in either file stops the run and no workbo
 {% if company == 'kvb' %}
 <p class="lede">Your MT5 Deals History files are being classified. MT4 Raw Report is optional.
 Each MT4 file uses the currency you chose (USD or USC, default USD).
-Client Equity FX is optional too. Large batches can take a few minutes &mdash; this page refreshes itself, and you
-can safely return to this same job URL later.</p>
+Client Equity FX is optional too. A large file can take a few hours. This page refreshes itself every few seconds, and you
+can safely return to this same job URL later. When the run succeeds, the uploaded file is
+deleted from the server. The file on your computer is not changed.</p>
 {% else %}
 <p class="lede">Your Deals History and optional Client Equity FX files are being classified,
-combined, converted, and verified on the server. Large batches can take a few minutes &mdash; this page refreshes itself, and you
-can safely return to this same job URL later.</p>
+combined, converted, and verified on the server. A large file can take a few hours. This page refreshes itself every few seconds, and you
+can safely return to this same job URL later. When the run succeeds, the uploaded file is
+deleted from the server. The file on your computer is not changed.</p>
 {% endif %}
 {% else %}
 <p class="lede">Your workbook is being calculated on the server. Large files

@@ -5,6 +5,7 @@ Jalankan:  python3 app.py     -> http://127.0.0.1:5000
 Menu baru: tambahkan entry di TOOLS. Tidak perlu ubah kode lain.
 """
 import datetime
+import errno
 import io
 import json
 import os
@@ -406,7 +407,7 @@ DOC = {
             "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
             "format with sheet <code>Query result</code> and columns <code>date</code>, "
             "<code>Currency</code>, <code>rate</code>. Select it together with the Deals files.",
-            "There is a <strong>5 GB total upload limit</strong> and a "
+            f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
             "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
             "in pieces automatically &mdash; you will see "
             "the progress under the button, so leave the tab open until it says "
@@ -426,7 +427,10 @@ DOC = {
         "hasil": "One <code>.zip</code> containing two workbooks:",
         "sheets": [("Deals - Daily.xlsx", "<code>Daily</code> (out rows), <code>Daily - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi."),
                    ("Deals - Monthly Summary.xlsx", "<code>Monthly Summary</code> (out rows), <code>Monthly Summary - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi.")],
-        "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.", CATATAN_ASLI],
+        "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.",
+                    "After a successful run the uploaded file is deleted from the server. "
+                    "The file on your computer is not changed. Verifikasi records this.",
+                    CATATAN_ASLI],
     },
     "pl-desk": {
         "judul": "PL by Desk — monthly P&L by sales desk",
@@ -517,7 +521,7 @@ KVB_SEGREGATE_DOC = {
         "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
         "format with sheet <code>Query result</code> and columns <code>date</code>, "
         "<code>Currency</code>, <code>rate</code>.",
-        "There is a <strong>5 GB total upload limit</strong> and a "
+        f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
         "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
         "in pieces automatically.",
     ],
@@ -549,6 +553,8 @@ KVB_SEGREGATE_DOC = {
                 "It records which MT4 rows took their currency from the account-type file, "
                 "the currency column, or the per-file choice, and it notes MT4 USC ÷100. "
                 "Agent is listed there as information and is not part of Profit, Commission or Fee.",
+                "After a successful run the uploaded file is deleted from the server. "
+                "The file on your computer is not changed. Verifikasi records this.",
                 CATATAN_ASLI],
 }
 
@@ -714,6 +720,24 @@ def run(slug, company="dpm"):
             return _gagal("The channel opening balances do not contain a single number. "
                           "Paste three columns: Payment Channel, Currency, Balance.")
 
+    def _ukuran_stream(upload):
+        pos = upload.stream.tell()
+        upload.stream.seek(0, os.SEEK_END)
+        ukuran = upload.stream.tell()
+        upload.stream.seek(pos)
+        return ukuran
+
+    ukuran_staged = sum(path.stat().st_size for path, _original in (staged or []))
+    ukuran_baru = sum(_ukuran_stream(upload) for upload in uploads)
+    if (slug == "segregate" and company == "kvb" and _akun_upload
+            and _akun_upload.filename):
+        ukuran_baru += _ukuran_stream(_akun_upload)
+    # Before any rename. A failed check must not delete the staged upload:
+    # that file is the only server copy, and copying it is not allowed.
+    salah_ruang = chunked.cek_sebelum_proses(JOBS, ukuran_staged, ukuran_baru)
+    if salah_ruang:
+        return _gagal(salah_ruang)
+
     job = JOBS / uuid.uuid4().hex
     job.mkdir()
     _sweep_old_jobs()
@@ -732,6 +756,16 @@ def run(slug, company="dpm"):
             n += 1
         return target
 
+    if staged:
+        dev = job.stat().st_dev
+        beda = [original for path, original in staged if path.stat().st_dev != dev]
+        if beda:
+            shutil.rmtree(job, ignore_errors=True)
+            return _gagal("The upload is on a different disk from the job folder, so it "
+                          "cannot be moved into place. Copying it would keep a second "
+                          "copy of the file, which this server does not have room for. "
+                          "Nothing was started. The upload was not deleted.")
+
     urutan = 0
     for upload in uploads:
         urutan += 1
@@ -739,14 +773,27 @@ def run(slug, company="dpm"):
         upload.save(target)
         sources.append(target)
         nama_asli.append(upload.filename)
-    for path, original in (staged or []):
-        urutan += 1
-        target = _tujuan(original, urutan)
-        # Rename rather than copy: the staged file can be hundreds of MB and is
-        # on the same filesystem, so this is instant and needs no extra disk.
-        os.replace(path, target)
-        sources.append(target)
-        nama_asli.append(original)
+    pindah = []
+    try:
+        for path, original in (staged or []):
+            urutan += 1
+            target = _tujuan(original, urutan)
+            # Same-filesystem rename. A cross-device move would copy, so it is refused.
+            os.replace(path, target)
+            pindah.append((target, path))
+            sources.append(target)
+            nama_asli.append(original)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        for tujuan, asal in reversed(pindah):
+            try:
+                os.replace(tujuan, asal)
+            except OSError:
+                pass
+        shutil.rmtree(job, ignore_errors=True)
+        return _gagal("The upload could not be moved into the job folder without "
+                      "copying it. Nothing was started. The upload was not deleted.")
     if staged:
         chunked.discard(JOBS, upload_id)
     src = sources[0]
@@ -796,6 +843,11 @@ def run(slug, company="dpm"):
             queue = antrian.get(original)
             if queue:
                 mt4_flags.append(f"{path.name}={queue.popleft()}")
+    # The request returns now. gunicorn's 1800s timeout only kills a worker
+    # that is stuck inside a request and cannot heartbeat. This thread, and
+    # the subprocess it starts, keep running after the 303. There is no
+    # subprocess timeout. Status polls are short GETs, so a run of a few hours
+    # is not cut off. The staged file was renamed on this same volume.
     threading.Thread(target=_process_job,
                      args=(job_id, company, slug, job,
                            sources if slug in ("segregate", "pl-desk") else src,
@@ -867,6 +919,10 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
                 perintah += [flag_saldo, saldo_jw]
             if company == "kvb" and KVB_ARG.get(script):
                 perintah.append(KVB_ARG[script])
+            if script == "deal_segregator.py":
+                # The workbook says so on Verifikasi. The CLI does not pass this,
+                # so a command-line run leaves the source files where they are.
+                perintah.append("--delete-input")
             if company == "kvb" and script == "deal_segregator.py":
                 perintah.append("--allow-mt4")
                 for item in mt4_currency or []:
@@ -876,6 +932,8 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
             flag_ch = CHANNEL_ARG.get(script)
             if f_ch and flag_ch:
                 perintah += [flag_ch, str(f_ch)]
+            # No timeout. A 10 GB Deal Segregator run can take a few hours,
+            # and the worker has already finished the HTTP request.
             r = subprocess.run(perintah, capture_output=True,
                                text=True, cwd=BASE)
             log.append(f"$ {script}\n{r.stdout}{r.stderr}".rstrip())
