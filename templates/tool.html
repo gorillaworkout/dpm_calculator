@@ -106,7 +106,20 @@
       <br>When this is filled in, <code>Payment Channel Balance</code> shows
       <b>every channel on every day of the month</b> and carries the balance forward on
       days with no movement — so the daily movement can be checked against other
-      departments.</p>
+      departments.
+      {% if company == 'kvb' and slug == 'dw' %}
+      <br><b>USD opening for a CNY gateway</b> (ChipPay, EP, UPay, ZPay): paste
+      <code>ChipPay USD(CNY) 12,345.67</code>. The currency must be written
+      <code>USD(CNY)</code>. <code>USD (CNY)</code> with a space is the same thing.
+      Three columns work too: <code>ChipPay</code>, <code>USD(CNY)</code>,
+      <code>12,345.67</code>, separated by a tab or by two spaces.
+      That line is the USD block under CNY ChipPay. A real USD ChipPay balance stays
+      <code>ChipPay</code> / <code>USD</code> / amount. Leave the USD(CNY) line out and
+      that USD block starts at zero.
+      <br>Fee rates: <code>+8</code> is a flat 8 per transaction,
+      <code>1.5%+50</code> is 1.5% plus a flat 50, and <code>min</code> sets a minimum.
+      A plain <code>8</code> is read as 800%. Write <code>+8</code> for a flat fee.
+      {% endif %}</p>
     {% endif %}
 
     <button name="b" type="submit">Run &amp; download result</button>

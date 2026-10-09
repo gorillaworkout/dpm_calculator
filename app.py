@@ -232,8 +232,18 @@ SALDO_ARG = {"hitung_dw.py": "--jwallet-opening"}
 CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # KVB tidak boleh memakai EXTRA_FEES (rate DPM yang ditulis di kode). Flag harus
 # ikut sejak isi_template.py karena tahap itu bisa menggabungkan beberapa fee sheet.
-KVB_ARG = {"isi_template.py": "--tanpa-extra-fees",
-           "hitung_dw.py": "--tanpa-extra-fees"}
+# Setiap nilai adalah tuple argumen CLI, hanya untuk company KVB.
+# DPM tidak menerima flag ini.
+KVB_ARG = {
+    "isi_template.py": ("--tanpa-extra-fees",),
+    "hitung_dw.py": (
+        "--tanpa-extra-fees",
+        "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
+        "--fee-currency-suffix",
+        "--warn-high-pct",
+        "--cny-rate-check",
+    ),
+}
 SALDO_POLA = re.compile(r"^-?[\d.,\s]{1,24}$")
 PERIODE_POLA = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 NAMA_BULAN = ["January", "February", "March", "April", "May", "June",
@@ -488,10 +498,32 @@ KVB_DOC = {
         "KVB sheet and field names are translated without changing transaction amounts.",
         "The translated data is copied into the clean D&amp;W template.",
         "The report is calculated and returned as a new workbook.",
+        "CNY gateways ChipPay, EP, UPay and ZPay also get a USD block directly under "
+        "the CNY block on <code>Payment Channel Balance</code>. Deposit and Withdrawal "
+        "on that block come from the USD column. Charges are Handling Fee × (USD ÷ Transaction).",
     ],
     "hasil": "One finished <code>.xlsx</code> D&amp;W workbook.",
     "sheets": SHEET_PENUH,
-    "catatan": [CATATAN_MISSING, CATATAN_ASLI],
+    "catatan": [
+        CATATAN_MISSING,
+        "Fee rates on the Handling Fee sheet: <code>+8</code> is a flat 8 per transaction "
+        "(the plus sign is required). <code>1.5%+50</code> is 1.5% plus a flat 50. "
+        "<code>0.45%,min 90</code> is 0.45% with a minimum of 90. A plain number "
+        "<code>8</code> is read as 800%, not as a flat fee. Write <code>+8</code> when "
+        "you mean a flat amount. The calculation is not rewritten when a rate reads as "
+        "100% or more; Missing Data names those cells.",
+        "USD opening balance for a CNY gateway, paste exactly one of these: "
+        "<code>ChipPay USD(CNY) 12,345.67</code>, or three columns "
+        "<code>ChipPay</code>, <code>USD(CNY)</code>, <code>12,345.67</code> "
+        "(tab or two spaces). <code>USD (CNY)</code> with a space is the same. "
+        "That is the USD block under CNY ChipPay, not a real USD ChipPay balance "
+        "(that one stays <code>ChipPay</code> / <code>USD</code> / amount). "
+        "Leave the line out and the USD block starts at zero.",
+        "A withdrawal gateway <code>PA</code> in currency <code>PKR</code> uses the fee "
+        "row <code>PA-PKR</code> when no exact <code>PA</code> row exists. An exact row "
+        "still wins. Missing Data records it as <code>PA (PKR) used fee row PA-PKR</code>.",
+        CATATAN_ASLI,
+    ],
     "catatan_penting": True,
 }
 
@@ -918,7 +950,8 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
             if saldo_jw and flag_saldo:
                 perintah += [flag_saldo, saldo_jw]
             if company == "kvb" and KVB_ARG.get(script):
-                perintah.append(KVB_ARG[script])
+                tambahan = KVB_ARG[script]
+                perintah.extend(tambahan if isinstance(tambahan, (list, tuple)) else [tambahan])
             if script == "deal_segregator.py":
                 # The workbook says so on Verifikasi. The CLI does not pass this,
                 # so a command-line run leaves the source files where they are.

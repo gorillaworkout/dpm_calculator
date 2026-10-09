@@ -48,6 +48,14 @@ def wait(location):
 
 
 try:
+    kvb_page = client.get("/kvb/tool/dw")
+    assert kvb_page.status_code == 200
+    assert b"USD(CNY)" in kvb_page.data
+    assert b"+8" in kvb_page.data
+    dpm_page = client.get("/tool/dw")
+    assert dpm_page.status_code == 200
+    assert b"USD(CNY)" not in dpm_page.data
+
     A.subprocess.run = fake_run
     response = client.post("/kvb/tool/dw", data={
         "file": (io.BytesIO(b"fake"), "KVB Plus.xlsx"),
@@ -63,7 +71,14 @@ try:
     ]
     assert "--bulan" not in commands[0]
     assert commands[1][-3:] == ["--bulan", "2026-08", "--tanpa-extra-fees"]
-    assert commands[2][-3:] == ["--period", "2026-08", "--tanpa-extra-fees"]
+    assert commands[2][commands[2].index("--period"):] == [
+        "--period", "2026-08",
+        "--tanpa-extra-fees",
+        "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
+        "--fee-currency-suffix",
+        "--warn-high-pct",
+        "--cny-rate-check",
+    ]
     assert Path(commands[1][2]) == Path(commands[0][commands[0].index("-o") + 1])
     assert Path(commands[2][2]) == Path(commands[1][commands[1].index("-o") + 1])
     assert client.get(f"/kvb/job/{job_id}").status_code == 200
@@ -77,6 +92,11 @@ try:
     assert state["state"] == "done", state
     assert [Path(c[1]).name for c in commands] == ["isi_template.py", "hitung_dw.py"]
     assert "--tanpa-extra-fees" not in commands[1]   # DPM tetap memakai EXTRA_FEES
+    joined = " ".join(commands[1])
+    assert "--usd-shadow" not in joined
+    assert "--fee-currency-suffix" not in joined
+    assert "--warn-high-pct" not in joined
+    assert "--cny-rate-check" not in joined
 
     commands.clear()
     def fail_translate(command, **_kwargs):
