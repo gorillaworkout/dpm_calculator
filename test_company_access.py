@@ -93,20 +93,27 @@ for name in ("dpm", "kvb", "both"):
     client.environ_base["HTTP_ACCEPT"] = "text/html"
     clients[name] = client
 
-assert clients["dpm"].get("/tool/dw").status_code == 403  # edited to KVB-only above
+# Edited to KVB-only above, so a browser is sent to the KVB tool instead of Forbidden.
+sent = clients["dpm"].get("/tool/dw")
+assert sent.status_code == 302 and sent.headers["Location"].endswith("/kvb/tool/dw")
 # Restore dpm as DPM-only through the admin endpoint.
 c.post("/admin/users/dpm/access", headers=ADMIN, data={"can_dpm": "1"})
 assert clients["dpm"].get("/tool/dw").status_code == 200
-assert clients["dpm"].get("/kvb/tool/dw").status_code == 403
+sent = clients["dpm"].get("/kvb/tool/dw")
+assert sent.status_code == 302 and sent.headers["Location"].endswith("/tool/dw")
 kvb_dw = clients["kvb"].get("/kvb/tool/dw")
 assert kvb_dw.status_code == 200
 assert b"KVB Plus workbook" in kvb_dw.data and b"translates KVB" in kvb_dw.data
 assert b"Generate D&amp;W \xc2\xb7 KVB Tools" in kvb_dw.data
-assert clients["kvb"].get("/tool/dw").status_code == 403
-assert clients["kvb"].get("/tool/segregate").status_code == 403
-assert clients["kvb"].get("/tool/pl-desk").status_code == 403
+sent = clients["kvb"].get("/tool/dw")
+assert sent.status_code == 302 and sent.headers["Location"].endswith("/kvb/tool/dw")
+sent = clients["kvb"].get("/tool/segregate")
+assert sent.status_code == 302 and sent.headers["Location"].endswith("/kvb/tool/segregate")
+sent = clients["kvb"].get("/tool/pl-desk")
+assert sent.status_code == 302 and sent.headers["Location"].rstrip("/").endswith("/kvb")
 assert clients["kvb"].get("/kvb/tool/pl-desk").status_code == 404
-assert clients["dpm"].get("/kvb/tool/segregate").status_code == 403
+sent = clients["dpm"].get("/kvb/tool/segregate")
+assert sent.status_code == 302 and sent.headers["Location"].endswith("/tool/segregate")
 kvb_seg = clients["kvb"].get("/kvb/tool/segregate")
 assert kvb_seg.status_code == 200
 assert b"Deal Segregator \xc2\xb7 KVB Tools" in kvb_seg.data
@@ -163,8 +170,12 @@ kvb_job_page = clients["kvb"].get(f"/kvb/job/{kvb_job}")
 assert kvb_job_page.status_code == 200
 assert b"Processing \xc2\xb7 KVB Tools" in kvb_job_page.data
 assert clients["kvb"].get(f"/job/{kvb_job}").status_code == 200
-assert clients["dpm"].get(f"/kvb/job/{kvb_job}").status_code == 403
-assert clients["dpm"].get(f"/job/{kvb_job}").status_code == 403
+for path in (f"/kvb/job/{kvb_job}", f"/job/{kvb_job}"):
+    sent = clients["dpm"].get(path)
+    landed = sent.headers.get("Location", "")
+    assert sent.status_code == 302 and landed.endswith("/") and "/kvb" not in landed, (
+        path, sent.status_code, landed)
+    assert kvb_job not in landed and b"KVB Deals-hasil.zip" not in sent.data
 assert clients["dpm"].get(f"/kvb/job/{kvb_job}/download").status_code == 403
 blocked = clients["dpm"].get(f"/job/{kvb_job}/download")
 assert blocked.status_code == 403 and b"PK" not in blocked.data
@@ -183,8 +194,10 @@ _write_state(dpm_job, state="done", name="dpm-hasil.zip", started=time.time(),
              error=None, log=None, path=str(JOBS / dpm_job / "hasil.zip"),
              slug="segregate", company="dpm")
 assert clients["dpm"].get(f"/job/{dpm_job}").status_code == 200
-assert clients["kvb"].get(f"/job/{dpm_job}").status_code == 403
-assert clients["kvb"].get(f"/kvb/job/{dpm_job}").status_code == 403
+for path in (f"/job/{dpm_job}", f"/kvb/job/{dpm_job}"):
+    sent = clients["kvb"].get(path)
+    assert sent.status_code == 302 and sent.headers["Location"].rstrip("/").endswith("/kvb"), path
+    assert secret not in sent.data and dpm_job not in sent.headers["Location"]
 stolen = clients["kvb"].get(f"/job/{dpm_job}/download")
 assert stolen.status_code == 403 and secret not in stolen.data
 stolen_kvb_url = clients["kvb"].get(f"/kvb/job/{dpm_job}/download")

@@ -19,8 +19,8 @@ import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 
-from flask import (Flask, abort, redirect, render_template, request, send_file,
-                   url_for)
+from flask import (Flask, abort, flash, redirect, render_template, request,
+                   send_file, url_for)
 from werkzeug.utils import secure_filename
 
 import auth
@@ -107,9 +107,73 @@ def _tools_for(company):
     return TOOLS if company == "dpm" else KVB_TOOLS if company == "kvb" else None
 
 
-def _require_company(company):
-    if not auth.has_company(request.user, company):
-        abort(403, description=f"Your account does not have access to {company.upper()}.")
+def _browser_page():
+    """True when a browser navigation should not see a bare 403 page.
+
+    Address-bar and link loads send Accept with text/html. Accept */* (curl
+    and fetch) and a missing Accept stay on a plain 401 or 403, so a script
+    is not handed the login HTML. The chunked uploader only POSTs, so this
+    choice does not affect it. Job downloads stay 403 even for a browser.
+    """
+    if request.method != "GET" or request.path.endswith("/download"):
+        return False
+    return "text/html" in (request.headers.get("Accept") or "")
+
+
+def _page_on_company(path, company):
+    """The same page on the other company, or None when that page does not exist.
+
+    Job URLs are never rewritten. Sending someone to the other company's job
+    address would be a way to reach another account's result.
+    """
+    if path == "/kvb":
+        rest = "/"
+    elif path.startswith("/kvb/"):
+        rest = path[4:]
+    else:
+        rest = path
+    if rest == "/":
+        return "/kvb" if company == "kvb" else "/"
+    if rest.startswith("/job/"):
+        return None
+    parts = rest.strip("/").split("/")
+    if len(parts) == 2 and parts[0] == "tool":
+        slug = parts[1]
+        registry = _tools_for(company)
+        if not registry or slug not in registry or not registry[slug][3]:
+            return None
+        prefix = "/kvb" if company == "kvb" else ""
+        return f"{prefix}/tool/{slug}"
+    if rest == "/template":
+        return "/kvb/template" if company == "kvb" else "/template"
+    return None
+
+
+def _redirect_denied(company):
+    """Send a browser somewhere it is allowed to be, and say why."""
+    other = "kvb" if company == "dpm" else "dpm"
+    user = getattr(request, "user", None) or auth.current_user()
+    if auth.has_company(user, other):
+        dest = _page_on_company(request.path, other)
+        if dest and dest != request.path:
+            flash(f"Your account does not have access to {company.upper()}. "
+                  f"Opened the {other.upper()} page instead.")
+            return redirect(dest)
+        home = "/kvb" if other == "kvb" else "/"
+        if home != request.path:
+            flash(f"Your account does not have access to {company.upper()}.")
+            return redirect(home)
+    flash(f"Your account does not have access to {company.upper()}. "
+          f"Please sign in with a {company.upper()} account.")
+    return redirect(url_for("login", next=request.full_path.rstrip("?")))
+
+
+def _require_company(company, browser_redirect=True):
+    if auth.has_company(request.user, company):
+        return None
+    if browser_redirect and _browser_page():
+        return _redirect_denied(company)
+    abort(403, description=f"Your account does not have access to {company.upper()}.")
 
 
 app = Flask(__name__)
@@ -129,18 +193,18 @@ def _require_login():
         return None                      # admin views carry their own stricter check
     user = auth.current_user()
     if not user:
-        # Browsers get the styled sign-in page; scripts and the chunked uploader
-        # get a plain 401 so they can report a clear error instead of parsing HTML.
-        wants_html = "text/html" in (request.headers.get("Accept") or "")
-        if request.method == "GET" and wants_html:
+        # Browsers get the styled sign-in page. Accept */* and a missing Accept
+        # stay a plain 401: that is curl, fetch, and other scripts. The chunked
+        # uploader only POSTs, so it never follows this redirect.
+        if _browser_page():
             return redirect(url_for("login", next=request.full_path.rstrip("?")))
         return auth._deny()
     request.user = user
     if (request.path == "/" or request.path.startswith("/tool/") or
             request.path == "/template"):
-        _require_company("dpm")
-    elif request.path == "/kvb" or request.path.startswith("/kvb/"):
-        _require_company("kvb")
+        return _require_company("dpm")
+    if request.path == "/kvb" or request.path.startswith("/kvb/"):
+        return _require_company("kvb")
     return None
 
 
@@ -843,7 +907,9 @@ def job_status(job_id):
     if not info:
         abort(404)
     company = info.get("company", "dpm")
-    _require_company(company)
+    denied = _require_company(company)
+    if denied is not None:
+        return denied
     request.company = company
     registry = _tools_for(company)
     slug = info["slug"]
@@ -869,7 +935,9 @@ def job_download(job_id):
     if not info:
         abort(404)
     company = info.get("company", "dpm")
-    _require_company(company)
+    # A download is not a page. Redirecting it could point at the other
+    # company's file, so a browser still gets 403 and an empty body.
+    _require_company(company, browser_redirect=False)
     request.company = company
     registry = _tools_for(company)
     if info["state"] == "collected":

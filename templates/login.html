@@ -98,6 +98,7 @@ button[disabled]{opacity:.6; cursor:progress}
   padding:12px 14px; border-radius:10px; font-size:13.5px; margin:0 0 20px;
   color:#ffb4b4; background:rgba(255,107,107,.09); border:1px solid rgba(255,107,107,.3);
 }
+.err a{color:#ffd0d0}
 .foot{margin-top:24px; color:#9aa7c0; font-size:12.5px; line-height:1.7}
 
 @media (max-width:880px){
@@ -134,7 +135,14 @@ button[disabled]{opacity:.6; cursor:progress}
     <h1>Sign in</h1>
     <p class="sub">Use the username and password your administrator gave you.</p>
 
-    {% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+    {% if error %}
+    <div class="err" role="alert">
+      {{ error }}
+      {% if switch_account %}
+      <div style="margin-top:8px"><a href="{{ url_for('logout', next=next) if next else url_for('logout') }}">Sign in with a different account</a></div>
+      {% endif %}
+    </div>
+    {% endif %}
 
     <form method="post" action="/login" onsubmit="this.s.disabled=true;this.s.textContent='Signing in…'">
       <input type="hidden" name="next" value="{{ next or '' }}">
