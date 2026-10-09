@@ -37,7 +37,10 @@ Skalabilitas (tetap dari perbaikan OOM di main, bukan dari salinan 6 Okt):
   - ID Deal yang sudah terpakai disimpan di SQLite di disk, bukan set Python,
     supaya run multi-GB tidak menumpuk ratusan juta ID di RAM.
   - Workbook ditulis write-only dan di-stream ke file sementara sebelum masuk
-    zip, supaya ukuran output tidak ikut membesar di memori.
+    zip, lalu file itu dihapus. Indeks SQLite ditutup sebelum workbook ditulis,
+    jadi keduanya tidak duduk di disk bersamaan.
+  - Satu sheet Excel menampung 1.048.575 baris data. Lebih dari itu dilanjutkan
+    ke sheet berikutnya (Daily 2, Daily - In 2, dan seterusnya).
 
 File sumber MT5 "Deals History" biasanya diekspor sebagai UTF-16LE
 tab-delimited (bukan CSV koma biasa) -- encoding & pemisah kolom dideteksi
@@ -65,6 +68,7 @@ import csv
 import datetime
 import math
 import re
+import shutil
 import sqlite3
 import tempfile
 import sys
@@ -654,10 +658,13 @@ class _DiskDeals:
 
     def __init__(self, path):
         self.db = sqlite3.connect(path)
+        # journal_mode=OFF and temp_store=MEMORY: no journal and no temp file
+        # beside the index. cache_size stays small so the index lives on disk.
         self.db.executescript("""
             PRAGMA journal_mode=OFF;
             PRAGMA synchronous=OFF;
-            PRAGMA temp_store=FILE;
+            PRAGMA temp_store=MEMORY;
+            PRAGMA cache_size=-2048;
             CREATE TABLE deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
         """)
         self._pending = 0
@@ -1312,7 +1319,7 @@ def _hasil_agregat(kelompok):
 
 
 def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
-           mt4_accounts=None) -> dict:
+           mt4_accounts=None, hapus_sumber=False) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
     'out' and 'in' rows go to separate sheets of each workbook.
     MT4 Raw Report files are accepted only when allow_mt4 is true (KVB).
@@ -1606,6 +1613,12 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
         if ringkasan.get(label_beda) not in ("(none)", "", None):
             yellow_labels.add(label_beda)
 
+    if hapus_sumber:
+        ringkasan["Uploaded files on the server"] = (
+            "Deleted from the server once this result is ready. "
+            "The files on your computer are not changed."
+        )
+
     if path_out.suffix.lower() == ".zip":
         _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
                    pakai_platform=ada_mt4)
@@ -1614,6 +1627,17 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
     else:
         _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
                         pakai_platform=ada_mt4)
+
+    if hapus_sumber:
+        # The result is already on disk. Removing a source must not fail the run;
+        # the web job folder is cleaned up again after this process exits.
+        for path in list(paths_in) + ([Path(mt4_accounts)] if mt4_accounts else []):
+            if path.resolve() == path_out.resolve():
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
 
     result = {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai["out"],
               "dipakai_in": dipakai["in"],
@@ -1699,18 +1723,64 @@ def _tulis_verifikasi(ws, ringkasan: dict, yellow_labels=frozenset()):
         ws.append([first, second])
 
 
+# Excel allows 1,048,576 rows on a sheet. One of those is the header.
+EXCEL_BARIS_MAKS = 1_048_576
+EXCEL_DATA_MAKS = EXCEL_BARIS_MAKS - 1
+
+
+def _potongan_excel(baris):
+    """Split a table so each sheet stays within the Excel row limit.
+
+    A table that fits is one piece, so existing workbooks keep a single Daily
+    sheet and a single Daily - In sheet.
+    """
+    baris = list(baris)
+    if len(baris) <= EXCEL_DATA_MAKS:
+        return [baris]
+    return [baris[i:i + EXCEL_DATA_MAKS] for i in range(0, len(baris), EXCEL_DATA_MAKS)]
+
+
+def _nama_lembar(judul, indeks, jumlah):
+    """First sheet keeps the original name. Later sheets are 'Daily 2', ..."""
+    if jumlah <= 1 or indeks == 0:
+        nama = judul
+    else:
+        nama = f"{judul} {indeks + 1}"
+    return nama[:31]
+
+
+def _catat_batas_excel(ringkasan, pasangan):
+    pecah = [(judul, len(baris)) for judul, baris in pasangan if len(baris) > EXCEL_DATA_MAKS]
+    if not pecah or "Excel row limit" in ringkasan:
+        return
+    detail = ", ".join(f"{judul} ({jumlah:,} rows)" for judul, jumlah in pecah)
+    ringkasan["Excel row limit"] = (
+        f"Each sheet holds at most {EXCEL_DATA_MAKS:,} data rows (one row is the header). "
+        f"These tables continue on the next sheet: {detail}."
+    )
+
+
+def _tambah_tabel(wb, judul, baris, periode, fmt, pakai_fx, kolom):
+    potongan = _potongan_excel(baris)
+    jumlah = len(potongan)
+    for indeks, bagian in enumerate(potongan):
+        ws = wb.create_sheet(_nama_lembar(judul, indeks, jumlah))
+        _tulis_sheet(ws, bagian, periode, fmt, pakai_fx, kolom)
+
+
 def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict,
                     pakai_platform=False):
     """Legacy one-workbook writer kept for direct callers."""
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
+    _catat_batas_excel(ringkasan, (
+        ("Daily", harian), ("Daily - In", harian_in),
+        ("Monthly Summary", bulanan), ("Monthly Summary - In", bulanan_in),
+    ))
     wb = Workbook(write_only=True)
-    daily = wb.create_sheet("Daily")
-    _tulis_sheet(daily, harian, "Date", "dd mmm yyyy", kolom_hasil=kolom)
-    _tulis_sheet(wb.create_sheet("Daily - In"), harian_in, "Date", "dd mmm yyyy", kolom_hasil=kolom)
-    monthly = wb.create_sheet("Monthly Summary")
-    _tulis_sheet(monthly, bulanan, "Month", "mmm yyyy", kolom_hasil=kolom)
-    _tulis_sheet(wb.create_sheet("Monthly Summary - In"), bulanan_in, "Month", "mmm yyyy",
-                 kolom_hasil=kolom)
+    _tambah_tabel(wb, "Daily", harian, "Date", "dd mmm yyyy", False, kolom)
+    _tambah_tabel(wb, "Daily - In", harian_in, "Date", "dd mmm yyyy", False, kolom)
+    _tambah_tabel(wb, "Monthly Summary", bulanan, "Month", "mmm yyyy", False, kolom)
+    _tambah_tabel(wb, "Monthly Summary - In", bulanan_in, "Month", "mmm yyyy", False, kolom)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -1722,11 +1792,10 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
 def _write_split_workbook(path, title, rows, rows_in, period_name, period_format, summary,
                           pakai_fx, yellow_labels, pakai_platform=False):
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
+    _catat_batas_excel(summary, ((title, rows), (f"{title} - In", rows_in)))
     wb = Workbook(write_only=True)
-    ws = wb.create_sheet(title)
-    _tulis_sheet(ws, rows, period_name, period_format, pakai_fx, kolom)
-    _tulis_sheet(wb.create_sheet(f"{title} - In"), rows_in, period_name, period_format,
-                 pakai_fx, kolom)
+    _tambah_tabel(wb, title, rows, period_name, period_format, pakai_fx, kolom)
+    _tambah_tabel(wb, f"{title} - In", rows_in, period_name, period_format, pakai_fx, kolom)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:
         wb.save(path)
@@ -1736,17 +1805,27 @@ def _write_split_workbook(path, title, rows, rows_in, period_name, period_format
 
 def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels,
                pakai_platform=False):
+    """One workbook at a time. Each temp file is removed as soon as it is in the zip."""
+    _catat_batas_excel(summary, (
+        ("Daily", harian), ("Daily - In", harian_in),
+        ("Monthly Summary", bulanan), ("Monthly Summary - In", bulanan_in),
+    ))
     path_out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=path_out.parent) as folder:
-        daily = Path(folder) / "Deals - Daily.xlsx"
-        monthly = Path(folder) / "Deals - Monthly Summary.xlsx"
-        _write_split_workbook(daily, "Daily", harian, harian_in, "Date", "dd mmm yyyy",
-                              summary, pakai_fx, yellow_labels, pakai_platform)
-        _write_split_workbook(monthly, "Monthly Summary", bulanan, bulanan_in, "Month", "mmm yyyy",
-                              summary, pakai_fx, yellow_labels, pakai_platform)
+    folder = Path(tempfile.mkdtemp(dir=path_out.parent))
+    try:
         with zipfile.ZipFile(path_out, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.write(daily, daily.name)
-            archive.write(monthly, monthly.name)
+            for nama, judul, baris, baris_in, periode, fmt in (
+                ("Deals - Daily.xlsx", "Daily", harian, harian_in, "Date", "dd mmm yyyy"),
+                ("Deals - Monthly Summary.xlsx", "Monthly Summary", bulanan, bulanan_in,
+                 "Month", "mmm yyyy"),
+            ):
+                jalur = folder / nama
+                _write_split_workbook(jalur, judul, baris, baris_in, periode, fmt,
+                                      summary, pakai_fx, yellow_labels, pakai_platform)
+                archive.write(jalur, nama)
+                jalur.unlink()
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _mt4_currency_dari_argumen(items):
@@ -1776,6 +1855,9 @@ def main():
     ap.add_argument("--mt4-accounts",
                     help="optional account,account_type file. CentAccount is USC; "
                          "every other type is USD. Used only with --allow-mt4.")
+    ap.add_argument("--delete-input", action="store_true",
+                    help="After the result is written, delete the input files. "
+                         "The web app passes this. Omit it to leave the files in place.")
     args = ap.parse_args()
 
     paths_in = [Path(p) for p in args.input]
@@ -1786,7 +1868,8 @@ def main():
 
     ringkasan = proses(paths_in, path_out, allow_mt4=args.allow_mt4,
                        mt4_currency=_mt4_currency_dari_argumen(args.mt4_currency),
-                       mt4_accounts=args.mt4_accounts)
+                       mt4_accounts=args.mt4_accounts,
+                       hapus_sumber=args.delete_input)
     print("=== STAGE 1 DONE ===")
     for k, v in ringkasan.items():
         print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")
