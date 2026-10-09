@@ -466,6 +466,28 @@
   {% endif %}
 </div>
 
+{% if slug == "segregate" %}
+<div class="card" style="margin-top:16px">
+  <h2 style="margin:0 0 8px; font-size:18px">Templates &amp; format guide</h2>
+  <p class="hint" style="margin-top:0">Download a blank file when the export is not already in this layout. The Guide sheet in each file marks required and optional columns.</p>
+  <ul style="margin:0 0 12px; padding-left:18px; line-height:1.8">
+    <li><a href="{{ '/kvb' if company == 'kvb' else '' }}/tool/segregate/template/mt5">MT5 Deals History template</a></li>
+    {% if company == "kvb" %}
+    <li><a href="/kvb/tool/segregate/template/mt4">MT4 Raw Report template</a></li>
+    <li><a href="/kvb/tool/segregate/template/accounts">MT4 account types template</a></li>
+    {% endif %}
+    <li><a href="{{ '/kvb' if company == 'kvb' else '' }}/tool/segregate/template/fx">Client Equity FX template</a></li>
+  </ul>
+  <ul style="margin:0; padding-left:18px; color:var(--mute); font-size:13.5px; line-height:1.7">
+    <li>Upload the original MT5/MT4 export (CSV) directly, or the template.</li>
+    <li>Don't open and re-save a CSV in Excel.</li>
+    <li>Deal and Login must be full numbers, not 1.41E+08.</li>
+    <li>MT4 and account-type files are optional for KVB.</li>
+    <li>DPM is MT5 only.</li>
+  </ul>
+</div>
+{% endif %}
+
 {% if doc %}
 <h2 style="margin:40px 0 10px; font-size:20px; letter-spacing:-.4px">{{ doc.judul }}</h2>
 <p class="lede">{{ doc.ringkas }}</p>

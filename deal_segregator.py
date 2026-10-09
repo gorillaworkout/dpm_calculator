@@ -51,6 +51,13 @@ yang sama dengan MT5, dengan kolom Platform. Tanpa file MT4, sheet dan angka
 MT5 tidak berubah. Mata uang per baris: peta account_type (CentAccount = USC),
 lalu kolom mata uang di file, lalu pilihan USD/USC per file. USC MT4 dibagi 100
 (bukan kurs Client Equity FX). Agent tidak masuk ke total manapun.
+
+Line break di dalam sebuah field (Name, Comment, atau kolom teks lain) disambung
+kembali, bukan dibuang. CSV tanpa kutip yang kolomnya kurang digabung dengan
+baris fisik berikutnya. .xlsx yang disimpan ulang dari CSV rusak dikenali dari
+baris yang punya Deal/Login tapi Time, Type, dan Entry-nya kosong. Kalau tidak
+bisa disambung, proses berhenti. Deal atau Login berbentuk teks notasi ilmiah
+(1.41E+08) juga menghentikan proses: digitnya sudah hilang.
 """
 import argparse
 import codecs
@@ -130,19 +137,22 @@ def _deteksi_pemisah(baris_pertama: str) -> str:
     return "\t" if baris_pertama.count("\t") >= baris_pertama.count(",") else ","
 
 
-def _baca_csv(path: Path):
+def _baca_csv(path: Path, info: dict):
+    info.setdefault("repaired", 0)
+    info.setdefault("repaired_logins", set())
     enc = _deteksi_encoding(path)
     with open(path, encoding=enc, newline="") as f:
         awal = f.readline()
         pemisah = _deteksi_pemisah(awal)
+    header = next(csv.reader([awal], delimiter=pemisah))
+    idx = {name: i for i, name in enumerate(header)}
+
     def rows():
         with open(path, encoding=enc, newline="") as f:
-            r = csv.reader(f, delimiter=pemisah)
-            next(r)
-            for nomor, row in enumerate(r, start=2):
-                if any((c or "").strip() for c in row):
-                    yield nomor, row
-    return next(csv.reader([awal], delimiter=pemisah)), rows(), None
+            reader = csv.reader(f, delimiter=pemisah)
+            next(reader, None)
+            yield from _alirkan_csv(reader, len(header), path, idx, info, 1)
+    return header, rows(), None
 
 
 def _baca_xlsx(path: Path):
@@ -168,24 +178,30 @@ def _baca_xlsx(path: Path):
         if wb is not None:
             wb.close()
         sys.exit(f"STOP: could not read the header in '{path.name}': {exc}")
-    info = {"dibaca": {}, "dilewati": dilewati}
+    info = {"dibaca": {}, "dilewati": dilewati, "repaired": 0, "repaired_logins": set()}
     if not sheets:
         wb.close()
         if not header_pertama:
             sys.exit(f"STOP: could not read the header in '{path.name}': the file has no header row")
         return header_pertama, iter(()), None, info
     kanon = sheets[0][1]
+    idx = {name: i for i, name in enumerate(kanon)}
 
     def rows():
         try:
             for nama, header, it in sheets:
                 posisi = [header.index(k) if k in header else None for k in kanon]
+
+                def sumber(it=it, posisi=posisi):
+                    for nomor, row in enumerate(it, start=2):
+                        if any(v is not None and _teks(v) != "" for v in row):
+                            yield nomor, [row[i] if i is not None and i < len(row) else None
+                                          for i in posisi]
+
                 n = 0
-                for nomor, row in enumerate(it, start=2):
-                    if any(v is not None and _teks(v) != "" for v in row):
-                        n += 1
-                        yield nomor, [row[i] if i is not None and i < len(row) else None
-                                      for i in posisi]
+                for item in _alirkan_xlsx(sumber(), len(kanon), path, idx, info):
+                    n += 1
+                    yield item
                 info["dibaca"][nama] = n
         finally:
             wb.close()
@@ -197,11 +213,11 @@ def baca_file(path: Path):
     info['dibaca'] = {nama_sheet: jumlah_baris} untuk .xlsx; baru terisi setelah
     rows habis dibaca. Kosong untuk .csv."""
     suffix = path.suffix.lower()
-    info = {"dibaca": {}, "dilewati": []}
     if suffix in (".xlsx", ".xlsm"):
         header, rows, close, info = _baca_xlsx(path)
     else:
-        header, rows, close = _baca_csv(path)
+        info = {"dibaca": {}, "dilewati": [], "repaired": 0, "repaired_logins": set()}
+        header, rows, close = _baca_csv(path, info)
     idx = {name: i for i, name in enumerate(header)}
     hilang = [k for k in KOLOM_WAJIB if k not in idx]
     if hilang:
@@ -224,6 +240,313 @@ def _teks(v) -> str:
     if isinstance(v, str):
         return v.strip()
     return str(v).strip()
+
+
+# Excel yang menyimpan ulang CSV menulis Deal/Login sebagai teks "1.41E+08".
+# Itu bukan angka utuh lagi; dedup berdasarkan Deal ID akan salah.
+_NOTASI = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)[eE][+-]?\d+$")
+_WAKTU_FMT = ("%Y.%m.%d %H:%M:%S.%f", "%Y.%m.%d %H:%M:%S")
+
+
+def _rapikan_baris(row):
+    """Ganti line break di dalam sel dengan satu spasi. Baris bersih tidak disalin."""
+    baru = None
+    for i, v in enumerate(row):
+        if isinstance(v, str) and ("\n" in v or "\r" in v):
+            if baru is None:
+                baru = list(row)
+            baru[i] = re.sub(r"[ \t]*[\r\n]+[ \t]*", " ", v).strip()
+    return (baru if baru is not None else row), baru is not None
+
+
+def _nomor_deal(v) -> bool:
+    return re.fullmatch(r"\d+", _teks(v)) is not None
+
+
+def _tolak_notasi(path, nomor, *pasangan):
+    for label, value in pasangan:
+        teks = _teks(value)
+        if teks and _NOTASI.fullmatch(teks):
+            sys.exit(
+                f"STOP: {label} in '{path.name}', row {nomor} is scientific notation "
+                f"{teks!r}. Digits were already lost. Upload the original export, "
+                f"not a file re-saved by Excel."
+            )
+
+
+def _nilai(row, idx, nama):
+    if nama not in idx:
+        return ""
+    i = idx[nama]
+    if i < 0 or i >= len(row):
+        return ""
+    return row[i]
+
+
+def _catat_perbaikan(info, row, idx):
+    info["repaired"] = info.get("repaired", 0) + 1
+    login = _teks(_nilai(row, idx, "Login"))
+    if login:
+        info.setdefault("repaired_logins", set()).add(login)
+
+
+def _stop_putus(path, nomor, row, idx, alasan, lebar=None):
+    login = _teks(_nilai(row, idx, "Login")) or "(unknown)"
+    lebarnya = ""
+    if lebar is not None and len(row) != lebar:
+        lebarnya = f" expected {lebar} columns, found {len(row)} columns."
+    sys.exit(
+        f"STOP: line break inside a field in '{path.name}' could not be repaired "
+        f"at row {nomor} (Login {login}). {alasan}.{lebarnya}"
+    )
+
+
+def _sambung(kiri, kanan):
+    """Sambung dua pecahan baris. Sel di perbatasan digabung dengan satu spasi."""
+    kiri = list(kiri)
+    kanan = list(kanan)
+    if not kiri:
+        return kanan
+    if not kanan:
+        return kiri
+    a = _teks(kiri[-1])
+    b = _teks(kanan[0])
+    tengah = f"{a} {b}".strip() if a and b else (a or b)
+    return kiri[:-1] + [tengah] + kanan[1:]
+
+
+def _baris_kosong(row) -> bool:
+    return not any(_teks(c) for c in row)
+
+
+def _sel_kosong(v) -> bool:
+    return _teks(v) == ""
+
+
+def _deal_masuk_akal(row, idx) -> bool:
+    """Deal utuh, atau baris footer tanpa Deal dan Login.
+
+    Sambungan yang menempelkan sisa komentar ke Deal baris berikutnya
+    ("sisa 200734021") ditolak di sini, bukan dipakai diam-diam.
+    """
+    deal = _teks(_nilai(row, idx, "Deal"))
+    login = _teks(_nilai(row, idx, "Login"))
+    if re.fullmatch(r"\d+", deal):
+        return True
+    return deal == "" and login == ""
+
+
+def _keluarkan(info, nomor, row, idx, lebar, sudah):
+    row = list(row)
+    if lebar and len(row) < lebar:
+        row.extend([None] * (lebar - len(row)))
+    row, berubah = _rapikan_baris(row)
+    if sudah or berubah:
+        _catat_perbaikan(info, row, idx)
+    return nomor, row
+
+
+def _alirkan_csv(reader, lebar, path, idx, info, nomor_mulai):
+    """Satukan baris CSV yang terputus karena line break tanpa kutip.
+
+    Satu baris penuh ditahan supaya sisa komentar (satu sel, bukan Deal)
+    masih bisa menempel. Baris yang kolomnya kurang digabung ke depan sampai
+    lebarnya sama dengan header.
+    """
+    nomor = nomor_mulai
+    penuh = None
+    pendek = None
+
+    def flush():
+        nonlocal penuh
+        if penuh is None:
+            return None
+        hasil = _keluarkan(info, penuh["nomor"], penuh["row"], idx, lebar, penuh["sudah"])
+        penuh = None
+        return hasil
+
+    for row in reader:
+        nomor += 1
+        if _baris_kosong(row):
+            if pendek is not None:
+                _stop_putus(path, pendek["nomor"], pendek["row"], idx,
+                            "a blank line interrupted the row")
+            continue
+        if pendek is not None:
+            gabung = _sambung(pendek["row"], row)
+            if len(gabung) > lebar:
+                _stop_putus(path, pendek["nomor"], pendek["row"], idx,
+                            "the joined row has more columns than the header")
+            if len(gabung) == lebar:
+                if not _deal_masuk_akal(gabung, idx):
+                    _stop_putus(path, pendek["nomor"], pendek["row"], idx,
+                                "the joined row does not match the header")
+                yield _keluarkan(info, pendek["nomor"], gabung, idx, lebar, True)
+                pendek = None
+                continue
+            pendek = {"nomor": pendek["nomor"], "row": gabung}
+            continue
+        if len(row) < lebar:
+            teks0 = _teks(row[0]) if row else ""
+            if len(row) == 1 and teks0 and _NOTASI.fullmatch(teks0):
+                hasil = flush()
+                if hasil is not None:
+                    yield hasil
+                _tolak_notasi(path, nomor, ("Deal", row[0]))
+            if (penuh is not None and len(row) == 1 and not _nomor_deal(row[0])
+                    and not (teks0 and _NOTASI.fullmatch(teks0))):
+                penuh["row"] = _sambung(penuh["row"], row)
+                penuh["sudah"] = True
+                continue
+            hasil = flush()
+            if hasil is not None:
+                yield hasil
+            pendek = {"nomor": nomor, "row": list(row)}
+            continue
+        if len(row) > lebar:
+            hasil = flush()
+            if hasil is not None:
+                yield hasil
+            _stop_putus(path, nomor, row, idx,
+                        "the row has more columns than the header")
+        hasil = flush()
+        if hasil is not None:
+            yield hasil
+        penuh = {"nomor": nomor, "row": list(row), "sudah": False}
+    if pendek is not None:
+        _stop_putus(path, pendek["nomor"], pendek["row"], idx,
+                    "the file ended before the row was complete", lebar)
+    hasil = flush()
+    if hasil is not None:
+        yield hasil
+
+
+def _waktu_ok(nilai) -> bool:
+    if isinstance(nilai, datetime.datetime) or isinstance(nilai, datetime.date):
+        return True
+    teks = _teks(nilai)
+    if not teks:
+        return False
+    for fmt in _WAKTU_FMT:
+        try:
+            datetime.datetime.strptime(teks, fmt)
+            return True
+        except ValueError:
+            pass
+    return False
+
+
+def _terakhir_isi(row) -> int:
+    for i in range(len(row) - 1, -1, -1):
+        if not _sel_kosong(row[i]):
+            return i
+    return -1
+
+
+def _baris_lanjutan(row) -> bool:
+    """Baris kedua dari CSV yang dipecah Excel: sel Deal-nya bukan nomor deal."""
+    if not row or _sel_kosong(row[0]):
+        return False
+    if _nomor_deal(row[0]):
+        return False
+    teks = _teks(row[0])
+    if teks and _NOTASI.fullmatch(teks):
+        return False
+    return True
+
+
+def _gabung_dua(row1, row2, lebar):
+    kiri = list(row1) + [None] * max(0, lebar - len(row1))
+    kanan = list(row2)
+    while kanan and _sel_kosong(kanan[-1]):
+        kanan.pop()
+    if not kanan:
+        return None
+    potong = _terakhir_isi(kiri)
+    if potong < 0:
+        gabung = kanan
+    else:
+        a = _teks(kiri[potong])
+        b = _teks(kanan[0])
+        tengah = f"{a} {b}".strip() if a and b else (a or b)
+        gabung = kiri[:potong] + [tengah] + kanan[1:]
+    if len(gabung) > lebar:
+        return None
+    if len(gabung) < lebar:
+        gabung.extend([None] * (lebar - len(gabung)))
+    return gabung
+
+
+def _rekonstruksi_valid(row, idx) -> bool:
+    if not _nomor_deal(_nilai(row, idx, "Deal")):
+        return False
+    waktu = [nama for nama in ("Time", "Open Time", "Close Time") if nama in idx]
+    if not any(_waktu_ok(_nilai(row, idx, nama)) for nama in waktu):
+        return False
+    if "Entry" in idx:
+        entry = _teks(_nilai(row, idx, "Entry")).lower()
+        if entry not in ("", "in", "out"):
+            return False
+    return True
+
+
+def _terlihat_putus(row, idx, lebar) -> bool:
+    """Deal atau Login terisi, tetapi waktu, tipe, dan entry masih kosong.
+
+    Itu baris pertama dari export yang dipecah Excel. Baris 'Total' tidak
+    masuk ke sini: Deal-nya bukan angka dan Login-nya kosong.
+    """
+    row = list(row) + [None] * max(0, lebar - len(row))
+    deal = _teks(_nilai(row, idx, "Deal"))
+    login = _teks(_nilai(row, idx, "Login"))
+    if not (re.fullmatch(r"\d+", deal) or login):
+        return False
+    for nama in ("Time", "Open Time", "Close Time", "Type", "Entry"):
+        if nama in idx and not _sel_kosong(_nilai(row, idx, nama)):
+            return False
+    return True
+
+
+def _alirkan_xlsx(sumber, lebar, path, idx, info):
+    """Satu baris di depan. Baris penuh yang diikuti sisa nama disatukan.
+
+    Baris ringkasan 'Total' tidak menghentikan file: baris deal sebelumnya
+    tetap utuh, dan ringkasan diproses sendiri.
+    """
+    pending = None
+    for nomor, row in sumber:
+        if pending is None:
+            pending = (nomor, row)
+            continue
+        if _baris_lanjutan(row):
+            gabung = _gabung_dua(pending[1], row, lebar)
+            if gabung is not None and _rekonstruksi_valid(gabung, idx):
+                yield _keluarkan(info, pending[0], gabung, idx, lebar, True)
+                pending = None
+                continue
+            if _terlihat_putus(pending[1], idx, lebar):
+                _stop_putus(path, pending[0], pending[1], idx,
+                            "the next row does not complete the deal")
+        elif _terlihat_putus(pending[1], idx, lebar):
+            _stop_putus(path, pending[0], pending[1], idx,
+                        "the next row does not complete the deal")
+        yield _keluarkan(info, pending[0], pending[1], idx, lebar, False)
+        pending = (nomor, row)
+    if pending is not None:
+        if _terlihat_putus(pending[1], idx, lebar):
+            _stop_putus(path, pending[0], pending[1], idx,
+                        "the file ended before the row was complete")
+        yield _keluarkan(info, pending[0], pending[1], idx, lebar, False)
+
+
+def _tulis_perbaikan(ringkasan, rekaman):
+    """Baris Verifikasi hanya kalau ada yang diperbaiki, supaya file bersih tetap sama."""
+    n = rekaman.get("repaired") or 0
+    if not n:
+        return
+    ringkasan[f"      {rekaman['nama']}: rows repaired (line break inside a field)"] = (
+        f"{n} rows; logins {_daftar_login(rekaman.get('repaired_logins') or ())}"
+    )
 
 
 def _norm(v) -> str:
@@ -717,16 +1040,25 @@ def _angka_longgar(v) -> float:
 
 def _iter_mt4(path: Path, info: dict):
     """(nomor_baris, row) untuk isi file, tanpa judul dan header."""
+    info.setdefault("repaired", 0)
+    info.setdefault("repaired_logins", set())
     skip = info.get("skip", 2)
+    header = info["header"]
+    idx = {name: i for i, name in enumerate(header)}
+    lebar = len(header)
     if info["kind"] == "xlsx":
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
             it = wb.worksheets[0].iter_rows(values_only=True)
             for _ in range(skip):
                 next(it, None)
-            for nomor, row in enumerate(it, start=skip + 1):
-                if any(v is not None and _teks(v) != "" for v in row):
-                    yield nomor, list(row)
+
+            def sumber():
+                for nomor, row in enumerate(it, start=skip + 1):
+                    if any(v is not None and _teks(v) != "" for v in row):
+                        yield nomor, list(row)
+
+            yield from _alirkan_xlsx(sumber(), lebar, path, idx, info)
         finally:
             wb.close()
         return
@@ -735,11 +1067,7 @@ def _iter_mt4(path: Path, info: dict):
         reader = csv.reader(f, delimiter=info["pemisah"])
         for _ in range(skip):
             next(reader, None)
-        nomor = skip
-        for row in reader:
-            nomor += 1
-            if any(_teks(c) for c in row):
-                yield nomor, row
+        yield from _alirkan_csv(reader, lebar, path, idx, info, skip)
 
 
 def _mata_uang_mt4(path: Path, mt4_currency):
@@ -798,6 +1126,7 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
         total += 1
         if len(row) < len(header):
             row = list(row) + [""] * (len(header) - len(row))
+        _tolak_notasi(path, nomor, ("Deal", sel(row, "Deal")), ("Login", sel(row, "Login")))
         deal_id = _teks(sel(row, "Deal"))
         login = _teks(sel(row, "Login"))
         if not deal_id and not login:
@@ -861,7 +1190,9 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
             "currency": currency, "currency_column": kolom_uang is not None,
             "used_mapping": dipakai_peta, "sources": sumber_baris,
             "source_logins": sumber_login, "disagree": beda, "raw": raw,
-            "sheets": {}, "sheets_dilewati": []}
+            "sheets": {}, "sheets_dilewati": [],
+            "repaired": info.get("repaired", 0),
+            "repaired_logins": info.get("repaired_logins") or set()}
 
 
 def _normalisasi_satu_file(path: Path, deals, pakai_baris):
@@ -877,6 +1208,7 @@ def _normalisasi_satu_file(path: Path, deals, pakai_baris):
         if len(row) != len(idx):
             sys.exit(f"STOP: invalid column count in '{path.name}', row {nomor}: "
                      f"expected {len(idx)} columns, found {len(row)} columns")
+        _tolak_notasi(path, nomor, ("Deal", row[idx["Deal"]]), ("Login", row[idx["Login"]]))
         entry = _teks(row[idx["Entry"]]).lower()
         if entry not in ENTRY_DIPAKAI:
             lain += 1
@@ -923,7 +1255,9 @@ def _normalisasi_satu_file(path: Path, deals, pakai_baris):
     return {"nama": path.name, "total": total, "out": n_out, "in": n_in,
             "lain": lain, "dup_out": dup_out, "dup_in": dup_in,
             "duplikat": dup_out + dup_in, "sheets": info["dibaca"],
-            "sheets_dilewati": info["dilewati"]}
+            "sheets_dilewati": info["dilewati"],
+            "repaired": info.get("repaired", 0),
+            "repaired_logins": info.get("repaired_logins") or set()}
 
 
 def _tambah_agregat(kelompok, b, level, pakai_fx=False):
@@ -1132,6 +1466,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
                 f"currency {how}, "
                 f"{r['balance']} balance/credit dropped, {r['cancelled']} cancelled pending dropped, "
                 f"{r['footer']} footer/summary dropped")
+            _tulis_perbaikan(ringkasan, r)
             continue
         ringkasan[f"  - {r['nama']}"] = (
             f"{r['total']} rows, {r['out']} 'out' + {r['in']} 'in' kept"
@@ -1144,6 +1479,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
         if not (r["out"] or r["in"]):
             ringkasan[f"  - {r['nama']}"] = f"{r['total']} rows, 0 'out' + 0 'in' (no usable rows)"
             yellow_labels.add(f"  - {r['nama']}")
+        _tulis_perbaikan(ringkasan, r)
     if peta_paths:
         n_cent = sum(1 for mata in akun.values() if mata == "USC")
         ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
