@@ -1040,6 +1040,32 @@ def kvb_template_file():
     return send_file(f, as_attachment=True) if f.is_file() else abort(404)
 
 
+def _kirim_template_segregator(nama):
+    from segregator_templates import NAMA_BERKAS, bytes_template
+    if nama not in NAMA_BERKAS:
+        abort(404)
+    return send_file(
+        bytes_template(nama),
+        as_attachment=True,
+        download_name=NAMA_BERKAS[nama],
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.get("/tool/segregate/template/<nama>")
+def template_segregator_dpm(nama):
+    if nama not in ("mt5", "fx"):
+        abort(404)
+    return _kirim_template_segregator(nama)
+
+
+@app.get("/kvb/tool/segregate/template/<nama>")
+def template_segregator_kvb(nama):
+    if nama not in ("mt5", "mt4", "accounts", "fx"):
+        abort(404)
+    return _kirim_template_segregator(nama)
+
+
 if __name__ == "__main__":
     # BAHAYA KALAU DEPLOY: debug=True membuka debugger Werkzeug, dan siapa pun yang
     # memicu error bisa menjalankan kode Python di server. Sekarang MATI secara
