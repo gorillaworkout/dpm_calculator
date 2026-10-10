@@ -36,6 +36,7 @@ import argparse
 import datetime
 import os
 import re
+import statistics
 import threading
 import time
 import sys
@@ -88,6 +89,14 @@ EXTRA_FEES = {
 # memakainya. Rate yang kosong di tabel fee brand itu harus kelihatan (merah +
 # 'Missing Data'), bukan diisi dari angka DPM.
 PAKAI_EXTRA_FEES = True
+
+# Fitur di bawah ini hanya menyala lewat flag (app.py memasangnya di KVB_ARG).
+# Default mati, jadi keluaran DPM tidak berubah.
+# USD_SHADOW: {"CNY": {"CHIPPAY", "EP", ...}} — blok USD terpisah di bawah channel itu.
+USD_SHADOW = {}
+FEE_CURRENCY_SUFFIX = False
+WARN_HIGH_PCT = False
+CNY_RATE_CHECK = False
 
 # Nama gateway di sheet data -> nama gateway di tabel fee (semua di-UPPERCASE)
 GATEWAY_ALIAS = {
@@ -225,8 +234,51 @@ SALDO_AWAL_CHANNEL = None
 KODE_CURRENCY_DIKENAL = {
     "VND", "INR", "JPY", "LAK", "THB", "TRY", "PKR", "EGP", "KES", "KRW",
     "AED", "BRL", "MXN", "NGN", "ZAR", "PHP", "KHR", "USDT", "USD", "SGD",
-    "USDC", "UZS", "MYR", "LKR",
+    "USDC", "UZS", "MYR", "LKR", "CNY", "IDR",
 }
+
+
+# 'USD(CNY)' = saldo pembuka blok USD bayangan untuk channel CNY itu.
+# Bukan saldo USD sungguhan. Kuncinya tidak bisa menyatu dengan channel USD.
+_RE_USD_SHADOW_CUR = re.compile(r"^USD\s*\(\s*([A-Z0-9]{3,5})\s*\)$")
+_RE_BARIS_USD_SHADOW = re.compile(
+    r"(.+?)\s+USD\s*\(\s*([A-Za-z0-9]{3,5})\s*\)\s+(\(?-?[\d.,]+\)?|--|-)\s*$",
+    re.I)
+_RE_KUNCI_SHADOW = re.compile(r"^USD\(([A-Z0-9]+)\)$")
+
+
+def currency_shadow_key(teks):
+    """'USD(CNY)' / 'USD (CNY)' -> 'USD(CNY)'. Selain itu None."""
+    m = _RE_USD_SHADOW_CUR.match(norm(teks))
+    if not m:
+        return None
+    return f"USD({m.group(1)})"
+
+
+def kunci_shadow(source_cur):
+    """Kunci currency internal blok USD. Tidak pernah sama dengan 'USD'."""
+    return f"USD({norm(source_cur)})"
+
+
+def shadow_sumber(cur_key):
+    """'USD(CNY)' -> 'CNY'. Currency biasa -> None."""
+    if not cur_key:
+        return None
+    m = _RE_KUNCI_SHADOW.match(str(cur_key))
+    return m.group(1) if m else None
+
+
+def pecah_channel_currency(cur):
+    """'ChipPay CNY' -> ('ChipPay', 'CNY'); 'ChipPay USD(CNY)' -> channel + token.
+
+    None kalau ini bukan channel dan currency yang menyatu jadi satu sel.
+    """
+    kata = str(cur).split()
+    if len(kata) < 2:
+        return None
+    if currency_shadow_key(kata[-1]) or norm(kata[-1]) in KODE_CURRENCY_DIKENAL:
+        return " ".join(kata[:-1]), kata[-1]
+    return None
 
 
 def baca_tabel_saldo_channel(teks):
@@ -240,6 +292,16 @@ def baca_tabel_saldo_channel(teks):
                           BRL        5,399.16      <- sel channel DIGABUNG di Excel
                           MXN        26,852.34
 
+    Saldo pembuka blok USD untuk gateway CNY (bukan channel USD sungguhan):
+
+        ChipPay USD(CNY) 12,345.67
+        ChipPay   USD(CNY)   12,345.67
+        ChipPay <TAB> USD (CNY) <TAB> 12,345.67
+
+    'USD(CNY)' dan 'USD (CNY)' sama. Baris 'ChipPay / USD / angka' tetap saldo
+    USD sungguhan dan tidak masuk blok ini. Kalau baris USD(CNY) tidak ditempel,
+    blok itu mulai dari nol.
+
     Sel channel yang digabung di Excel jadi KOSONG waktu ditempel, jadi nama channel
     terakhir DIBAWA TURUN. Angka boleh '1.058.257,96', '(4.976,10)' (kurung = minus),
     atau '-' (dianggap nol). Baris header dan baris tanpa angka dilewati.
@@ -251,7 +313,11 @@ def baca_tabel_saldo_channel(teks):
         b = baris.strip()
         if not b:
             continue
-        if "\t" in b:
+        m_shadow = _RE_BARIS_USD_SHADOW.fullmatch(b)
+        if m_shadow and "\t" not in b and ";" not in b and not re.search(r"\s{2,}", b):
+            bagian = [m_shadow.group(1).strip(),
+                      f"USD({norm(m_shadow.group(2))})", m_shadow.group(3)]
+        elif "\t" in b:
             bagian = [x.strip() for x in baris.split("\t")]
         elif ";" in b:
             bagian = [x.strip() for x in b.split(";")]
@@ -277,9 +343,9 @@ def baca_tabel_saldo_channel(teks):
             # Deteksi: kata TERAKHIR di 'cur' adalah kode currency yang
             # dikenal DAN ada kata lain sebelumnya -> itu memang channel+currency
             # yang menyatu, pisahkan.
-            kata = cur.split()
-            if len(kata) > 1 and norm(kata[-1]) in KODE_CURRENCY_DIKENAL:
-                ch, cur = " ".join(kata[:-1]), kata[-1]
+            pecah = pecah_channel_currency(cur)
+            if pecah:
+                ch, cur = pecah
         else:
             continue
         if norm(cur) in ("CURRENCY", "") or norm(ch) in ("PAYMENT CHANNEL",):
@@ -293,8 +359,10 @@ def baca_tabel_saldo_channel(teks):
             saldo.replace("(", "-").replace(")", ""))
         if v is None:
             continue
-        out[(norm(cur), kunci_channel(cur, channel))] = out.get(
-            (norm(cur), kunci_channel(cur, channel)), 0.0) + v
+        cur_key = currency_shadow_key(cur) or norm(cur)
+        sumber = shadow_sumber(cur_key)
+        k_ch = kunci_channel(sumber or cur, channel)
+        out[(cur_key, k_ch)] = out.get((cur_key, k_ch), 0.0) + v
         n_baris += 1
     return out, n_baris
 
@@ -677,7 +745,7 @@ REQUIRED_COLUMNS = ("CURRENCY", "TRANSACTION", "PAYMENT GATEWAY", "USD")
 
 CURRENCY_SUFFIXES = ("VND", "PHP", "USD", "USDT", "INR", "THB", "KHR", "LAK",
                      "MXN", "NGN", "BRL", "ZAR", "EGP", "TRY", "KRW", "JPY", "AED",
-                     "UZS", "PKR", "KES", "SGD", "USDC")
+                     "UZS", "PKR", "KES", "SGD", "USDC", "CNY", "IDR", "MYR")
 
 # Format angka di Excel. Tanda # = tampilkan kalau perlu, 0 = selalu tampilkan.
 # Jadi "#,##0.##" -> 8,100 (bukan 8,100.00) dan 0.18 tetap 0.18
@@ -927,8 +995,10 @@ def _baca_satu_sheet_fee(ws):
         for x in row[max(c_dep or 0, c_wd or 0) + 1:][:4]:
             if isinstance(x, str) and x.strip().startswith("+"):
                 legacy = to_float(x.strip().lstrip("+")) or 0.0
+        dep_raw = row[c_dep] if c_dep is not None and len(row) > c_dep else None
+        wd_raw = row[c_wd] if c_wd is not None and len(row) > c_wd else None
         out[(cur, k_gw)] = {"deposit": dep, "withdrawal": wd, "fixed": legacy,
-                            "nama": gw}
+                            "nama": gw, "dep_raw": dep_raw, "wd_raw": wd_raw}
     return out, h_idx + 1
 
 
@@ -974,6 +1044,8 @@ def load_fee_table(wb, pakai_extra_fees=None):
                 "nama": v.get("nama") or lama.get("nama", ""),
                 "asal": jejak,
                 "ditimpa": catat,
+                "dep_raw": v.get("dep_raw") if v["deposit"] is not None else lama.get("dep_raw"),
+                "wd_raw": v.get("wd_raw") if v["withdrawal"] is not None else lama.get("wd_raw"),
             }
         print(f"         sheet fee {nama!r} (header baris {hrow - 1}): "
               f"{len(bagian)} baris -> {baru} baru, {timpa} menimpa")
@@ -1000,8 +1072,10 @@ def load_fee_table(wb, pakai_extra_fees=None):
                                      "ditimpa": []})
         if row["deposit"] is None and d is not None:
             row["deposit"] = baca_rate(d)
+            row["dep_raw"] = d
         if row["withdrawal"] is None and w is not None:
             row["withdrawal"] = baca_rate(w)
+            row["wd_raw"] = w
     return table
 
 
@@ -1033,6 +1107,17 @@ def lookup_fee(table, currency, gateway, kind):
     # Gateway lain yang tidak ketemu sengaja dibiarkan kosong + merah.
     if FALLBACK_TO_OTHER and gw in LITERAL_OTHER_NAMES:
         cands.append(("OTHER", "literal-other"))
+    # PA + PKR -> baris fee 'PA-PKR'. Hanya kalau flag menyala (KVB). Pencocokan
+    # exact / alias / suffix di atas tetap menang lebih dulu.
+    if FEE_CURRENCY_SUFFIX:
+        sudah = {c for c, _how in cands if c}
+        for dasar in (gw, strip_currency_suffix(gw, cur)):
+            if not dasar:
+                continue
+            for bentuk in (f"{dasar}-{cur}", f"{dasar} {cur}"):
+                if bentuk not in sudah:
+                    cands.append((bentuk, "currency-suffix"))
+                    sudah.add(bentuk)
     for cand, how in cands:
         if not cand:
             continue
@@ -1774,6 +1859,7 @@ def baca_fund_transfer(wb, rates=None, xero_dates=None, report=None):
             elif abs(lama - baru) > 0.005:
                 n_koreksi += 1
             t["usd"] = baru
+            t["_xero_usd_computed"] = True
             if c_usd is not None:                       # tulis balik ke sheet
                 sel = ws.cell(row=t["_baris"], column=c_usd + 1, value=baru)
                 sel.number_format = FMT_MONEY
@@ -1979,6 +2065,407 @@ def baris_pesan_jwallet_kosong(rr, n_trx):
     return rr + 1 if n_trx == 0 else None
 
 
+def parse_usd_shadow(teks):
+    """'CNY:CHIPPAY,EP,UPAY,ZPAY' -> {'CNY': {'CHIPPAY', 'EP', 'UPAY', 'ZPAY'}}.
+
+    Beberapa grup dipisah titik-koma. Nama channel dicocokkan lewat kunci_gw
+    (spasi dan tanda baca dibuang), sama dengan kunci_channel.
+    """
+    out = {}
+    for grup in str(teks or "").split(";"):
+        grup = grup.strip()
+        if not grup:
+            continue
+        if ":" not in grup:
+            sys.exit(f"--usd-shadow harus berbentuk CNY:CHIPPAY,EP,UPAY,ZPAY "
+                     f"(dapat {grup!r})")
+        cur, _, nama = grup.partition(":")
+        cur = norm(cur)
+        if not cur:
+            sys.exit(f"--usd-shadow tanpa kode currency: {grup!r}")
+        kunci = set()
+        for nama_ch in nama.split(","):
+            nama_ch = nama_ch.strip()
+            if nama_ch:
+                kunci.add(kunci_gw(nama_ch))
+        if not kunci:
+            sys.exit(f"--usd-shadow tanpa nama channel: {grup!r}")
+        out.setdefault(cur, set()).update(kunci)
+    if not out:
+        sys.exit("--usd-shadow kosong. Contoh: CNY:CHIPPAY,EP,UPAY,ZPAY")
+    return out
+
+
+def channel_ada_shadow(currency, gateway):
+    """Kunci channel kalau baris ini masuk blok USD bayangan, selain itu None."""
+    cur = norm(currency)
+    daftar = USD_SHADOW.get(cur)
+    if not daftar or not gateway:
+        return None
+    k = kunci_channel(currency, gateway)
+    return k if k in daftar else None
+
+
+def _catat_lewati_ft(report, t, sisi):
+    report.setdefault("usd_shadow_ft_skip", []).append({
+        "date": t.get("tgl"),
+        "channel": t.get("channel") if sisi == "out" else t.get("penerima"),
+        "currency": t.get("currency") if sisi == "out" else (t.get("tujuan_cur") or t.get("currency")),
+        "side": sisi,
+        "jumlah": t.get("jumlah") if sisi == "out" else t.get("tujuan_jumlah"),
+    })
+
+
+def tambah_usd_shadow(agg, report, ftt):
+    """Salin mutasi CNY (dan currency lain di --usd-shadow) ke blok USD terpisah.
+
+    Deposit/Withdrawal = kolom USD. Charges = Handling Fee x (USD/Transaction).
+    Fund transfer hanya kalau Xero USD sisi kirim benar-benar dihitung di run ini.
+    """
+    if not USD_SHADOW:
+        return
+    for rec in report.get("records") or []:
+        cur = norm(rec.get("Currency"))
+        gw = str(rec.get("Payment Gateway") or "").strip()
+        k_ch = channel_ada_shadow(cur, gw)
+        if not k_ch:
+            continue
+        d = as_date(rec.get("Date"))
+        if not d:
+            continue
+        usd = to_float(rec.get("USD"))
+        tx = to_float(rec.get("Transaction"))
+        fee = to_float(rec.get("Handling Fee"))
+        if tx is None or tx == 0 or usd is None:
+            if tx is None:
+                alasan = "Transaction is missing"
+            elif tx == 0:
+                alasan = "Transaction is 0"
+            else:
+                alasan = "USD is missing"
+            report.setdefault("usd_shadow_gap", []).append({
+                "ticket": rec.get("Ticket"),
+                "date": d,
+                "gateway": gw,
+                "currency": cur,
+                "tx": tx,
+                "usd": usd,
+                "reason": alasan,
+            })
+            continue
+        kunci = (d, kunci_shadow(cur), k_ch)
+        slot = agg[kunci]
+        slot["_nama"] = slot.get("_nama") or gw
+        slot["_shadow_src"] = cur
+        charge = fee * (usd / tx) if fee else 0.0
+        if rec.get("Type") == "withdrawal":
+            slot["wd"] += usd
+            if charge:
+                slot["wd_fee"] += charge
+        else:
+            slot["dep"] += usd
+            if charge:
+                slot["dep_fee"] += charge
+
+    for t in (ftt or []):
+        usd = t.get("usd") if t.get("_xero_usd_computed") else None
+        sisi = []
+        if t.get("channel") and not lewati_channel(t.get("currency"), t["channel"]):
+            k_ch = channel_ada_shadow(t.get("currency"), t["channel"])
+            if k_ch:
+                sisi.append(("out", t.get("currency"), t["channel"], k_ch, 1))
+        ch_in = t.get("penerima")
+        cur_in = t.get("tujuan_cur") or t.get("currency")
+        if ch_in and not lewati_channel(cur_in, ch_in):
+            k_ch = channel_ada_shadow(cur_in, ch_in)
+            if k_ch:
+                sisi.append(("in", cur_in, ch_in, k_ch, -1))
+        for arah, cur_s, ch, k_ch, tanda in sisi:
+            if usd is None:
+                _catat_lewati_ft(report, t, arah)
+                continue
+            kunci = (t["tgl"], kunci_shadow(cur_s), k_ch)
+            slot = agg[kunci]
+            slot["_nama"] = slot.get("_nama") or ch
+            slot["_shadow_src"] = norm(cur_s)
+            slot["ft"] += tanda * usd
+
+
+def _angka_persen_polos(raw):
+    """Angka polos 8 atau '8' -> 8.0. '8%' / '1.5%+50' -> None."""
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    if isinstance(raw, str) and re.fullmatch(r"\d+(?:\.\d+)?", raw.strip()):
+        return float(raw.strip())
+    return None
+
+
+def kumpulkan_rate_tinggi(fee_table):
+    """Teks peringatan untuk sel persen yang terbaca >= 100%. Perhitungan tidak diubah."""
+    hasil = []
+    for (cur, _k), v in sorted(fee_table.items(), key=lambda x: (x[0][0], x[1].get("nama") or "")):
+        for sisi, label, mentah_k in (
+                ("deposit", "deposit", "dep_raw"),
+                ("withdrawal", "withdrawal", "wd_raw")):
+            komp = v.get(sisi)
+            if not komp or komp.get("pct") is None or komp["pct"] < 1:
+                continue
+            nama = v.get("nama") or _k
+            angka = _angka_persen_polos(v.get(mentah_k))
+            if angka is None:
+                angka = komp["pct"]
+            hasil.append(
+                f"{cur}-{nama} {label} rate {angka:g} = {angka * 100:g}%. "
+                f"If this is a flat fee per transaction, write +{angka:g}."
+            )
+    return hasil
+
+
+def analisa_cny_rate(records):
+    """Rasio USD/Transaction baris CNY terhadap median run ini, plus gaya kolom Rate."""
+    baris = []
+    for rec in records or []:
+        if norm(rec.get("Currency")) != "CNY":
+            continue
+        tx = to_float(rec.get("Transaction"))
+        usd = to_float(rec.get("USD"))
+        rate = to_float(rec.get("Rate"))
+        ratio = None
+        if tx not in (None, 0) and usd is not None:
+            ratio = usd / tx
+        baris.append({
+            "ticket": rec.get("Ticket"),
+            "date": rec.get("Date"),
+            "gateway": rec.get("Payment Gateway"),
+            "tx": tx,
+            "usd": usd,
+            "rate": rate,
+            "ratio": ratio,
+        })
+    usable = [x["ratio"] for x in baris if x["ratio"] is not None]
+    median = statistics.median(usable) if usable else None
+    outliers = []
+    if median is not None:
+        lo, hi = median * 0.98, median * 1.02
+        outliers = [x for x in baris if x["ratio"] is not None and not (lo <= x["ratio"] <= hi)]
+    return {
+        "n": len(baris),
+        "median": median,
+        "outliers": outliers,
+        "x100": sum(1 for x in baris if x["rate"] is not None and x["rate"] >= 1),
+        "decimal": sum(1 for x in baris if x["rate"] is not None and x["rate"] < 1),
+        "blank": sum(1 for x in baris if x["rate"] is None),
+    }
+
+
+def pesan_fee_suffix(report):
+    """'PA (PKR) used fee row PA-PKR' -> jumlah baris. Kosong kalau tidak ada fallback."""
+    jumlah = Counter()
+    for kunci, n in (report.get("fee_match") or {}).items():
+        if len(kunci) < 4 or kunci[3] != "currency-suffix":
+            continue
+        cur, gw, matched = kunci[0], kunci[1], kunci[2]
+        nama = matched.split("/", 1)[1] if isinstance(matched, str) and "/" in matched else matched
+        jumlah[f"{gw} ({cur}) used fee row {nama}"] += n
+    return jumlah
+
+
+def _rentang_pcb(agg):
+    if PERIODE_FILTER:
+        t0 = datetime.date(PERIODE_FILTER[0], PERIODE_FILTER[1], 1)
+        t1 = (datetime.date(PERIODE_FILTER[0] + (PERIODE_FILTER[1] == 12),
+                            PERIODE_FILTER[1] % 12 + 1, 1)
+              - datetime.timedelta(days=1))
+        return t0, t1
+    semua = [d for d, _c, _g in agg]
+    return min(semua), max(semua)
+
+
+def _kunci_blok_pcb(item):
+    """Channel, lalu currency aslinya, lalu blok USD bayangannya, lalu currency lain."""
+    cur, kgw = item
+    src = shadow_sumber(cur)
+    if src:
+        return (kgw, src, 1, cur)
+    if cur in USD_SHADOW and kgw in USD_SHADOW[cur]:
+        return (kgw, cur, 0, cur)
+    return (kgw, "\uffff" + cur, 0, cur)
+
+
+def _isi_sel_pcb_harian(ws, r, nilai, kuning):
+    n_kuning = 0
+    for c, val in enumerate(nilai, start=1):
+        sel = ws.cell(r, c, val)
+        if c == 1:
+            sel.number_format = "yyyy-mm-dd"
+        elif 4 <= c <= 10:
+            sel.number_format = FMT_ACC
+        if c == PCB_KOLOM.index("Withdrawal charges") + 1:
+            sel.fill = kuning
+            n_kuning += 1
+        elif c == PCB_KOLOM.index("Balance") + 1:
+            sel.fill = PatternFill("solid", fgColor="E2EFDA")
+    return n_kuning
+
+
+def tulis_pcb_urutan_lama(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning):
+    """Urutan lama: saldo pembuka di atas, lalu baris harian urut tanggal.
+
+    Dipakai kalau --usd-shadow tidak dipasang, supaya keluaran DPM tidak berubah.
+    """
+    r = 1
+    n_kuning = 0
+    if awal_ch:
+        asal_ch_txt = ("opening balance you pasted in" if SALDO_AWAL_CHANNEL
+                       else f"from sheet '{asal_ch}'")
+        for (cur, kgw) in sorted(awal_ch, key=lambda k: (k[0], nama_bersih.get(k, k[1]))):
+            r += 1
+            nilai = [tgl_ch, cur, nama_bersih.get((cur, kgw), kgw),
+                     None, None, None, None, None, None,
+                     awal_ch[(cur, kgw)],
+                     f"Opening balance ({asal_ch_txt}), as of {tgl_ch}."]
+            for c, val in enumerate(nilai, start=1):
+                sel = ws.cell(r, c, val)
+                sel.font = Font(bold=True)
+                sel.fill = kuning
+                if c == 1:
+                    sel.number_format = "yyyy-mm-dd"
+                elif 4 <= c <= 10:
+                    sel.number_format = FMT_ACC
+        print(f"         '{PCB_SHEET}': {len(awal_ch)} saldo pembuka ditampilkan di baris "
+              f"paling atas (per {tgl_ch})")
+
+    if awal_ch:
+        kombinasi = sorted(set((c, g) for _d, c, g in agg) | set(awal_ch))
+        t0, t1 = _rentang_pcb(agg)
+        urutan = [(t0 + datetime.timedelta(days=i), c, g)
+                  for i in range((t1 - t0).days + 1) for (c, g) in kombinasi]
+        print(f"         '{PCB_SHEET}': saldo dibawa turun tiap hari -- "
+              f"{len(kombinasi)} channel x {(t1 - t0).days + 1} tanggal")
+    else:
+        urutan = sorted(agg, key=lambda x: (x[0], x[1], x[2]))
+
+    for (d, cur, kgw) in urutan:
+        v = agg.get((d, cur, kgw), {})
+        r += 1
+        dep, dfee = v.get("dep", 0.0), v.get("dep_fee", 0.0)
+        ft, ffee = v.get("ft", 0.0), v.get("ft_fee", 0.0)
+        wd = v.get("wd", 0.0)
+        wfee = v.get("wd_fee", 0.0) or None
+        kunci_saldo = (cur, kgw)
+        saldo[kunci_saldo] += dep - dfee - ft - ffee - wd - (wfee or 0.0)
+        catatan = ("Withdrawal charges = withdrawal amount x withdrawal rate from the fee "
+                   "table. Confirmed 3 Sep 2026 as the formula to use; the finance team "
+                   "adjusts individual channels by hand afterwards where a gateway "
+                   "statement differs.")
+        if (cur, kgw) not in awal_ch:
+            catatan += (" No opening balance found for this channel, so Balance starts "
+                        "from zero.")
+        ada_mutasi = any((dep, dfee, ft, ffee, wd, wfee))
+        angka = ([dep, dfee, ft, ffee, wd, wfee] if ada_mutasi
+                 else [None, None, None, None, None, None])
+        nilai = [d, cur, nama_bersih.get((cur, kgw), v.get("_nama", kgw))] + angka + [
+                 saldo[kunci_saldo],
+                 catatan if ada_mutasi else "No movement on this day - balance carried "
+                                            "forward from the previous day."]
+        n_kuning += _isi_sel_pcb_harian(ws, r, nilai, kuning)
+    return r, n_kuning
+
+
+def tulis_pcb_menurut_channel(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning):
+    """Satu blok per channel. Blok USD(CNY) duduk langsung di bawah blok CNY-nya.
+
+    Currency yang tampil di blok bayangan adalah USD. Kunci internalnya tetap
+    USD(CNY), jadi tidak menyatu dengan channel USD sungguhan.
+    """
+    r = 1
+    n_kuning = 0
+    asal_ch_txt = ("opening balance you pasted in" if SALDO_AWAL_CHANNEL
+                   else f"from sheet '{asal_ch}'")
+    kombinasi = set((c, g) for _d, c, g in agg) | set(awal_ch or {})
+    urutan_blok = sorted(kombinasi, key=_kunci_blok_pcb)
+    if awal_ch:
+        t0, t1 = _rentang_pcb(agg)
+        hari = [t0 + datetime.timedelta(days=i) for i in range((t1 - t0).days + 1)]
+        print(f"         '{PCB_SHEET}': saldo dibawa turun tiap hari, dikelompokkan "
+              f"per channel -- blok USD duduk di bawah channel asalnya "
+              f"({len(kombinasi)} channel x {len(hari)} tanggal)")
+    else:
+        hari = None
+        print(f"         '{PCB_SHEET}': dikelompokkan per channel; blok USD "
+              f"duduk di bawah channel asalnya")
+
+    for cur, kgw in urutan_blok:
+        src = shadow_sumber(cur)
+        cur_tampil = "USD" if src else cur
+        if awal_ch and (cur, kgw) in awal_ch and tgl_ch:
+            r += 1
+            catatan_ob = f"Opening balance ({asal_ch_txt}), as of {tgl_ch}."
+            if src:
+                catatan_ob += (f" USD({src}) block for the {src} channel, shown here "
+                               f"as USD. Not a real USD balance. Paste syntax: "
+                               f"'Channel USD({src}) amount'.")
+            nilai = [tgl_ch, cur_tampil, nama_bersih.get((cur, kgw), kgw),
+                     None, None, None, None, None, None,
+                     awal_ch[(cur, kgw)], catatan_ob]
+            for c, val in enumerate(nilai, start=1):
+                sel = ws.cell(r, c, val)
+                sel.font = Font(bold=True)
+                sel.fill = kuning
+                if c == 1:
+                    sel.number_format = "yyyy-mm-dd"
+                elif 4 <= c <= 10:
+                    sel.number_format = FMT_ACC
+        if hari is not None:
+            tanggal = hari
+        else:
+            tanggal = sorted(d for d, c, g in agg if c == cur and g == kgw)
+        for d in tanggal:
+            v = agg.get((d, cur, kgw), {})
+            r += 1
+            dep, dfee = v.get("dep", 0.0), v.get("dep_fee", 0.0)
+            ft, ffee = v.get("ft", 0.0), v.get("ft_fee", 0.0)
+            wd = v.get("wd", 0.0)
+            wfee = v.get("wd_fee", 0.0) or None
+            kunci_saldo = (cur, kgw)
+            saldo[kunci_saldo] += dep - dfee - ft - ffee - wd - (wfee or 0.0)
+            if src:
+                catatan = (f"USD({src}) block for the {src} channel, shown as USD. "
+                           f"Deposit and Withdrawal come from the USD column. "
+                           f"Charges = Handling Fee x (USD/Transaction). "
+                           f"Fund transfer is the computed Xero USD on the sending "
+                           f"side, and only when that amount exists. "
+                           f"Not a real USD channel.")
+            else:
+                catatan = ("Withdrawal charges = withdrawal amount x withdrawal rate from the fee "
+                           "table. Confirmed 3 Sep 2026 as the formula to use; the finance team "
+                           "adjusts individual channels by hand afterwards where a gateway "
+                           "statement differs.")
+            if (cur, kgw) not in awal_ch:
+                catatan += (" No opening balance found for this channel, so Balance starts "
+                            "from zero.")
+            ada_mutasi = any((dep, dfee, ft, ffee, wd, wfee))
+            angka = ([dep, dfee, ft, ffee, wd, wfee] if ada_mutasi
+                     else [None, None, None, None, None, None])
+            if ada_mutasi:
+                status = catatan
+            elif src:
+                status = (f"No movement on this day - balance carried forward from the "
+                          f"previous day. USD({src}) block.")
+            else:
+                status = ("No movement on this day - balance carried forward from the "
+                          "previous day.")
+            nilai = [d, cur_tampil, nama_bersih.get((cur, kgw), v.get("_nama", kgw))] + angka + [
+                     saldo[kunci_saldo], status]
+            n_kuning += _isi_sel_pcb_harian(ws, r, nilai, kuning)
+    if awal_ch:
+        print(f"         '{PCB_SHEET}': saldo pembuka ikut di awal tiap blok channel "
+              f"(per {tgl_ch})")
+    return r, n_kuning
+
+
 def write_channel_sheets(wb, report, ftt):
     """Sheet 'Channel Balance' + 'J Wallet (calc)'.
 
@@ -2037,6 +2524,8 @@ def write_channel_sheets(wb, report, ftt):
             agg[k]["_nama"] = agg[k].get("_nama") or ch_in
             agg[k]["ft"] -= jml_in
 
+    tambah_usd_shadow(agg, report, ftt)
+
     if not agg:
         return 0, 0
 
@@ -2092,8 +2581,10 @@ def write_channel_sheets(wb, report, ftt):
     nama_bersih, bentrok = {}, defaultdict(set)
     for (d, cur, kgw), v in agg.items():
         asli = v.get("_nama", kgw)
-        nama_bersih[(cur, kgw)] = nama_channel_bersih(asli, cur)
-        bentrok[(cur, nama_channel_bersih(asli, cur))].add(kgw)
+        acuan = shadow_sumber(cur) or cur
+        bersih = nama_channel_bersih(asli, acuan)
+        nama_bersih[(cur, kgw)] = bersih
+        bentrok[(cur, bersih)].add(kgw)
     for (cur, nm), kunci in bentrok.items():
         if len(kunci) > 1:
             for kgw in kunci:
@@ -2101,106 +2592,15 @@ def write_channel_sheets(wb, report, ftt):
                             if c2 == cur and k2 == kgw)
                 nama_bersih[(cur, kgw)] = asli
 
-    r = 1
-    n_kuning = 0
-
-    # --- SALDO PEMBUKA DITAMPILKAN DI ATAS (diminta tim Malaysia 16 Sep 2026) ---
-    # Sama seperti sheet 'J Wallet': baris teratas tiap channel+currency menunjukkan
-    # saldo PENUTUP bulan sebelumnya (mis. 30 Juni untuk laporan Juli), supaya saldo
-    # pembuka yang tertarik dari 'Opening Balance'/tempelan bisa langsung dicocokkan.
-    # Sebelumnya angka itu cuma 'tersembunyi' di dalam Balance baris transaksi
-    # pertama, tidak ada titik pembanding yang terlihat.
-    if awal_ch:
-        asal_ch_txt = ("opening balance you pasted in" if SALDO_AWAL_CHANNEL
-                       else f"from sheet '{asal_ch}'")
-        for (cur, kgw) in sorted(awal_ch, key=lambda k: (k[0], nama_bersih.get(k, k[1]))):
-            r += 1
-            nilai = [tgl_ch, cur, nama_bersih.get((cur, kgw), kgw),
-                     None, None, None, None, None, None,
-                     awal_ch[(cur, kgw)],
-                     f"Opening balance ({asal_ch_txt}), as of {tgl_ch}."]
-            for c, val in enumerate(nilai, start=1):
-                sel = ws.cell(r, c, val)
-                sel.font = Font(bold=True)
-                sel.fill = kuning
-                if c == 1:
-                    sel.number_format = "yyyy-mm-dd"
-                elif 4 <= c <= 10:
-                    sel.number_format = FMT_ACC
-        print(f"         '{PCB_SHEET}': {len(awal_ch)} saldo pembuka ditampilkan di baris "
-              f"paling atas (per {tgl_ch})")
-
-    # --- BAWA TURUN SALDO HARIAN (permintaan tim Malaysia 15 Sep 2026) -----------
-    # Kalau saldo pembuka DIBERIKAN, sheet ini menampilkan SETIAP channel+currency di
-    # SETIAP tanggal bulan laporan, walau hari itu tidak ada mutasi -- saldonya
-    # tinggal dibawa turun. Tujuannya supaya pergerakan harian bisa dicocokkan dengan
-    # departemen lain hari per hari.
-    # Kalau TIDAK ada saldo pembuka, perilakunya seperti dulu (hanya baris yang ada
-    # mutasinya), karena baris nol tanpa saldo pembuka cuma jadi kebisingan.
-    if awal_ch:
-        kombinasi = sorted(set((c, g) for _d, c, g in agg) | set(awal_ch))
-        if PERIODE_FILTER:
-            t0 = datetime.date(PERIODE_FILTER[0], PERIODE_FILTER[1], 1)
-            t1 = (datetime.date(PERIODE_FILTER[0] + (PERIODE_FILTER[1] == 12),
-                                PERIODE_FILTER[1] % 12 + 1, 1)
-                  - datetime.timedelta(days=1))
-        else:
-            semua_d = [d for d, _c, _g in agg]
-            t0, t1 = min(semua_d), max(semua_d)
-        urutan = [(t0 + datetime.timedelta(days=i), c, g)
-                  for i in range((t1 - t0).days + 1) for (c, g) in kombinasi]
-        print(f"         '{PCB_SHEET}': saldo dibawa turun tiap hari -- "
-              f"{len(kombinasi)} channel x {(t1 - t0).days + 1} tanggal")
+    # --usd-shadow mengelompokkan sheet per channel dan menaruh blok USD
+    # langsung di bawah channel asalnya. Tanpa flag, urutan tanggal yang lama
+    # dipakai apa adanya (DPM).
+    if USD_SHADOW:
+        r, n_kuning = tulis_pcb_menurut_channel(
+            ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning)
     else:
-        urutan = sorted(agg, key=lambda x: (x[0], x[1], x[2]))
-
-    for (d, cur, kgw) in urutan:
-        v = agg.get((d, cur, kgw), {})
-        r += 1
-        dep, dfee = v.get("dep", 0.0), v.get("dep_fee", 0.0)
-        ft, ffee = v.get("ft", 0.0), v.get("ft_fee", 0.0)
-        wd = v.get("wd", 0.0)
-        # Withdrawal charges = jumlah Handling Fee baris withdrawal (Transaction x rate
-        # withdrawal dari tabel fee). Terbukti PERSIS untuk banyak channel:
-        # LAK/ThunderXpay 1,0000% di 132 hari, INR/MONETIX 4,5% di 36 hari,
-        # UZS/MONETIX 3,5% di 26 hari, INR/BeckPay 2,0% di 10 hari.
-        # Beberapa channel di sheet MEREKA angkanya lebih besar, TAPI itu bukan
-        # kelebihan yang salah: sel-sel itu memang DIKETIK MANUAL, tidak ada
-        # rumusnya. Dikonfirmasi tim 3 Sep 2026: "continue to use the same formula,
-        # our side will check with other reports and edit those that needs to be
-        # edited manually". Jadi rumus ini yang benar; KUNING sekarang cuma penanda
-        # bahwa kolom ini boleh disesuaikan tangan setelah laporan jadi.
-        wfee = v.get("wd_fee", 0.0) or None
-        kunci_saldo = (cur, kgw)
-        saldo[kunci_saldo] += dep - dfee - ft - ffee - wd - (wfee or 0.0)
-        catatan = ("Withdrawal charges = withdrawal amount x withdrawal rate from the fee "
-                   "table. Confirmed 3 Sep 2026 as the formula to use; the finance team "
-                   "adjusts individual channels by hand afterwards where a gateway "
-                   "statement differs.")
-        if (cur, kgw) not in awal_ch:
-            catatan += (" No opening balance found for this channel, so Balance starts "
-                        "from zero.")
-        # Baris TANPA mutasi selnya dikosongkan supaya 2.000-an baris bawa-turun
-        # tidak penuh '0,00'. Baris yang ADA mutasinya ditulis apa adanya seperti
-        # dulu -- termasuk nol -- supaya tidak mengubah keluaran yang sudah dipakai.
-        ada_mutasi = any((dep, dfee, ft, ffee, wd, wfee))
-        angka = ([dep, dfee, ft, ffee, wd, wfee] if ada_mutasi
-                 else [None, None, None, None, None, None])
-        nilai = [d, cur, nama_bersih.get((cur, kgw), v.get("_nama", kgw))] + angka + [
-                 saldo[kunci_saldo],
-                 catatan if ada_mutasi else "No movement on this day - balance carried "
-                                            "forward from the previous day."]
-        for c, val in enumerate(nilai, start=1):
-            sel = ws.cell(r, c, val)
-            if c == 1:
-                sel.number_format = "yyyy-mm-dd"
-            elif c >= 4 and c <= 10:
-                sel.number_format = FMT_ACC
-            if c == PCB_KOLOM.index("Withdrawal charges") + 1:
-                sel.fill = kuning
-                n_kuning += 1
-            elif c == PCB_KOLOM.index("Balance") + 1:
-                sel.fill = PatternFill("solid", fgColor="E2EFDA")
+        r, n_kuning = tulis_pcb_urutan_lama(
+            ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning)
     for kol, w in zip("ABCDEFGHIJK", (12, 10, 22, 16, 16, 16, 18, 16, 18, 18, 48)):
         ws.column_dimensions[kol].width = w
     ws.freeze_panes = "D2"
@@ -3054,10 +3454,154 @@ def write_missing_sheet(wb, report):
                 cell = ws.cell(r, c, v)
                 cell.border = box
                 cell.alignment = wrap
+
+    r = _tulis_missing_kvb(ws, r, report, box, wrap)
     return ws
 
 
-def write_legend_sheet(wb, date_cols_used):
+def _tulis_missing_kvb(ws, r, report, box, wrap):
+    """Bagian Missing Data yang hanya muncul kalau flag KVB-nya menyala.
+
+    Tanpa flag, fungsi ini tidak menulis satu sel pun.
+    """
+    if FEE_CURRENCY_SUFFIX:
+        r += 2
+        ws.cell(r, 2, "2c. FEE ROW MATCHED BY CURRENCY SUFFIX").font = \
+            Font(bold=True, size=12, color="C00000")
+        r += 1
+        pesan = pesan_fee_suffix(report)
+        if not pesan:
+            ws.cell(r, 2, "None - no fee was found via a gateway-currency name such as PA-PKR."
+                    ).font = Font(italic=True, color="008000")
+            r += 1
+        else:
+            _header(ws, r, ["Match", "", "Rows", "", "", "What happened"], "C00000")
+            for teks, n in pesan.most_common():
+                r += 1
+                isi = [teks, "", n, "", "",
+                       "An exact fee row was not found. The rate on the currency-suffixed "
+                       "row was used. An exact row still wins when both exist."]
+                for c, v in enumerate(isi, start=2):
+                    cell = ws.cell(r, c, v)
+                    cell.border = box
+                    cell.alignment = wrap
+                    if c == 2:
+                        cell.fill = FILL_WARN
+                ws.row_dimensions[r].height = 32
+
+    if WARN_HIGH_PCT:
+        r += 2
+        ws.cell(r, 2, "2d. PERCENTAGE RATES READ AS 100% OR MORE").font = \
+            Font(bold=True, size=12, color="C00000")
+        r += 1
+        tinggi = report.get("rate_tinggi") or []
+        if not tinggi:
+            ws.cell(r, 2, "None - no percentage cell was read as 100% or more.").font = \
+                Font(italic=True, color="008000")
+            r += 1
+        else:
+            ws.cell(r, 2, "The fee was still calculated from that percentage. "
+                          "The number was not changed. '+N' means a flat amount per transaction."
+                    ).font = Font(italic=True, size=10, color="C00000")
+            r += 1
+            for teks in tinggi:
+                ws.cell(r, 2, teks).font = Font(bold=True, color="9C0006")
+                ws.cell(r, 2).fill = FILL_WARN
+                ws.row_dimensions[r].height = 32
+                r += 1
+
+    if CNY_RATE_CHECK:
+        r += 2
+        ws.cell(r, 2, "5. CNY RATE CHECK").font = Font(bold=True, size=12, color="C00000")
+        r += 1
+        cek = report.get("cny_check") or {}
+        median = cek.get("median")
+        if not cek or not cek.get("n"):
+            ws.cell(r, 2, "No CNY rows in this run.").font = Font(italic=True, color="008000")
+            r += 1
+        else:
+            med_txt = f"{median:.6f}" if median is not None else "n/a"
+            ringkas = (f"CNY rows: {cek['n']}. "
+                       f"Rate column looks like x100 (~14.5): {cek['x100']}. "
+                       f"Rate column looks like ~0.145: {cek['decimal']}. "
+                       f"Rate blank: {cek['blank']}. "
+                       f"Median USD/Transaction: {med_txt}. "
+                       f"Rows outside ±2% of that median: {len(cek.get('outliers') or [])}.")
+            ws.cell(r, 2, ringkas).font = Font(size=10)
+            ws.row_dimensions[r].height = 32
+            r += 1
+            outliers = cek.get("outliers") or []
+            if not outliers:
+                ws.cell(r, 2, "None - every CNY row with both USD and Transaction is within "
+                              "±2% of the median ratio.").font = Font(italic=True, color="008000")
+                r += 1
+            else:
+                _header(ws, r, ["Ticket", "Date", "Gateway", "Transaction", "USD", "Rate",
+                                "USD/Transaction"], "C00000")
+                for item in outliers:
+                    r += 1
+                    isi = [item.get("ticket"), item.get("date"), item.get("gateway"),
+                           item.get("tx"), item.get("usd"), item.get("rate"), item.get("ratio")]
+                    for c, v in enumerate(isi, start=2):
+                        cell = ws.cell(r, c, v)
+                        cell.border = box
+                        cell.alignment = wrap
+                        if c == 3 and isinstance(v, (datetime.date, datetime.datetime)):
+                            cell.number_format = "yyyy-mm-dd"
+                        elif c in (5, 6, 7, 8) and isinstance(v, (int, float)):
+                            cell.number_format = FMT_RATE if c in (7, 8) else FMT_MONEY
+                    ws.cell(r, 2).fill = FILL_WARN
+
+    if USD_SHADOW:
+        r += 2
+        ws.cell(r, 2, "6. USD BLOCKS FOR SHADOWED CURRENCIES").font = \
+            Font(bold=True, size=12, color="C00000")
+        r += 1
+        daftar = ", ".join(
+            f"{cur}: {', '.join(sorted(chs))}" for cur, chs in sorted(USD_SHADOW.items()))
+        ws.cell(r, 2, "USD rows were added under these channels, shown as currency USD "
+                      f"but kept separate from a real USD channel ({daftar}). "
+                      "Deposit and Withdrawal are the USD column. "
+                      "Charges = Handling Fee x (USD/Transaction). "
+                      "A row is skipped here when Transaction is 0 or USD is missing."
+                ).font = Font(size=10)
+        ws.row_dimensions[r].height = 48
+        r += 1
+        gap = report.get("usd_shadow_gap") or []
+        if not gap:
+            ws.cell(r, 2, "None - every shadowed row had a Transaction and a USD amount."
+                    ).font = Font(italic=True, color="008000")
+            r += 1
+        else:
+            _header(ws, r, ["Ticket", "Date", "Gateway", "Transaction", "USD", "Currency",
+                            "Why it was left off the USD block"], "C00000")
+            for item in gap:
+                r += 1
+                isi = [item.get("ticket"), item.get("date"), item.get("gateway"),
+                       item.get("tx"), item.get("usd"), item.get("currency"), item.get("reason")]
+                for c, v in enumerate(isi, start=2):
+                    cell = ws.cell(r, c, v)
+                    cell.border = box
+                    cell.alignment = wrap
+                    if c == 3 and isinstance(v, (datetime.date, datetime.datetime)):
+                        cell.number_format = "yyyy-mm-dd"
+                ws.cell(r, 2).fill = FILL_MISSING
+        lewati = report.get("usd_shadow_ft_skip") or []
+        r += 1
+        if not lewati:
+            ws.cell(r, 2, "Fund transfers: none were left off a USD block. "
+                          "A transfer is posted there only when this run computed an Xero USD "
+                          "on the sending side. See Legend.").font = Font(italic=True, size=10)
+        else:
+            ws.cell(r, 2, f"Fund transfers left off the USD block because no Xero USD was "
+                          f"computed on the sending side: {len(lewati)}. "
+                          f"They stay on the original-currency rows. Listed on Legend. "
+                          f"No rate was invented.").font = Font(bold=True, color="9C0006")
+        ws.row_dimensions[r].height = 32
+    return r
+
+
+def write_legend_sheet(wb, date_cols_used, report=None):
     """Bikin/timpa sheet 'Legend' berisi penjelasan kolom & warna (English)."""
     from openpyxl.styles import Alignment, Border, Side
 
@@ -3316,7 +3860,127 @@ def write_legend_sheet(wb, date_cols_used):
     r += 2
     ws.cell(r, 2, "Tip: hover over any of the four column headers in sheet 'D' or 'W' "
                   "to see the same explanation as a cell comment.").font = Font(italic=True, size=9, color="808080")
+    r = _tulis_legend_kvb(ws, r, box, wrap, report)
     return ws
+
+
+def _tulis_legend_kvb(ws, r, box, wrap, report=None):
+    """Catatan Legend yang hanya ditulis kalau flag KVB-nya menyala."""
+    if not (USD_SHADOW or FEE_CURRENCY_SUFFIX or WARN_HIGH_PCT or CNY_RATE_CHECK):
+        return r
+
+    if USD_SHADOW:
+        r += 2
+        ws.cell(r, 2, "USD ROWS UNDER CNY GATEWAYS").font = \
+            Font(bold=True, size=12, color="4472C4")
+        r += 1
+        daftar = ", ".join(
+            f"{cur} {', '.join(sorted(chs))}" for cur, chs in sorted(USD_SHADOW.items()))
+        teks = (
+            f"Channels in this run ({daftar}) also get a USD block directly under the "
+            f"original-currency block. ChipPay CNY is followed by ChipPay USD, then the "
+            f"next channel. The currency cell says USD. The balance is not a real USD "
+            f"gateway: a pasted line 'ChipPay / USD / amount' stays a separate channel. "
+            f"Deposit and Withdrawal on the USD block are the USD column of each row. "
+            f"Charges = Handling Fee x (USD/Transaction) for that same row. "
+            f"The running balance uses the same formula as every other channel. "
+            f"Opening balance for the USD block, paste one of these (they are the same):\n"
+            f"    ChipPay USD(CNY) 12,345.67\n"
+            f"    ChipPay    USD(CNY)    12,345.67\n"
+            f"    ChipPay <tab> USD(CNY) <tab> 12,345.67\n"
+            f"'USD (CNY)' with a space is accepted. The code in parentheses is the source "
+            f"currency. Leave the line out and that USD block starts at zero, like any "
+            f"other channel with no opening balance. On the Opening Balance sheet the "
+            f"currency is stored as USD(CNY) so a re-run does not merge it into USD."
+        )
+        sel = ws.cell(r, 2, teks)
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 150
+        r += 1
+        ft_teks = (
+            "Fund transfers stay on the original-currency rows exactly as before, "
+            "including the transfer fee. On the USD block a transfer is posted only when "
+            "this run computed an Xero USD on the sending side (the transfer amount "
+            "divided by that currency's Xero rate). That figure is used for the sender "
+            "and, when the receiver is also a shadowed channel, for the receiver. "
+            "The transfer fee is not converted. If Xero USD was not computed, the "
+            "transfer is left off the USD block and listed below. No rate is invented."
+        )
+        sel = ws.cell(r, 2, ft_teks)
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 78
+        lewati = []
+        for item in (report or {}).get("usd_shadow_ft_skip") or []:
+            jum = item.get("jumlah")
+            jum_txt = f"{jum:,.2f}" if isinstance(jum, (int, float)) else str(jum)
+            lewati.append(
+                f"{item.get('date')} {item.get('channel')} {item.get('currency')} "
+                f"{item.get('side')} amount {jum_txt}: no computed Xero USD, "
+                f"left off the USD block."
+            )
+        r += 1
+        if not lewati:
+            ws.cell(r, 2, "No fund transfer was left off a USD block in this run.").font = \
+                Font(italic=True, color="008000")
+        else:
+            ws.cell(r, 2, "Fund transfers left off the USD block:").font = Font(bold=True)
+            for baris in lewati:
+                r += 1
+                ws.cell(r, 2, baris).font = Font(size=10, color="9C0006")
+        ws.row_dimensions[r].height = 20
+
+    if FEE_CURRENCY_SUFFIX:
+        r += 2
+        ws.cell(r, 2, "FEE ROW WITH A CURRENCY SUFFIX").font = \
+            Font(bold=True, size=12, color="4472C4")
+        r += 1
+        sel = ws.cell(r, 2,
+                      "Fee lookup tries the gateway name, then the alias, then the name "
+                      "with a currency suffix removed. If those miss, it also tries "
+                      "gateway + '-' + currency, for example withdrawal gateway PA in PKR "
+                      "uses the fee row PA-PKR. An exact row always wins. Each fallback "
+                      "is listed on Missing Data, for example 'PA (PKR) used fee row PA-PKR'.")
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 60
+
+    if WARN_HIGH_PCT or USD_SHADOW:
+        r += 2
+        ws.cell(r, 2, "HOW TO WRITE A FEE RATE").font = \
+            Font(bold=True, size=12, color="4472C4")
+        r += 1
+        sel = ws.cell(
+            r, 2,
+            "+N is a flat amount per transaction. +8 means 8, not 8%. "
+            "1.5%+50 means 1.5% of the transaction plus a flat 50. "
+            "0.45%,min 90 means 0.45% but at least 90. "
+            "A plain number with no % sign and no plus is a percentage of the transaction "
+            "in decimal form: 0.027 means 2.7%, and 8 means 800%. "
+            "If the cell was meant to be a flat fee, write +8. "
+            "The calculation is not changed when a rate reads as 100% or more; "
+            "Missing Data lists those cells.")
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 78
+
+    if CNY_RATE_CHECK:
+        r += 2
+        ws.cell(r, 2, "CNY RATE CHECK").font = Font(bold=True, size=12, color="4472C4")
+        r += 1
+        sel = ws.cell(
+            r, 2,
+            "For every CNY row, USD/Transaction is compared with the median of those "
+            "ratios in this run (expected near 0.145). A row more than 2% away from that "
+            "median is listed on Missing Data with its ticket, date, gateway, Transaction, "
+            "USD and Rate. The same section counts how many CNY Rate cells look like the "
+            "x100 style (about 14.5, Rate >= 1) versus the decimal style (about 0.145, "
+            "Rate < 1). Nothing in the calculation is changed by this check.")
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 64
+    return r
 
 
 def main():
@@ -3355,11 +4019,35 @@ def main():
                     help="JANGAN pakai EXTRA_FEES (rate DPM di kode). Dipakai untuk brand "
                          "lain (KVB): rate yang kosong di tabel fee jadi merah + masuk "
                          "'Missing Data', tidak diisi diam-diam dari angka DPM.")
+    ap.add_argument("--usd-shadow", metavar="CUR:CH1,CH2",
+                    help="Blok saldo USD tambahan di bawah channel ini, misalnya "
+                         "CNY:CHIPPAY,EP,UPAY,ZPAY. Deposit/Withdrawal blok itu dari kolom "
+                         "USD; charges = Handling Fee x (USD/Transaction). Kuncinya "
+                         "USD(CUR) jadi tidak menyatu dengan channel USD sungguhan. "
+                         "Hanya dipasang untuk KVB.")
+    ap.add_argument("--fee-currency-suffix", action="store_true",
+                    help="Setelah exact, alias, dan suffix-strip, coba juga "
+                         "gateway-currency (PA + PKR -> baris fee PA-PKR). "
+                         "Baris exact tetap menang.")
+    ap.add_argument("--warn-high-pct", action="store_true",
+                    help="Peringatkan di Missing Data kalau sel persen terbaca sebagai "
+                         "100 persen atau lebih. Angka fee tidak diubah.")
+    ap.add_argument("--cny-rate-check", action="store_true",
+                    help="Daftar baris CNY yang USD/Transaction-nya di luar plus/minus "
+                         "2 persen dari median rasio CNY pada run ini.")
     args = ap.parse_args()
 
-    global PAKAI_EXTRA_FEES
+    global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
     if args.tanpa_extra_fees:
         PAKAI_EXTRA_FEES = False
+    if args.usd_shadow:
+        USD_SHADOW = parse_usd_shadow(args.usd_shadow)
+    if args.fee_currency_suffix:
+        FEE_CURRENCY_SUFFIX = True
+    if args.warn_high_pct:
+        WARN_HIGH_PCT = True
+    if args.cny_rate_check:
+        CNY_RATE_CHECK = True
 
     # Dipasang PALING AWAL: process_sheet dan baca_fund_transfer membacanya lewat
     # global PERIODE_FILTER.
@@ -3504,7 +4192,9 @@ def main():
               "ditolak": Counter(), "input_kurang": [],
               "dibuang": Counter(), "dibuang_usd": defaultdict(float),
               "luar_periode": Counter(), "luar_periode_usd": defaultdict(float),
-              "refuse_mtoatd": []}
+              "refuse_mtoatd": [],
+              "usd_shadow_gap": [], "usd_shadow_ft_skip": [],
+              "rate_tinggi": [], "cny_check": None}
 
     total_rows = 0
     date_cols_used = {}
@@ -3590,6 +4280,10 @@ def main():
         with Denyut(f"menulis {len(report['records']):,} baris ke sheet '{DETAIL_SHEET}'"):
             n_rep = write_detail_sheet(wb, report)
         print(f"Sheet  : '{DETAIL_SHEET}' -> {n_rep:,} baris (gabungan semua sheet transaksi)")
+        if WARN_HIGH_PCT:
+            report["rate_tinggi"] = kumpulkan_rate_tinggi(fee_table)
+        if CNY_RATE_CHECK:
+            report["cny_check"] = analisa_cny_rate(report["records"])
         write_missing_sheet(wb, report)
         n_fx = sum(d["rows"] for d in report["fx_detail"].values())
         n_fee = sum(report["fee_missing"].values())
@@ -3613,7 +4307,7 @@ def main():
             print("!! baris 2, biarkan baris header-nya, lalu jalankan ulang.")
         print("!" * 108)
 
-    write_legend_sheet(wb, date_cols_used)
+    write_legend_sheet(wb, date_cols_used, report)
     print(f"Sheet  : '{LEGEND_SHEET}' -> penjelasan kolom & warna (English)")
 
     # ---------------- ringkasan ----------------

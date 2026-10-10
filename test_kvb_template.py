@@ -40,6 +40,9 @@ assert workbook["D"]["A1"].value == "Source.Name"
 assert workbook["W"]["A1"].value == "Source.Name"
 assert workbook["Xero"]["A1"].value == "Date"
 assert workbook["Handling Fee"]["A1"].value == "Payment Channel"
+guide = str(workbook["Handling Fee"]["F1"].value)
+assert "+8" in guide and "flat" in guide
+assert "1.5%+50" in guide and "min" in guide.lower()
 workbook.close()
 
 print("KVB template route, sidebar link, sheets, headers, and blank rows: OK")
