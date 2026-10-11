@@ -50,7 +50,7 @@ def wait(location):
 try:
     kvb_page = client.get("/kvb/tool/dw")
     assert kvb_page.status_code == 200
-    assert b"USD(CNY)" in kvb_page.data
+    assert b"ChipPay USD(CNY) 12,345.67" in kvb_page.data
     assert b"+8" in kvb_page.data
     dpm_page = client.get("/tool/dw")
     assert dpm_page.status_code == 200

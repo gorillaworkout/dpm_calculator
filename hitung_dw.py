@@ -2106,21 +2106,115 @@ def channel_ada_shadow(currency, gateway):
     return k if k in daftar else None
 
 
-def _catat_lewati_ft(report, t, sisi):
-    report.setdefault("usd_shadow_ft_skip", []).append({
-        "date": t.get("tgl"),
-        "channel": t.get("channel") if sisi == "out" else t.get("penerima"),
-        "currency": t.get("currency") if sisi == "out" else (t.get("tujuan_cur") or t.get("currency")),
-        "side": sisi,
-        "jumlah": t.get("jumlah") if sisi == "out" else t.get("tujuan_jumlah"),
-    })
+# Urutan kurs fund transfer di blok USD. Label ini yang ditulis di Legend.
+_LABEL_KURS_FT = {
+    "xero": "Xero USD",
+    "same-day": "same-day weighted USD/Transaction",
+    "monthly": "monthly weighted USD/Transaction",
+    "median": "run median USD/Transaction",
+}
+
+
+def _bagi_usd(pasangan):
+    """(jumlah USD, jumlah Transaction) -> rasio, atau None kalau tidak ada volume."""
+    if not pasangan or not pasangan[1]:
+        return None
+    return pasangan[0] / pasangan[1]
+
+
+def bangun_rasio_konversi(records):
+    """Rasio USD/Transaction dari baris D/W di run ini.
+
+    Harian dan bulanan ditimbang volume: jumlah USD / jumlah Transaction, per
+    gateway. Median adalah median rasio per baris untuk satu currency, sama
+    dengan median di CNY rate check, dan memakai SEMUA gateway currency itu.
+    """
+    harian = defaultdict(lambda: [0.0, 0.0])
+    bulan = defaultdict(lambda: [0.0, 0.0])
+    rasio = defaultdict(list)
+    for rec in records or []:
+        cur = norm(rec.get("Currency"))
+        gw = str(rec.get("Payment Gateway") or "").strip()
+        if not cur or not gw:
+            continue
+        d = as_date(rec.get("Date"))
+        tx = to_float(rec.get("Transaction"))
+        usd = to_float(rec.get("USD"))
+        if not d or tx in (None, 0) or usd is None:
+            continue
+        k_ch = kunci_channel(cur, gw)
+        harian[(cur, k_ch, d)][0] += usd
+        harian[(cur, k_ch, d)][1] += tx
+        bulan[(cur, k_ch)][0] += usd
+        bulan[(cur, k_ch)][1] += tx
+        rasio[cur].append(usd / tx)
+    median = {cur: statistics.median(daftar) for cur, daftar in rasio.items() if daftar}
+    return harian, bulan, median
+
+
+def _xero_berlaku_untuk(t, currency):
+    """Xero USD run ini hanya berlaku untuk currency yang dipakai menghitungnya."""
+    if not t.get("_xero_usd_computed"):
+        return False
+    if norm(t.get("currency")) != norm(currency):
+        return False
+    jumlah = to_float(t.get("jumlah"))
+    usd = to_float(t.get("usd"))
+    return jumlah not in (None, 0) and usd is not None
+
+
+def pilih_kurs_ft(t, currency, k_ch, tanggal, harian, bulan, median):
+    """-> (rate, kode sumber) atau (None, None).
+
+    Xero USD kalau run ini menghitungnya. Kalau tidak: rasio volume gateway
+    pada tanggal itu, lalu rasio volume gateway sebulan, lalu median currency.
+    """
+    if _xero_berlaku_untuk(t, currency):
+        return to_float(t.get("usd")) / to_float(t.get("jumlah")), "xero"
+    h = _bagi_usd(harian.get((norm(currency), k_ch, tanggal)))
+    if h is not None:
+        return h, "same-day"
+    b = _bagi_usd(bulan.get((norm(currency), k_ch)))
+    if b is not None:
+        return b, "monthly"
+    m = median.get(norm(currency))
+    if m is not None:
+        return m, "median"
+    return None, None
+
+
+def _uang_ft(nilai):
+    if isinstance(nilai, (int, float)):
+        return f"{nilai:,.2f}"
+    return "-" if nilai is None else str(nilai)
+
+
+def baris_legend_ft(item):
+    """Satu transfer di blok USD, plus sumber kursnya."""
+    tgl = item.get("date")
+    tgl_txt = tgl.isoformat() if hasattr(tgl, "isoformat") else str(tgl)
+    dasar = (f"{tgl_txt} {item.get('channel')} {item.get('currency')} "
+             f"{item.get('side')} amount {_uang_ft(item.get('jumlah'))}")
+    if item.get("side") == "out":
+        dasar += f" fee {_uang_ft(item.get('fee') or 0)}"
+    if not item.get("posted"):
+        return (dasar + ": NOT posted on the USD block. This run had no Xero USD "
+                "for that currency and no USD/Transaction ratio to convert it.")
+    label = _LABEL_KURS_FT.get(item.get("source"), item.get("source"))
+    fee_txt = ""
+    if item.get("side") == "out":
+        fee_txt = f" fee {_uang_ft(item.get('fee_usd') or 0)}"
+    return (f"{dasar} -> USD {_uang_ft(item.get('usd'))}{fee_txt} "
+            f"at {item.get('rate'):.6f} via {label}.")
 
 
 def tambah_usd_shadow(agg, report, ftt):
     """Salin mutasi CNY (dan currency lain di --usd-shadow) ke blok USD terpisah.
 
     Deposit/Withdrawal = kolom USD. Charges = Handling Fee x (USD/Transaction).
-    Fund transfer hanya kalau Xero USD sisi kirim benar-benar dihitung di run ini.
+    Fund transfer CNY (keluar, masuk, dan biaya di sisi kirim) ikut diposting
+    dalam USD. Kursnya: Xero USD kalau run ini menghitungnya, kalau tidak rasio
+    volume gateway hari itu, lalu sebulan, lalu median currency di run ini.
     """
     if not USD_SHADOW:
         return
@@ -2167,28 +2261,58 @@ def tambah_usd_shadow(agg, report, ftt):
             if charge:
                 slot["dep_fee"] += charge
 
+    harian, bulan, median = bangun_rasio_konversi(report.get("records"))
+    catatan = report.setdefault("usd_shadow_ft", [])
     for t in (ftt or []):
-        usd = t.get("usd") if t.get("_xero_usd_computed") else None
+        # Keluar: jumlah + biaya transfer. Masuk: jumlah diterima. Biaya hanya
+        # ada di sisi kirim, sama seperti baris CNY.
         sisi = []
         if t.get("channel") and not lewati_channel(t.get("currency"), t["channel"]):
             k_ch = channel_ada_shadow(t.get("currency"), t["channel"])
             if k_ch:
-                sisi.append(("out", t.get("currency"), t["channel"], k_ch, 1))
+                sisi.append(("out", t.get("currency"), t["channel"], k_ch,
+                             to_float(t.get("jumlah")) or 0.0,
+                             to_float(t.get("fee")) or 0.0))
         ch_in = t.get("penerima")
         cur_in = t.get("tujuan_cur") or t.get("currency")
-        if ch_in and not lewati_channel(cur_in, ch_in):
+        jml_in = to_float(t.get("tujuan_jumlah")) if ch_in else None
+        if ch_in and jml_in and not lewati_channel(cur_in, ch_in):
             k_ch = channel_ada_shadow(cur_in, ch_in)
             if k_ch:
-                sisi.append(("in", cur_in, ch_in, k_ch, -1))
-        for arah, cur_s, ch, k_ch, tanda in sisi:
-            if usd is None:
-                _catat_lewati_ft(report, t, arah)
+                sisi.append(("in", cur_in, ch_in, k_ch, jml_in, 0.0))
+        for arah, cur_s, ch, k_ch, jumlah, fee in sisi:
+            if not jumlah and not fee:
                 continue
+            rate, sumber = pilih_kurs_ft(
+                t, cur_s, k_ch, t.get("tgl"), harian, bulan, median)
+            item = {
+                "date": t.get("tgl"),
+                "channel": ch,
+                "currency": norm(cur_s),
+                "side": arah,
+                "jumlah": jumlah,
+                "fee": fee if arah == "out" else None,
+                "rate": rate,
+                "source": sumber,
+                "posted": rate is not None,
+            }
+            if rate is None:
+                catatan.append(item)
+                continue
+            usd_j = jumlah * rate
+            usd_fee = fee * rate if arah == "out" else 0.0
+            item["usd"] = usd_j
+            item["fee_usd"] = usd_fee
+            catatan.append(item)
             kunci = (t["tgl"], kunci_shadow(cur_s), k_ch)
             slot = agg[kunci]
             slot["_nama"] = slot.get("_nama") or ch
             slot["_shadow_src"] = norm(cur_s)
-            slot["ft"] += tanda * usd
+            tanda = 1 if arah == "out" else -1
+            if usd_j:
+                slot["ft"] += tanda * usd_j
+            if usd_fee:
+                slot["ft_fee"] += usd_fee
 
 
 def _angka_persen_polos(raw):
@@ -2435,8 +2559,12 @@ def tulis_pcb_menurut_channel(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, sa
                 catatan = (f"USD({src}) block for the {src} channel, shown as USD. "
                            f"Deposit and Withdrawal come from the USD column. "
                            f"Charges = Handling Fee x (USD/Transaction). "
-                           f"Fund transfer is the computed Xero USD on the sending "
-                           f"side, and only when that amount exists. "
+                           f"Fund transfer and its charge are the {src} amounts "
+                           f"converted to USD: Xero USD when this run computed it, "
+                           f"otherwise that gateway's same-day weighted "
+                           f"USD/Transaction, otherwise its monthly weighted ratio, "
+                           f"otherwise the run's median USD/Transaction. "
+                           f"Legend names the rate used for each transfer. "
                            f"Not a real USD channel.")
             else:
                 catatan = ("Withdrawal charges = withdrawal amount x withdrawal rate from the fee "
@@ -3464,31 +3592,6 @@ def _tulis_missing_kvb(ws, r, report, box, wrap):
 
     Tanpa flag, fungsi ini tidak menulis satu sel pun.
     """
-    if FEE_CURRENCY_SUFFIX:
-        r += 2
-        ws.cell(r, 2, "2c. FEE ROW MATCHED BY CURRENCY SUFFIX").font = \
-            Font(bold=True, size=12, color="C00000")
-        r += 1
-        pesan = pesan_fee_suffix(report)
-        if not pesan:
-            ws.cell(r, 2, "None - no fee was found via a gateway-currency name such as PA-PKR."
-                    ).font = Font(italic=True, color="008000")
-            r += 1
-        else:
-            _header(ws, r, ["Match", "", "Rows", "", "", "What happened"], "C00000")
-            for teks, n in pesan.most_common():
-                r += 1
-                isi = [teks, "", n, "", "",
-                       "An exact fee row was not found. The rate on the currency-suffixed "
-                       "row was used. An exact row still wins when both exist."]
-                for c, v in enumerate(isi, start=2):
-                    cell = ws.cell(r, c, v)
-                    cell.border = box
-                    cell.alignment = wrap
-                    if c == 2:
-                        cell.fill = FILL_WARN
-                ws.row_dimensions[r].height = 32
-
     if WARN_HIGH_PCT:
         r += 2
         ws.cell(r, 2, "2d. PERCENTAGE RATES READ AS 100% OR MORE").font = \
@@ -3586,17 +3689,24 @@ def _tulis_missing_kvb(ws, r, report, box, wrap):
                     if c == 3 and isinstance(v, (datetime.date, datetime.datetime)):
                         cell.number_format = "yyyy-mm-dd"
                 ws.cell(r, 2).fill = FILL_MISSING
-        lewati = report.get("usd_shadow_ft_skip") or []
+        gagal = [x for x in (report.get("usd_shadow_ft") or []) if not x.get("posted")]
         r += 1
-        if not lewati:
-            ws.cell(r, 2, "Fund transfers: none were left off a USD block. "
-                          "A transfer is posted there only when this run computed an Xero USD "
-                          "on the sending side. See Legend.").font = Font(italic=True, size=10)
+        if not gagal:
+            ws.cell(r, 2, "Fund transfers: every CNY transfer on a shadowed channel was "
+                          "posted on the USD block, including the sending-side charge. "
+                          "Legend names the rate source for each one.").font = \
+                Font(italic=True, size=10, color="008000")
         else:
-            ws.cell(r, 2, f"Fund transfers left off the USD block because no Xero USD was "
-                          f"computed on the sending side: {len(lewati)}. "
-                          f"They stay on the original-currency rows. Listed on Legend. "
-                          f"No rate was invented.").font = Font(bold=True, color="9C0006")
+            ws.cell(r, 2, f"Fund transfers that could not be converted to USD: {len(gagal)}. "
+                          f"No Xero USD and no USD/Transaction ratio existed for that "
+                          f"currency, so they stay on the original-currency rows only. "
+                          f"They are not omitted quietly.").font = \
+                Font(bold=True, color="9C0006")
+            for item in gagal:
+                r += 1
+                ws.cell(r, 2, baris_legend_ft(item)).font = Font(size=10, color="9C0006")
+                ws.cell(r, 2).fill = FILL_MISSING
+                ws.row_dimensions[r].height = 32
         ws.row_dimensions[r].height = 32
     return r
 
@@ -3899,37 +4009,44 @@ def _tulis_legend_kvb(ws, r, box, wrap, report=None):
         ws.row_dimensions[r].height = 150
         r += 1
         ft_teks = (
-            "Fund transfers stay on the original-currency rows exactly as before, "
-            "including the transfer fee. On the USD block a transfer is posted only when "
-            "this run computed an Xero USD on the sending side (the transfer amount "
-            "divided by that currency's Xero rate). That figure is used for the sender "
-            "and, when the receiver is also a shadowed channel, for the receiver. "
-            "The transfer fee is not converted. If Xero USD was not computed, the "
-            "transfer is left off the USD block and listed below. No rate is invented."
+            "Fund transfers stay on the original-currency rows in that currency, "
+            "including the transfer fee. Each outgoing and incoming side on a shadowed "
+            "channel is also posted on the USD block. The sending-side transfer fee is "
+            "converted with the same rate as the sending amount and stays on the sending "
+            "channel. The receiving channel is credited with the converted incoming amount. "
+            "The rate for each side is the first one this run can supply: "
+            "(1) Xero USD, when this run computed it for that currency (amount divided by "
+            "the Xero rate); "
+            "(2) that gateway's same-day volume-weighted USD/Transaction from D and W "
+            "(sum of USD divided by sum of Transaction); "
+            "(3) that gateway's monthly volume-weighted ratio in this run; "
+            "(4) the run's median USD/Transaction for that currency. For CNY this is the "
+            "same median as the CNY rate check. "
+            "Every transfer is listed below with the rate that was used. A transfer is "
+            "left off the USD block only when none of these rates exist, and that line "
+            "is also on Missing Data."
         )
         sel = ws.cell(r, 2, ft_teks)
         sel.alignment = wrap
         sel.font = Font(size=10)
-        ws.row_dimensions[r].height = 78
-        lewati = []
-        for item in (report or {}).get("usd_shadow_ft_skip") or []:
-            jum = item.get("jumlah")
-            jum_txt = f"{jum:,.2f}" if isinstance(jum, (int, float)) else str(jum)
-            lewati.append(
-                f"{item.get('date')} {item.get('channel')} {item.get('currency')} "
-                f"{item.get('side')} amount {jum_txt}: no computed Xero USD, "
-                f"left off the USD block."
-            )
+        ws.row_dimensions[r].height = 120
+        daftar_ft = list((report or {}).get("usd_shadow_ft") or [])
         r += 1
-        if not lewati:
-            ws.cell(r, 2, "No fund transfer was left off a USD block in this run.").font = \
+        if not daftar_ft:
+            ws.cell(r, 2, "No fund transfer touched a shadowed channel in this run.").font = \
                 Font(italic=True, color="008000")
         else:
-            ws.cell(r, 2, "Fund transfers left off the USD block:").font = Font(bold=True)
-            for baris in lewati:
+            ws.cell(r, 2, "Fund transfers posted on the USD block, and the rate source "
+                          "for each one:").font = Font(bold=True)
+            for item in daftar_ft:
                 r += 1
-                ws.cell(r, 2, baris).font = Font(size=10, color="9C0006")
-        ws.row_dimensions[r].height = 20
+                sel = ws.cell(r, 2, baris_legend_ft(item))
+                sel.alignment = wrap
+                if item.get("posted"):
+                    sel.font = Font(size=10)
+                else:
+                    sel.font = Font(size=10, color="9C0006", bold=True)
+                ws.row_dimensions[r].height = 32
 
     if FEE_CURRENCY_SUFFIX:
         r += 2
@@ -3940,11 +4057,23 @@ def _tulis_legend_kvb(ws, r, box, wrap, report=None):
                       "Fee lookup tries the gateway name, then the alias, then the name "
                       "with a currency suffix removed. If those miss, it also tries "
                       "gateway + '-' + currency, for example withdrawal gateway PA in PKR "
-                      "uses the fee row PA-PKR. An exact row always wins. Each fallback "
-                      "is listed on Missing Data, for example 'PA (PKR) used fee row PA-PKR'.")
+                      "uses the fee row PA-PKR. An exact row always wins. "
+                      "PA and PA-PKR are the same fee schedule. A match through this "
+                      "fallback is listed here as a note, not as a missing fee.")
         sel.alignment = wrap
         sel.font = Font(size=10)
-        ws.row_dimensions[r].height = 60
+        ws.row_dimensions[r].height = 72
+        pesan = pesan_fee_suffix(report or {})
+        if not pesan:
+            r += 1
+            ws.cell(r, 2, "No fee row was matched by a currency suffix in this run."
+                    ).font = Font(italic=True, color="008000")
+        else:
+            for teks, n in pesan.most_common():
+                r += 1
+                ws.cell(r, 2, f"{teks} ({n} rows). An exact row still wins. "
+                              f"This is a note, not a missing fee.").font = Font(size=10)
+                ws.row_dimensions[r].height = 28
 
     if WARN_HIGH_PCT or USD_SHADOW:
         r += 2
@@ -4193,7 +4322,7 @@ def main():
               "dibuang": Counter(), "dibuang_usd": defaultdict(float),
               "luar_periode": Counter(), "luar_periode_usd": defaultdict(float),
               "refuse_mtoatd": [],
-              "usd_shadow_gap": [], "usd_shadow_ft_skip": [],
+              "usd_shadow_gap": [], "usd_shadow_ft": [],
               "rate_tinggi": [], "cny_check": None}
 
     total_rows = 0

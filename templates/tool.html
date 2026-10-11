@@ -98,7 +98,7 @@
     <label for="saldoch">Payment channel opening balances
       <span class="opt">— as at end of <b class="prevlbl">{{ saldo_label }}</b>, optional</span></label>
     <textarea id="saldoch" name="saldo_channel" rows="6" spellcheck="false"
-              placeholder="Paste three columns straight from Excel:&#10;77Pay&#9;VND&#9;1,058,257.96&#10;PA&#9;ZAR&#9;1,164.20&#10;&#9;BRL&#9;5,399.16">{{ saldo_ch_default }}</textarea>
+              placeholder="{% if company == 'kvb' and slug == 'dw' %}ChipPay USD(CNY) 12,345.67&#10;ChipPay&#9;CNY&#9;1,000.50&#10;ChipPay&#9;USD&#9;999{% else %}Paste three columns straight from Excel:&#10;77Pay&#9;VND&#9;1,058,257.96&#10;PA&#9;ZAR&#9;1,164.20&#10;&#9;BRL&#9;5,399.16{% endif %}">{{ saldo_ch_default }}</textarea>
     <p class="hint">Copy the <b>Payment Channel / Currency / Balance</b> columns from your
       balance sheet and paste them here. Merged channel cells are fine — a blank channel
       keeps the one above it, exactly as Excel pastes it. <code>(4,976.10)</code> is read
@@ -108,9 +108,10 @@
       days with no movement — so the daily movement can be checked against other
       departments.
       {% if company == 'kvb' and slug == 'dw' %}
-      <br><b>USD opening for a CNY gateway</b> (ChipPay, EP, UPay, ZPay): paste
-      <code>ChipPay USD(CNY) 12,345.67</code>. The currency must be written
-      <code>USD(CNY)</code>. <code>USD (CNY)</code> with a space is the same thing.
+      <br><b>USD opening for a CNY gateway</b> (ChipPay, EP, UPay, ZPay). Paste exactly
+      <code>ChipPay USD(CNY) 12,345.67</code>.
+      The currency must be written <code>USD(CNY)</code>.
+      <code>USD (CNY)</code> with a space is the same thing.
       Three columns work too: <code>ChipPay</code>, <code>USD(CNY)</code>,
       <code>12,345.67</code>, separated by a tab or by two spaces.
       That line is the USD block under CNY ChipPay. A real USD ChipPay balance stays
