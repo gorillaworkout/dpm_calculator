@@ -500,7 +500,12 @@ KVB_DOC = {
         "The report is calculated and returned as a new workbook.",
         "CNY gateways ChipPay, EP, UPay and ZPay also get a USD block directly under "
         "the CNY block on <code>Payment Channel Balance</code>. Deposit and Withdrawal "
-        "on that block come from the USD column. Charges are Handling Fee × (USD ÷ Transaction).",
+        "on that block come from the USD column. Charges are Handling Fee × (USD ÷ Transaction). "
+        "CNY fund transfers, outgoing and incoming, and the sending-side transfer fee, "
+        "are converted onto that USD block. The rate is the Xero USD when this run "
+        "computed it, otherwise that gateway's same-day weighted USD/Transaction, "
+        "otherwise its monthly weighted ratio, otherwise the run's CNY median ratio. "
+        "Legend names the rate used for each transfer.",
     ],
     "hasil": "One finished <code>.xlsx</code> D&amp;W workbook.",
     "sheets": SHEET_PENUH,
