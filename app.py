@@ -16,6 +16,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
@@ -928,6 +929,38 @@ def _mt4_currency_from_form(raw):
     return pilihan, None
 
 
+def _pisah_traceback(stderr):
+    """User-visible text, and the traceback kept for the server log."""
+    pengguna, jejak = [], []
+    di_jejak = False
+    for baris in (stderr or "").splitlines():
+        if baris.startswith("Traceback (most recent call last):"):
+            di_jejak = True
+        if di_jejak:
+            jejak.append(baris)
+        else:
+            pengguna.append(baris)
+    return "\n".join(pengguna), "\n".join(jejak)
+
+
+def _pesan_gagal_job(stderr, stdout):
+    """The line a user should read. A STOP line wins over a traceback."""
+    for sumber in (stderr, stdout):
+        for baris in (sumber or "").splitlines():
+            teks = baris.strip()
+            if teks.startswith("STOP:"):
+                return teks
+    for sumber in (stderr, stdout):
+        for baris in (sumber or "").splitlines():
+            teks = baris.strip()
+            if not teks or teks.startswith("Traceback") or teks.startswith("File \""):
+                continue
+            if teks.startswith("During handling") or teks[:1] in " ^~":
+                continue
+            return teks
+    return "STOP: the run failed."
+
+
 def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
                  saldo_ch=None, mt4_currency=None, mt4_accounts=None):
     """Run the pipeline in the background and record the outcome."""
@@ -974,12 +1007,14 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
             # and the worker has already finished the HTTP request.
             r = subprocess.run(perintah, capture_output=True,
                                text=True, cwd=BASE)
-            log.append(f"$ {script}\n{r.stdout}{r.stderr}".rstrip())
+            pengguna, jejak = _pisah_traceback(r.stderr or "")
+            if jejak:
+                print(f"job {job_id} {script}\n{jejak}", file=sys.stderr)
+            log.append(f"$ {script}\n{r.stdout}{pengguna}".rstrip())
             if r.returncode != 0 or not keluar.exists():
-                pesan = (r.stderr or r.stdout).strip().splitlines()
-                judul = next((x.strip() for x in pesan if x.strip()), "") if pesan else ""
+                judul = _pesan_gagal_job(r.stderr or "", r.stdout or "")
                 _write_state(job_id, state="failed", error=judul or None,
-                             log="\n\n".join(log).strip() or "Failed with no message.")
+                             log="\n\n".join(log).strip() or judul or "Failed with no message.")
                 shutil.rmtree(job, ignore_errors=True)
                 return
             masuk = keluar
@@ -991,8 +1026,10 @@ def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=No
                 done["name"] = f"PL by Desk - {_label_periode(matched.group(1))}.xlsx"
         _write_state(job_id, **done)
     except Exception as exc:                       # keep the worker from dying silently
-        _write_state(job_id, state="failed", error=f"{type(exc).__name__}: {exc}",
-                     log="\n\n".join(log).strip() or None)
+        traceback.print_exc(file=sys.stderr)
+        pesan = f"STOP: {type(exc).__name__}: {exc}"
+        _write_state(job_id, state="failed", error=pesan,
+                     log="\n\n".join(log).strip() or pesan)
         shutil.rmtree(job, ignore_errors=True)
 
 
