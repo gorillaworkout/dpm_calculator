@@ -72,6 +72,7 @@ import shutil
 import sqlite3
 import tempfile
 import sys
+import traceback
 import zipfile
 from collections import defaultdict
 from pathlib import Path
@@ -123,9 +124,86 @@ LABEL_RINGKASAN = {
 ENTRY_DIPAKAI = ("out", "in")
 FX_SHEET = "QUERY RESULT"
 _DEAL_COMMIT_EVERY = 10000
+# Columns whose text is an id, a date, or a number. U+FFFD here stops the run.
+# Name, Comment, and the other free-text fields are kept, with the row counted.
+_KOLOM_UTUH = (
+    "Deal", "Login", "Time", "Open Time", "Close Time", "Type", "Entry",
+    "Symbol", "Volume", "Commission", "Fee", "Taxes", "Swap", "Profit",
+    "Currency", "Agent",
+)
+_PENGGANTI = "\ufffd"
+# File and row currently being read, so an unexpected crash can name them.
+_lokasi = {"path": None, "row": None}
 
 
 # --------------------------------------------------------------------- baca file
+def _ingat_berkas(path):
+    _lokasi["path"] = str(path) if path else None
+    _lokasi["row"] = None
+
+
+def _ingat_baris(nomor):
+    _lokasi["row"] = nomor
+
+
+def _buka_teks(path, encoding):
+    """Open uploaded text. Bad UTF-16, UTF-8, and cp1252 bytes become U+FFFD.
+
+    A lone surrogate in an MT5 Name or Comment is not a reason to crash, including
+    when it sits on a read-buffer boundary. The incremental decoder replaces it.
+    """
+    return open(path, encoding=encoding, errors="replace", newline="")
+
+
+def _ada_pengganti(nilai) -> bool:
+    return isinstance(nilai, str) and _PENGGANTI in nilai
+
+
+def _periksa_pengganti(path, nomor, row, idx, info):
+    """Count a row that needed a replacement. Stop if a key or number was damaged."""
+    _ingat_baris(nomor)
+    if not any(_ada_pengganti(sel) for sel in row):
+        return
+    info["unreadable"] = info.get("unreadable", 0) + 1
+    login = _teks(_nilai(row, idx, "Login")) if idx else ""
+    if login:
+        info.setdefault("unreadable_logins", set()).add(login)
+    if not idx:
+        return
+    for nama in _KOLOM_UTUH:
+        if nama not in idx:
+            continue
+        teks = _teks(_nilai(row, idx, nama))
+        if _PENGGANTI in teks:
+            sys.exit(
+                f"STOP: unreadable characters in {nama} in '{path.name}', "
+                f"row {nomor}: {teks!r}"
+            )
+
+
+def _laporkan_pengecualian(exc):
+    """User-facing line first. The traceback follows for the server log."""
+    tempat = ""
+    if _lokasi.get("path"):
+        tempat = f" in '{Path(_lokasi['path']).name}'"
+        if _lokasi.get("row"):
+            tempat += f", row {_lokasi['row']}"
+    print(f"STOP: {type(exc).__name__}{tempat}: {exc}", file=sys.stderr)
+    traceback.print_exc(file=sys.stderr)
+
+
+def _jaga(func):
+    def bungkus(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except SystemExit:
+            raise
+        except Exception as exc:
+            _laporkan_pengecualian(exc)
+            sys.exit(1)
+    return bungkus
+
+
 def _deteksi_encoding(path: Path) -> str:
     """Deteksi UTF-16 (LE/BE) dari BOM, kalau tidak ada BOM anggap UTF-8."""
     with open(path, "rb") as f:
@@ -145,14 +223,16 @@ def _baca_csv(path: Path, info: dict):
     info.setdefault("repaired", 0)
     info.setdefault("repaired_logins", set())
     enc = _deteksi_encoding(path)
-    with open(path, encoding=enc, newline="") as f:
+    _ingat_berkas(path)
+    with _buka_teks(path, enc) as f:
         awal = f.readline()
         pemisah = _deteksi_pemisah(awal)
     header = next(csv.reader([awal], delimiter=pemisah))
     idx = {name: i for i, name in enumerate(header)}
 
     def rows():
-        with open(path, encoding=enc, newline="") as f:
+        _ingat_berkas(path)
+        with _buka_teks(path, enc) as f:
             reader = csv.reader(f, delimiter=pemisah)
             next(reader, None)
             yield from _alirkan_csv(reader, len(header), path, idx, info, 1)
@@ -164,6 +244,7 @@ def _baca_xlsx(path: Path):
     Sheet lain (tanpa kolom wajib) dilewati. Baris tiap sheet disusun ulang
     mengikuti urutan kolom sheet pertama yang cocok, jadi sheet dengan urutan
     kolom berbeda tetap terbaca benar. -> header, rows, close, info"""
+    _ingat_berkas(path)
     wb = None
     try:
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -371,6 +452,7 @@ def _alirkan_csv(reader, lebar, path, idx, info, nomor_mulai):
 
     for row in reader:
         nomor += 1
+        _ingat_baris(nomor)
         if _baris_kosong(row):
             if pendek is not None:
                 _stop_putus(path, pendek["nomor"], pendek["row"], idx,
@@ -553,6 +635,16 @@ def _tulis_perbaikan(ringkasan, rekaman):
     )
 
 
+def _tulis_tidak_terbaca(ringkasan, rekaman):
+    """Hanya kalau ada pengganti, supaya file bersih tetap sama."""
+    n = rekaman.get("unreadable") or 0
+    if not n:
+        return
+    ringkasan[f"      {rekaman['nama']}: rows with unreadable characters (replaced)"] = (
+        f"{n}; sample logins {_daftar_login(rekaman.get('unreadable_logins') or ())}"
+    )
+
+
 def _norm(v) -> str:
     return _teks(v).upper()
 
@@ -578,6 +670,7 @@ def _adalah_file_fx(path: Path) -> bool:
 
 def baca_fx(path: Path):
     """Read {(date, CURRENCY): rate}; blank rate means already USD (rate 1)."""
+    _ingat_berkas(path)
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         sheet = next(s for s in wb.sheetnames if _norm(s) == FX_SHEET)
@@ -586,6 +679,7 @@ def baca_fx(path: Path):
         idx = {name: i for i, name in enumerate(header)}
         result = {}
         for number, row in enumerate(it, start=2):
+            _ingat_baris(number)
             if not any(v is not None and _teks(v) for v in row):
                 continue
             date = tanggal_dari_waktu(row[idx["date"]], path, number)
@@ -779,7 +873,8 @@ def _adalah_peta_akun(path: Path) -> bool:
                 return bool(pertama and _header_peta_dari_sel(pertama))
             finally:
                 wb.close()
-        with open(path, encoding=_encoding_mt4_penuh(path), newline="") as f:
+        _ingat_berkas(path)
+        with _buka_teks(path, _encoding_mt4_penuh(path)) as f:
             baris = f.readline()
         if not baris.strip():
             return False
@@ -801,6 +896,7 @@ def baca_peta_akun(path: Path) -> dict:
 
     Dua tipe berbeda untuk akun yang sama menghentikan run.
     """
+    _ingat_berkas(path)
     suffix = path.suffix.lower()
     if suffix in (".xlsx", ".xlsm"):
         wb = load_workbook(path, read_only=True, data_only=True)
@@ -822,7 +918,8 @@ def baca_peta_akun(path: Path) -> dict:
             wb.close()
     else:
         enc = _encoding_mt4_penuh(path)
-        f = open(path, encoding=enc, newline="")
+        _ingat_berkas(path)
+        f = _buka_teks(path, enc)
         try:
             sample = f.readline()
             pemisah = ","
@@ -854,8 +951,16 @@ def baca_peta_akun(path: Path) -> dict:
     hasil = {}
     try:
         for nomor, row in baris_sumber:
+            _ingat_baris(nomor)
             if row is None or idx["account"] >= len(row):
                 continue
+            for kunci in _KOLOM_PETA:
+                i = idx[kunci]
+                if i < len(row) and _ada_pengganti(row[i]):
+                    sys.exit(
+                        f"STOP: unreadable characters in {kunci} in '{path.name}', "
+                        f"row {nomor}: {_teks(row[i])!r}"
+                    )
             akun = _kunci_akun(row[idx["account"]])
             if not akun:
                 continue
@@ -919,7 +1024,8 @@ def _teks_beda_mt4(items) -> str:
 
 def _baris_awal_csv(path: Path, enc: str):
     lines = []
-    with open(path, encoding=enc, newline="") as f:
+    _ingat_berkas(path)
+    with _buka_teks(path, enc) as f:
         for line in f:
             if line.strip():
                 lines.append(line.strip("\ufeff\r\n"))
@@ -1070,7 +1176,8 @@ def _iter_mt4(path: Path, info: dict):
             wb.close()
         return
     enc = _encoding_mt4_penuh(path)
-    with open(path, encoding=enc, newline="") as f:
+    _ingat_berkas(path)
+    with _buka_teks(path, enc) as f:
         reader = csv.reader(f, delimiter=info["pemisah"])
         for _ in range(skip):
             next(reader, None)
@@ -1133,6 +1240,12 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
         total += 1
         if len(row) < len(header):
             row = list(row) + [""] * (len(header) - len(row))
+        _periksa_pengganti(path, nomor, row, idx, info)
+        if kolom_uang is not None and kolom_uang < len(row) and _ada_pengganti(row[kolom_uang]):
+            sys.exit(
+                f"STOP: unreadable characters in Currency in '{path.name}', "
+                f"row {nomor}: {_teks(row[kolom_uang])!r}"
+            )
         _tolak_notasi(path, nomor, ("Deal", sel(row, "Deal")), ("Login", sel(row, "Login")))
         deal_id = _teks(sel(row, "Deal"))
         login = _teks(sel(row, "Login"))
@@ -1199,7 +1312,9 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
             "source_logins": sumber_login, "disagree": beda, "raw": raw,
             "sheets": {}, "sheets_dilewati": [],
             "repaired": info.get("repaired", 0),
-            "repaired_logins": info.get("repaired_logins") or set()}
+            "repaired_logins": info.get("repaired_logins") or set(),
+            "unreadable": info.get("unreadable", 0),
+            "unreadable_logins": info.get("unreadable_logins") or set()}
 
 
 def _normalisasi_satu_file(path: Path, deals, pakai_baris):
@@ -1212,9 +1327,11 @@ def _normalisasi_satu_file(path: Path, deals, pakai_baris):
     total = n_out = n_in = lain = dup_out = dup_in = 0
     for nomor, row in rows:
         total += 1
+        _ingat_baris(nomor)
         if len(row) != len(idx):
             sys.exit(f"STOP: invalid column count in '{path.name}', row {nomor}: "
                      f"expected {len(idx)} columns, found {len(row)} columns")
+        _periksa_pengganti(path, nomor, row, idx, info)
         _tolak_notasi(path, nomor, ("Deal", row[idx["Deal"]]), ("Login", row[idx["Login"]]))
         entry = _teks(row[idx["Entry"]]).lower()
         if entry not in ENTRY_DIPAKAI:
@@ -1264,7 +1381,9 @@ def _normalisasi_satu_file(path: Path, deals, pakai_baris):
             "duplikat": dup_out + dup_in, "sheets": info["dibaca"],
             "sheets_dilewati": info["dilewati"],
             "repaired": info.get("repaired", 0),
-            "repaired_logins": info.get("repaired_logins") or set()}
+            "repaired_logins": info.get("repaired_logins") or set(),
+            "unreadable": info.get("unreadable", 0),
+            "unreadable_logins": info.get("unreadable_logins") or set()}
 
 
 def _tambah_agregat(kelompok, b, level, pakai_fx=False):
@@ -1318,6 +1437,7 @@ def _hasil_agregat(kelompok):
     return hasil
 
 
+@_jaga
 def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
            mt4_accounts=None, hapus_sumber=False) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
@@ -1474,6 +1594,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
                 f"{r['balance']} balance/credit dropped, {r['cancelled']} cancelled pending dropped, "
                 f"{r['footer']} footer/summary dropped")
             _tulis_perbaikan(ringkasan, r)
+            _tulis_tidak_terbaca(ringkasan, r)
             continue
         ringkasan[f"  - {r['nama']}"] = (
             f"{r['total']} rows, {r['out']} 'out' + {r['in']} 'in' kept"
@@ -1487,6 +1608,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
             ringkasan[f"  - {r['nama']}"] = f"{r['total']} rows, 0 'out' + 0 'in' (no usable rows)"
             yellow_labels.add(f"  - {r['nama']}")
         _tulis_perbaikan(ringkasan, r)
+        _tulis_tidak_terbaca(ringkasan, r)
     if peta_paths:
         n_cent = sum(1 for mata in akun.values() if mata == "USC")
         ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
@@ -1843,6 +1965,7 @@ def _mt4_currency_dari_argumen(items):
     return hasil
 
 
+@_jaga
 def main():
     ap = argparse.ArgumentParser(description="Deal Segregator -- segregate Deals History per Login")
     ap.add_argument("input", nargs="+", help="one or more Deals History files (.csv, .xlsx or .xlsm)")
