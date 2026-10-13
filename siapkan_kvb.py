@@ -107,6 +107,14 @@ def normalisasi_source_name(v):
     return teks
 
 
+def serial_ke_tanggal(v):
+    """46235 -> datetime(2026, 8, 1). Nilai lain dibiarkan apa adanya."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool) and 20000 < v < 80000:
+        from openpyxl.utils.datetime import from_excel
+        return from_excel(v)
+    return v
+
+
 def salin_dengan_alias(ws_src, wb_out, nama_sheet, alias, kolom_sumber_sn=None):
     """Salin SELURUH isi ws_src ke sheet baru 'nama_sheet' di wb_out. Header
     baris 1 diganti sesuai 'alias' (kunci = norm(header asli)); header yang
@@ -117,8 +125,17 @@ def salin_dengan_alias(ws_src, wb_out, nama_sheet, alias, kolom_sumber_sn=None):
     rows = ws_src.iter_rows(values_only=True)
     header = next(rows)
     ws_out.append([alias.get(norm(h), h) for h in header])
+    # Kolom tanggal yang di sumber tersimpan sebagai angka serial Excel (sel
+    # tanpa format tanggal, mis. 46235) diubah jadi datetime -- tanpa ini
+    # isi_template.py menganggapnya "tanpa tanggal" dan membuang barisnya.
+    kol_tgl = [i for i, h in enumerate(header) if "DATE" in norm(h)]
     n = 0
     for row in rows:
+        if kol_tgl:
+            row = list(row)
+            for i in kol_tgl:
+                if i < len(row):
+                    row[i] = serial_ke_tanggal(row[i])
         if kolom_sumber_sn is not None and len(row) > kolom_sumber_sn:
             row = list(row)
             row[kolom_sumber_sn] = normalisasi_source_name(row[kolom_sumber_sn])
