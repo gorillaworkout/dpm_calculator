@@ -50,20 +50,43 @@ def lock_path(jobs_dir, job_id):
 
 
 def acquire_job_lock(jobs_dir, job_id):
-    """Open and exclusively lock the job's lock file. Returns the fd or None."""
-    fh = open(lock_path(jobs_dir, job_id), "a+b")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    """Open and exclusively lock the job's lock file. Returns the fd or None.
+
+    release_job_lock() unlinks the file, so after locking we confirm the path
+    still names the inode we locked; if a releaser unlinked it in between, we
+    hold a lock on an orphan and must retry on the fresh file.
+    """
+    path = lock_path(jobs_dir, job_id)
+    for _ in range(5):
+        fh = open(path, "a+b")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
+            return None
+        try:
+            same = os.stat(path).st_ino == os.fstat(fh.fileno()).st_ino
+        except FileNotFoundError:
+            same = False
+        if same:
+            return fh
+        fcntl.flock(fh, fcntl.LOCK_UN)
         fh.close()
-        return None
-    return fh
+    return None
 
 
 def release_job_lock(fh):
+    """Unlock and remove the lock file, so a finished or refused run leaves no
+    <job_id>.lock behind in JOBS. Unlinking happens while still holding the
+    lock; acquire_job_lock() detects and retries on the orphaned inode."""
     if fh is None:
         return
     try:
+        try:
+            if os.stat(fh.name).st_ino == os.fstat(fh.fileno()).st_ino:
+                os.unlink(fh.name)
+        except OSError:
+            pass
         fcntl.flock(fh, fcntl.LOCK_UN)
     finally:
         fh.close()

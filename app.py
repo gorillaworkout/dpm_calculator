@@ -820,8 +820,13 @@ def run(slug, company="dpm"):
         return target
 
     if staged:
+        # Compare directories, not the file: overlayfs (Docker, the dev box)
+        # reports a different st_dev for regular files than for directories on
+        # the same mount, which made every staged run look cross-device. A real
+        # cross-device rename is still caught by the EXDEV handler below.
         dev = job.stat().st_dev
-        beda = [original for path, original in staged if path.stat().st_dev != dev]
+        beda = [original for path, original in staged
+                if path.parent.stat().st_dev != dev]
         if beda:
             shutil.rmtree(job, ignore_errors=True)
             return _gagal("The upload is on a different disk from the job folder, so it "
