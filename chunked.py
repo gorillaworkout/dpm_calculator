@@ -27,6 +27,7 @@ from pathlib import Path
 from flask import jsonify, request
 from werkzeug.utils import secure_filename
 
+import cleanup
 from upload_limits import MAX_FILES
 
 CHUNK_SUFFIXES = (".csv", ".xlsx", ".xlsm")
@@ -105,15 +106,21 @@ def pesan_disk(ukuran, bebas, sudah_tersimpan=False):
             f"No file was saved.")
 
 
-def cek_ruang(path, ukuran, sudah_tersimpan=False):
+def teks_dibersihkan(freed):
+    return (f" Old data from earlier runs was already cleared before this check "
+            f"({freed / _GIB:.1f} GB freed); nothing else can be removed right now.")
+
+
+def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None):
     """None when the job volume can hold the run, otherwise a message for the user."""
     bebas = shutil.disk_usage(path).free
     if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan):
-        return pesan_disk(ukuran, bebas, sudah_tersimpan)
+        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan)
+        return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru):
+def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None):
     """Room check once staged bytes are already on this volume.
 
     ukuran_baru still has to be written (a small form upload). Staged bytes
@@ -123,7 +130,8 @@ def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru):
     perlu = ruang_dibutuhkan(total, sudah_tersimpan=True) + max(0, ukuran_baru)
     bebas = shutil.disk_usage(path).free
     if bebas < perlu:
-        return pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0)
+        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0)
+        return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
@@ -235,29 +243,54 @@ def register(app, jobs_dir):
 
     @app.post("/upload/begin")
     def upload_begin():
-        sweep(jobs_dir)
         try:
             requested = int(request.form.get("bytes", "0"))
         except ValueError:
             return jsonify({"error": "Invalid upload size."}), 400
         if requested < 0 or requested > MAX_TOTAL:
             return jsonify({"error": f"The selected files exceed the {teks_batas()} limit."}), 413
-        salah = cek_ruang(_stage_root(jobs_dir), requested, sudah_tersimpan=False)
-        if salah:
-            return jsonify({"error": salah}), 507
-        upload_id = uuid.uuid4().hex
-        stage = _stage_root(jobs_dir) / upload_id
-        try:
-            sekarang = time.time()
-            stage.mkdir()
-            _write_manifest(stage, {"files": [], "bytes": 0,
-                                    "declared_bytes": requested,
-                                    "started": sekarang,
-                                    "last_chunk": sekarang})
-        except OSError:
-            shutil.rmtree(stage, ignore_errors=True)
-            return _storage_error()
-        return jsonify({"id": upload_id})
+        ticket = (request.form.get("ticket") or "").strip()
+        if not cleanup._valid_ticket(ticket):
+            ticket = uuid.uuid4().hex
+        # One worker at a time: clean, measure, then reserve. Without this two
+        # workers could both see the same free space and both start.
+        with cleanup.admission(jobs_dir):
+            freed = cleanup.clean(jobs_dir)
+            salah = cek_ruang(_stage_root(jobs_dir), requested, sudah_tersimpan=False,
+                              freed=freed)
+            lain = cleanup.any_activity(jobs_dir)
+            berat = requested >= cleanup.HEAVY_BYTES
+            sibuk = (berat and cleanup.heavy_activity(jobs_dir)) or (salah and lain)
+            posisi = cleanup.queue_position(jobs_dir, ticket)
+            if sibuk or (berat and posisi > 1):
+                posisi = cleanup.queue_touch(jobs_dir, ticket)
+                return jsonify({
+                    "queued": True, "ticket": ticket, "position": posisi,
+                    "message": "The server is currently processing another user's file. "
+                               "Your run is queued and will start automatically when it "
+                               "finishes.",
+                }), 202
+            cleanup.queue_leave(jobs_dir, ticket)
+            if salah:
+                return jsonify({"error": salah}), 507
+            upload_id = uuid.uuid4().hex
+            stage = _stage_root(jobs_dir) / upload_id
+            try:
+                sekarang = time.time()
+                stage.mkdir()
+                _write_manifest(stage, {"files": [], "bytes": 0,
+                                        "declared_bytes": requested,
+                                        "started": sekarang,
+                                        "last_chunk": sekarang})
+            except OSError:
+                shutil.rmtree(stage, ignore_errors=True)
+                return _storage_error()
+        return jsonify({"id": upload_id, "freed": freed})
+
+    @app.post("/upload/queue/leave")
+    def upload_queue_leave():
+        cleanup.queue_leave(jobs_dir, (request.form.get("ticket") or "").strip())
+        return jsonify({"left": True})
 
     @app.post("/upload/discard")
     def upload_discard():

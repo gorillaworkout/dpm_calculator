@@ -335,14 +335,55 @@
         });
     }
 
-    function beginUpload(attempt, total) {
+    // Queue state: the server answers 202 while another user's heavy job runs.
+    var queue = {ticket: '', cancelled: false, timer: null, wake: null, button: null};
+    function cancelButton(show) {
+      if (!queue.button) {
+        queue.button = document.createElement('button');
+        queue.button.type = 'button';
+        queue.button.className = 'dl';
+        queue.button.textContent = 'Cancel waiting';
+        queue.button.style.marginTop = '10px';
+        queue.button.addEventListener('click', function () {
+          queue.cancelled = true;
+          if (queue.timer) clearTimeout(queue.timer);
+          if (queue.ticket) {
+            var fd = new FormData(); fd.append('ticket', queue.ticket);
+            fetch('/upload/queue/leave', { method: 'POST', body: fd, keepalive: true });
+          }
+          if (queue.wake) queue.wake();
+        });
+        progress.appendChild(queue.button);
+      }
+      queue.button.hidden = !show;
+    }
+    function beginUpload(attempt, total, waitStarted) {
+      if (queue.cancelled) {
+        var c = new Error('cancelled'); c.cancelled = true; return Promise.reject(c);
+      }
       var fd = new FormData(); fd.append('bytes', total);
+      if (queue.ticket) fd.append('ticket', queue.ticket);
       return fetch('/upload/begin', { method: 'POST', body: fd }).then(function (r) {
+        if (r.status === 202) {
+          return r.json().then(function (q) {
+            queue.ticket = q.ticket;
+            var since = waitStarted || Date.now();
+            updateProgress('Queued — waiting for the server',
+              q.message + ' Position ' + q.position + ' in the queue · waiting ' +
+              elapsed(since).replace(' elapsed', '') + '. Keep this tab open.', 0, 'retrying');
+            cancelButton(true);
+            return new Promise(function (resolve) {
+              queue.wake = resolve;
+              queue.timer = setTimeout(resolve, 5000);
+            }).then(function () { return beginUpload(1, total, since); });
+          });
+        }
+        cancelButton(false);
         if (r.ok) return r.json();
         if ((r.status >= 500 || r.status === 429) && attempt < 3) {
           return new Promise(function (resolve) {
             setTimeout(resolve, 1000 * Math.pow(2, attempt));
-          }).then(function () { return beginUpload(attempt + 1, total); });
+          }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
         }
         return r.json().catch(function () { return {}; }).then(function (e) {
           throw new Error(e.error || ('Could not start the upload (HTTP ' + r.status + ').'));
@@ -351,7 +392,7 @@
         if (attempt >= 3) throw err;
         return new Promise(function (resolve) {
           setTimeout(resolve, 1000 * Math.pow(2, attempt));
-        }).then(function () { return beginUpload(attempt + 1, total); });
+        }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
       });
     }
 
@@ -387,6 +428,7 @@
       var activeId = null;
       var started = Date.now();
       var currentContext = null;
+      queue.cancelled = false; queue.ticket = '';
       updateProgress('Starting upload…', files.length + ' file(s), ' + mb(total) + ' MB total · ' + elapsed(started), 0, 'uploading');
       beginUpload(1, total)
         .then(function (start) {
@@ -446,6 +488,13 @@
           });
         })
         .catch(function (err) {
+          cancelButton(false);
+          if (err && err.cancelled) {
+            updateProgress('Waiting cancelled', 'Nothing was uploaded. Your selected files are still in the list; press Run again when you are ready.', 0, 'failed');
+            form.b.disabled = false;
+            form.b.textContent = 'Run & download result';
+            return;
+          }
           if (activeId) {
             var cleanup = new FormData(); cleanup.append('id', activeId);
             fetch('/upload/discard', { method: 'POST', body: cleanup, keepalive: true });
