@@ -550,7 +550,40 @@ def test_dpm_fixture_unchanged():
         book.close()
 
 
+def test_plain_usd_opening_seeds_shadow_block():
+    """Regression: 'ChipPay USD 28,598' must seed the USD(CNY) block, not an orphan."""
+    lama = h.USD_SHADOW
+    h.USD_SHADOW = h.parse_usd_shadow("CNY:CHIPPAY,EP,UPAY,ZPAY")
+    try:
+        jul1 = datetime.date(2026, 7, 1)
+        agg = {(jul1, "USD(CNY)", h.kunci_channel("CNY", g)): {}
+               for g in ("ChipPay", "EP", "UPay", "ZPay")}
+        for teks in ("CHIPPAY USD 28,598", "chippay   usd   28,598",
+                     "ChipPay\tUSD\t28,598", "USD ChipPay 28,598",
+                     "USD\tChipPay\t28,598", "ChipPay USD(CNY) 28,598",
+                     " ChipPay  usd (cny)  28,598 ", "Chip Pay USD 28,598"):
+            saldo, n = _bal(teks + "\nEP USD 24,779\nUPAY USD 13,619\nZPay\tUSD\t10,897")
+            assert n == 4, (teks, n, saldo)
+            hasil = h.pindah_opening_usd_ke_shadow(saldo, agg)
+            for g, v in (("CHIPPAY", 28598), ("EP", 24779), ("UPAY", 13619), ("ZPAY", 10897)):
+                assert hasil.get(("USD(CNY)", g)) == v, (teks, g, hasil)
+                assert ("USD", g) not in hasil, (teks, g, hasil)
+        # Explicit USD(CNY) wins; a real USD channel with real USD movement is kept.
+        saldo, _n = _bal("ChipPay\tUSD(CNY)\t5\nChipPay\tUSD\t999")
+        hasil = h.pindah_opening_usd_ke_shadow(saldo, agg)
+        assert hasil[("USD(CNY)", "CHIPPAY")] == 5 and hasil[("USD", "CHIPPAY")] == 999
+        saldo, _n = _bal("EP USD 7")
+        agg2 = dict(agg); agg2[(jul1, "USD", "EP")] = {}
+        assert h.pindah_opening_usd_ke_shadow(saldo, agg2) == {("USD", "EP"): 7}
+        # Non-shadow USD channels untouched.
+        saldo, _n = _bal("BuziPay\tUSD\t16,277")
+        assert h.pindah_opening_usd_ke_shadow(saldo, agg) == {("USD", "BUZIPAY"): 16277}
+    finally:
+        h.USD_SHADOW = lama
+
+
 if __name__ == "__main__":
+    test_plain_usd_opening_seeds_shadow_block()
     test_cny_opening_and_usd_shadow_paste()
     test_lookup_fee_currency_suffix()
     test_rate_warning_text_does_not_change_pct()

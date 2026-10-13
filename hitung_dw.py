@@ -247,6 +247,22 @@ _RE_BARIS_USD_SHADOW = re.compile(
 _RE_KUNCI_SHADOW = re.compile(r"^USD\(([A-Z0-9]+)\)$")
 
 
+_RE_BARIS_SATU_SPASI = re.compile(r"(.+?)\s+(\(?-?[\d.,]+\)?|--|-)\s*$")
+
+
+def _pecah_satu_spasi(m):
+    """'CHIPPAY USD 1' / 'USD ChipPay 1' / 'USD(CNY) ChipPay 1' -> [ch, cur, angka].
+    None kalau tidak ada kode currency di kata pertama/terakhir."""
+    kata = m.group(1).split()
+    if len(kata) < 2:
+        return None
+    if currency_shadow_key(kata[-1]) or norm(kata[-1]) in KODE_CURRENCY_DIKENAL:
+        return [" ".join(kata[:-1]), kata[-1], m.group(2)]
+    if currency_shadow_key(kata[0]) or norm(kata[0]) in KODE_CURRENCY_DIKENAL:
+        return [" ".join(kata[1:]), kata[0], m.group(2)]
+    return None
+
+
 def currency_shadow_key(teks):
     """'USD(CNY)' / 'USD (CNY)' -> 'USD(CNY)'. Selain itu None."""
     m = _RE_USD_SHADOW_CUR.match(norm(teks))
@@ -319,6 +335,10 @@ def baca_tabel_saldo_channel(teks):
                       f"USD({norm(m_shadow.group(2))})", m_shadow.group(3)]
         elif "\t" in b:
             bagian = [x.strip() for x in baris.split("\t")]
+        elif (not re.search(r"\s{2,}|;|,\s*[A-Za-z]", b)
+              and (m1 := _RE_BARIS_SATU_SPASI.fullmatch(b))
+              and _pecah_satu_spasi(m1)):
+            bagian = _pecah_satu_spasi(m1)
         elif ";" in b:
             bagian = [x.strip() for x in b.split(";")]
         elif "," in b and re.search(r",\s*[A-Za-z]", b):
@@ -328,6 +348,11 @@ def baca_tabel_saldo_channel(teks):
         bagian = [x for x in bagian if x != ""] if len(bagian) > 3 else bagian
         if len(bagian) >= 3:
             ch, cur, saldo = bagian[0], bagian[1], bagian[2]
+            # 'USD <TAB> ChipPay <TAB> angka': currency ditulis duluan -> tukar.
+            def _kode(x):
+                return bool(currency_shadow_key(x)) or norm(x) in KODE_CURRENCY_DIKENAL
+            if _kode(ch) and not _kode(cur) and norm(cur) not in ("CURRENCY", ""):
+                ch, cur = cur, ch
         elif len(bagian) == 2:
             ch, cur, saldo = "", bagian[0], bagian[1]
             # JEBAKAN 17 Sep 2026: baris 2-kolom di atas diasumsikan (currency,
@@ -2106,6 +2131,33 @@ def channel_ada_shadow(currency, gateway):
     return k if k in daftar else None
 
 
+def pindah_opening_usd_ke_shadow(saldo, agg=None):
+    """Saldo pembuka ('USD', CHIPPAY) -> ('USD(CNY)', CHIPPAY) untuk channel shadow.
+
+    Tim menempel saldo USD gateway CNY sebagai 'ChipPay USD 28,598' (tanpa
+    '(CNY)'). Kuncinya jadi ('USD', 'CHIPPAY') -- channel USD terpisah -- padahal
+    blok USD bayangan memakai ('USD(CNY)', 'CHIPPAY'), jadi blok itu mulai dari
+    nol dan muncul blok yatim 'USD CHIPPAY'. Dipindah kalau channel itu ada di
+    --usd-shadow, belum ada saldo USD(src) yang eksplisit, dan tidak ada mutasi
+    USD sungguhan untuk channel itu.
+    """
+    if not saldo or not USD_SHADOW:
+        return saldo
+    usd_nyata = {g for (_d, c, g) in (agg or {}) if c == "USD"}
+    out = dict(saldo)
+    for (cur, ch), v in list(saldo.items()):
+        if cur != "USD" or ch in usd_nyata:
+            continue
+        for src, daftar in USD_SHADOW.items():
+            k_ch = kunci_channel(src, ch)
+            if k_ch in daftar:
+                k_sh = (kunci_shadow(src), k_ch)
+                if k_sh not in out:
+                    out[k_sh] = out.pop((cur, ch))
+                break
+    return out
+
+
 # Urutan kurs fund transfer di blok USD. Label ini yang ditulis di Legend.
 _LABEL_KURS_FT = {
     "xero": "Xero USD",
@@ -2662,6 +2714,7 @@ def write_channel_sheets(wb, report, ftt):
     # duluan, sumber saldo pembukanya ikut hilang dan saldo mulai dari NOL.
     tgl_awal = min((d for d, _c, _g in agg), default=None)
     awal_ch, tgl_ch = saldo_awal_channel(wb, tgl_awal)
+    awal_ch = pindah_opening_usd_ke_shadow(awal_ch, agg)
     asal_ch = _ASAL_SALDO["channel"] or OB_SHEET
     tgl_jw = min((t["tgl"] for t in (ftt or [])), default=None)
     bal, tgl_bal = saldo_awal_jwallet(wb, tgl_jw)
