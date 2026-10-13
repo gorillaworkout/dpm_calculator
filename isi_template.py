@@ -53,12 +53,40 @@ def cari_sheet(wb, kandidat):
     return None
 
 
-def tanggal(v):
+# Batas akal tanggal. Di luar ini (mis. 1970-01-01 = sel tanggal 'nol' dari
+# sistem sumber) tanggalnya dianggap TIDAK SAH: barisnya tidak masuk bulan mana
+# pun, tapi DILAPORKAN (lihat tanggal_tidak_sah) -- bukan dibuang diam-diam.
+TAHUN_MIN, TAHUN_MAX = 1990, 2100
+
+
+def _tanggal_mentah(v):
     if isinstance(v, datetime.datetime):
         return v.date()
     if isinstance(v, datetime.date):
         return v
+    # Angka serial Excel (sel tanpa format tanggal, mis. 46235 = 1 Agu 2026)
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            from openpyxl.utils.datetime import from_excel
+            d = from_excel(v)
+        except (ValueError, OverflowError, TypeError):
+            return None
+        if isinstance(d, datetime.datetime):
+            return d.date()
     return None
+
+
+def tanggal(v):
+    d = _tanggal_mentah(v)
+    if d is None or not TAHUN_MIN <= d.year <= TAHUN_MAX:
+        return None
+    return d
+
+
+def tanggal_tidak_sah(v):
+    """True kalau sel berisi tanggal/serial yang terbaca tapi di luar batas akal."""
+    d = _tanggal_mentah(v)
+    return d is not None and not TAHUN_MIN <= d.year <= TAHUN_MAX
 
 
 def kunci_hdr(v):
@@ -92,6 +120,10 @@ def peta_ftt(baris_header):
 # sebuah pemindahan dana masuk bulan laporan yang mana. Sama dengan basis yang
 # dipakai hitung_dw.baca_fund_transfer, jadi kedua tahap sepakat.
 FTT_KOLOM_TGL = ("汇款日期", "DATE")
+
+# Baris yang tanggalnya di luar TAHUN_MIN..TAHUN_MAX: (sheet, baris, nilai, info)
+TANGGAL_TIDAK_SAH = []
+SHEET_TGL_TIDAK_SAH = "Verifikasi Tanggal"
 
 
 def isi_fund_transfer(wb_src, wb_out, saring=None):
@@ -137,6 +169,8 @@ def isi_fund_transfer(wb_src, wb_out, saring=None):
             continue
         if saring and j_tgl is not None:
             d = tanggal(row[j_tgl]) if j_tgl < len(row) else None
+            if j_tgl < len(row) and tanggal_tidak_sah(row[j_tgl]):
+                TANGGAL_TIDAK_SAH.append((FTT_SHEET, None, row[j_tgl], ""))
             if not d or (d.year, d.month) != saring:
                 dilewati += 1
                 continue
@@ -361,12 +395,27 @@ def main():
         tak_ada = [h for h in hdr_d
                    if h and kunci_hdr(h) not in hdr_s and norm(h) not in DIHITUNG]
         n = dilewati = 0
-        for row in baris[1:]:
+        for nomor_baris, row in enumerate(baris[1:], start=2):
             if c_cur is None or c_cur >= len(row) or row[c_cur] in (None, ""):
                 continue
+            mentah = row[c_tgl] if c_tgl is not None and c_tgl < len(row) else None
+            if tanggal_tidak_sah(mentah):
+                info = []
+                for k in ("REFERENCE", "TICKET", "PAYMENT GATEWAY", "TRANSACTION",
+                          "APPLY DATE", "SETTLEMENT DATE"):
+                    j = hdr_s.get(k)
+                    if j is not None and j < len(row) and row[j] not in (None, ""):
+                        x = row[j]
+                        if k.endswith("DATE"):
+                            x = tanggal(x) or x
+                        info.append(f"{k.title()}={x}")
+                TANGGAL_TIDAK_SAH.append((target, nomor_baris, mentah, ", ".join(info)))
             if saring:
-                d = tanggal(row[c_tgl]) if c_tgl is not None and c_tgl < len(row) else None
-                kunci = f"{d:%Y-%m}" if d else "(tanpa tanggal)"
+                d = tanggal(mentah)
+                if tanggal_tidak_sah(mentah):
+                    kunci = "(tanggal tidak sah)"
+                else:
+                    kunci = f"{d:%Y-%m}" if d else "(tanpa tanggal)"
                 bulan_ada[kunci] = bulan_ada.get(kunci, 0) + 1
                 if not d or (d.year, d.month) != saring:
                     dilewati += 1
@@ -449,6 +498,23 @@ def main():
     elif OB_SHEET in wb_out.sheetnames:
         print(f"  sheet {OB_SHEET!r}: sumber tidak punya sheet 'J Wallet' / "
               f"'Payment Channel Balance' -> saldo mulai dari nol")
+
+    if TANGGAL_TIDAK_SAH:
+        print(f"\n  !! PERINGATAN: {len(TANGGAL_TIDAK_SAH)} baris bertanggal di luar "
+              f"{TAHUN_MIN}-{TAHUN_MAX} (mis. 1970) -- TIDAK masuk bulan mana pun. "
+              f"Perbaiki tanggalnya di sumber kalau baris ini seharusnya ikut:")
+        for sh, nb, v, info in TANGGAL_TIDAK_SAH[:100]:
+            print(f"     sheet {sh!r}" + (f" baris {nb}" if nb else "")
+                  + f": tanggal {v!r}" + (f" ({info})" if info else ""))
+        # Catatan verifikasi di file hasil, supaya tidak hilang bersama log.
+        if SHEET_TGL_TIDAK_SAH in wb_out.sheetnames:
+            del wb_out[SHEET_TGL_TIDAK_SAH]
+        ws_v = wb_out.create_sheet(SHEET_TGL_TIDAK_SAH)
+        ws_v.append([f"Verifikasi: baris bertanggal di luar {TAHUN_MIN}-{TAHUN_MAX} "
+                     f"-- tidak masuk bulan laporan mana pun"])
+        ws_v.append(["Sheet", "Row in source", "Date value", "Details"])
+        for sh, nb, v, info in TANGGAL_TIDAK_SAH:
+            ws_v.append([sh, nb, str(v), info])
 
     if total == 0:
         if saring and bulan_ada:
