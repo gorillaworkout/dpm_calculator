@@ -13,6 +13,17 @@ Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
   <a class="dl" href="{{ url_for('kvb_tool', slug=info.slug) if company == 'kvb' else url_for('tool', slug=info.slug) }}">Start a new job</a>
 </div>
 
+{% elif info.state == 'cleared' %}
+<h1>Result cleared</h1>
+<p class="lede">This result was cleared to free space, please run again.</p>
+
+<div class="card">
+  <p style="margin:0 0 14px; color:var(--mute); font-size:13.5px">The server has very little
+    disk, so old results and uploads are removed when a new run starts.
+    {% if info.name %}The file was <strong>{{ info.name }}</strong>.{% endif %}</p>
+  <a class="dl" href="{{ url_for('kvb_tool', slug=info.slug) if company == 'kvb' else url_for('tool', slug=info.slug) }}">Run again</a>
+</div>
+
 {% elif info.state == 'done' %}
 <h1>Your file is ready</h1>
 <p class="lede">The download starts automatically. Keep this tab open until your browser

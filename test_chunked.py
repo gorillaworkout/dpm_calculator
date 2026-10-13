@@ -230,6 +230,10 @@ real_usage = chunked.shutil.disk_usage
 def _hampir_penuh(path):
     return real_usage(path)._replace(free=1024)
 
+# Idle server: no other upload is receiving chunks, so a full disk is a plain
+# 507 rather than a queue position (see test_cleanup.py for the queue).
+for _st in (JOBS / "staging").iterdir():
+    chunked.discard(JOBS, _st.name)
 chunked.shutil.disk_usage = _hampir_penuh
 try:
     r = c.post("/upload/begin", data={"bytes": str(100 * 1024 * 1024)})

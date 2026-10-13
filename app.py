@@ -21,12 +21,13 @@ import uuid
 from collections import defaultdict, deque
 from pathlib import Path
 
-from flask import (Flask, abort, flash, redirect, render_template, request,
+from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_file, url_for)
 from werkzeug.utils import secure_filename
 
 import auth
 import chunked
+import cleanup
 
 BASE = Path(__file__).resolve().parent
 JOBS = Path(os.environ.get("DW_JOB_DIR", Path(tempfile.gettempdir()) /
@@ -185,6 +186,15 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 # decorating each view so a new endpoint cannot be added unprotected by accident.
 auth.register(app)
 chunked.register(app, JOBS)
+
+
+@app.teardown_request
+def _lepas_kunci_job(_exc=None):
+    # A run that returned an error before its thread started still holds its
+    # job lock. Release it so the next cleanup can remove the leftovers.
+    fh = g.pop("job_lock", None)
+    if fh is not None:
+        cleanup.release_job_lock(fh)
 
 
 @app.before_request
@@ -778,15 +788,22 @@ def run(slug, company="dpm"):
     if (slug == "segregate" and company == "kvb" and _akun_upload
             and _akun_upload.filename):
         ukuran_baru += _ukuran_stream(_akun_upload)
-    # Before any rename. A failed check must not delete the staged upload:
-    # that file is the only server copy, and copying it is not allowed.
-    salah_ruang = chunked.cek_sebelum_proses(JOBS, ukuran_staged, ukuran_baru)
-    if salah_ruang:
-        return _gagal(salah_ruang)
-
-    job = JOBS / uuid.uuid4().hex
-    job.mkdir()
-    _sweep_old_jobs()
+    # Lock the new job before its directory exists, so a cleanup in another
+    # worker can never mistake it for leftovers. Then free the old data of
+    # every other finished/abandoned run, and only then check the disk.
+    job_id = uuid.uuid4().hex
+    g.job_lock = cleanup.acquire_job_lock(JOBS, job_id)
+    with cleanup.admission(JOBS):
+        freed = cleanup.clean(JOBS, keep_jobs={job_id},
+                              keep_uploads={upload_id} if upload_id else ())
+        # Before any rename. A failed check must not delete the staged upload:
+        # that file is the only server copy, and copying it is not allowed.
+        salah_ruang = chunked.cek_sebelum_proses(JOBS, ukuran_staged, ukuran_baru,
+                                                 freed=freed)
+        if salah_ruang:
+            return _gagal(salah_ruang)
+        job = JOBS / job_id
+        job.mkdir()
     sources = []
     nama_asli = []
 
@@ -855,7 +872,6 @@ def run(slug, company="dpm"):
     # that stays open that long -- the user saw "Error 524". So the upload
     # returns immediately with a job id, the work continues in a background
     # thread, and the browser polls a tiny status page until the file is ready.
-    job_id = job.name
     # The month goes in the download name on purpose: two runs of the same
     # upload for different months would otherwise be indistinguishable on disk.
     if slug == "dw":
@@ -894,10 +910,12 @@ def run(slug, company="dpm"):
     # the subprocess it starts, keep running after the 303. There is no
     # subprocess timeout. Status polls are short GETs, so a run of a few hours
     # is not cut off. The staged file was renamed on this same volume.
+    lock_fh = g.pop("job_lock", None)          # the thread owns the lock now
     threading.Thread(target=_process_job,
                      args=(job_id, company, slug, job,
                            sources if slug in ("segregate", "pl-desk") else src,
-                           dst, periode, saldo_jw, saldo_ch, mt4_flags, mt4_accounts_path),
+                           dst, periode, saldo_jw, saldo_ch, mt4_flags, mt4_accounts_path,
+                           lock_fh),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
     return redirect(url_for(endpoint, job_id=job_id), code=303)
@@ -970,8 +988,23 @@ def _pesan_gagal_job(stderr, stdout):
 
 
 def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
-                 saldo_ch=None, mt4_currency=None, mt4_accounts=None):
-    """Run the pipeline in the background and record the outcome."""
+                 saldo_ch=None, mt4_currency=None, mt4_accounts=None, lock_fh=None):
+    """Run the pipeline in the background and record the outcome.
+
+    lock_fh is the job's flock; while it is held no cleanup touches this job.
+    """
+    try:
+        _jalankan_job(job_id, company, slug, job, src, dst, periode, saldo_jw,
+                      saldo_ch, mt4_currency, mt4_accounts)
+    finally:
+        cleanup.release_job_lock(lock_fh)
+
+
+def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
+                  saldo_ch=None, mt4_currency=None, mt4_accounts=None):
+    # Success: inputs and the deal index are deleted, only the result stays.
+    # Failure or STOP: the whole job directory (inputs, index, partial output)
+    # is deleted; the staged upload was already moved into it.
     # Tabel saldo channel yang ditempel disimpan sebagai file di folder job -- ikut
     # terhapus bersama job-nya, jadi tidak ada sisa data keuangan yang menetap.
     f_ch = None
@@ -1081,6 +1114,8 @@ def job_download(job_id):
     _require_company(company, browser_redirect=False)
     request.company = company
     registry = _tools_for(company)
+    if info["state"] == "cleared":
+        return _halaman_dibersihkan(job_id, info, registry)
     if info["state"] == "collected":
         # Already downloaded and wiped. Say so plainly instead of a bare 404 --
         # a second click or a browser retry lands here and must not look broken.
@@ -1091,19 +1126,31 @@ def job_download(job_id):
     job = _job_dir(job_id)
     path = Path(info["path"])
     claimed = JOBS / f".{job_id}.download"
+    if not job.is_dir() and not claimed.is_dir():
+        # A newer run's cleanup removed it to free disk.
+        return _halaman_dibersihkan(job_id, info, registry)
+    # Holding the job lock while streaming keeps a cleanup started by another
+    # user's new run from deleting the file mid-download.
+    kunci = cleanup.acquire_job_lock(JOBS, job_id)
+    if kunci is None:
+        return "Download already in progress.", 409
     try:
         os.rename(job, claimed)                 # atomic claim across Gunicorn workers
     except OSError:
+        cleanup.release_job_lock(kunci)
         latest = _read_state(job_id)
         if latest and latest["state"] == "collected":
             return render_template("job.html", job_id=job_id, info=latest, elapsed=0,
                                    tool=registry[latest["slug"]]), 410
+        if latest and latest["state"] == "cleared" or not claimed.is_dir():
+            return _halaman_dibersihkan(job_id, latest or info, registry)
         return "Download already in progress.", 409
 
     result = claimed / path.relative_to(job)
     if not result.is_file():
         shutil.rmtree(claimed, ignore_errors=True)
-        return "Download is no longer available.", 410
+        cleanup.release_job_lock(kunci)
+        return _halaman_dibersihkan(job_id, info, registry)
     mimetype = ("application/zip" if info["slug"] == "segregate" else
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     response = send_file(result, as_attachment=True,
@@ -1129,9 +1176,19 @@ def job_download(job_id):
                     os.rename(claimed, job)
                 except OSError:
                     pass
+            cleanup.release_job_lock(kunci)
 
     response.response = cleanup_stream()
     return response
+
+
+def _halaman_dibersihkan(job_id, info, registry):
+    """Friendly 410 when a newer run's cleanup removed this result."""
+    info = dict(info)
+    if info.get("state") != "cleared":
+        info = _write_state(job_id, state="cleared", path=None, cleared=time.time())
+    return render_template("job.html", job_id=job_id, info=info, elapsed=0,
+                           tool=_tools_for(info.get("company", "dpm"))[info["slug"]]), 410
 
 
 def _pid_alive(pid):
