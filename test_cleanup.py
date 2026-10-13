@@ -206,3 +206,18 @@ assert not cleanup.job_locked(JOBS, dead)
 # 6. Failed run deletes its inputs (job dir) and the staged upload.
 assert "shutil.rmtree(job, ignore_errors=True)" in Path(web.__file__).read_text()
 print("test_cleanup: all checks passed")
+
+# Releasing a job lock removes its file, so a refused/finished run leaves JOBS clean.
+import tempfile as _tf
+from pathlib import Path as _P
+import cleanup as _c
+_d = _P(_tf.mkdtemp())
+_fh = _c.acquire_job_lock(_d, "abc")
+assert _fh is not None and (_d / "abc.lock").exists()
+assert _c.acquire_job_lock(_d, "abc") is None          # still exclusive
+_c.release_job_lock(_fh)
+assert list(_d.iterdir()) == [], list(_d.iterdir())
+_fh = _c.acquire_job_lock(_d, "abc")                     # re-acquirable
+assert _fh is not None
+_c.release_job_lock(_fh)
+print("OK lock release")
