@@ -434,6 +434,30 @@ def _keluarkan(info, nomor, row, idx, lebar, sudah):
     return nomor, row
 
 
+def _rapikan_lebar_mt4(row, lebar, idx, info):
+    """Baris yang lebih lebar dari header karena delimiter sisa / ';' di Comment.
+
+    Raw Report Juli 2026 menutup setiap baris data dengan ';' (header tidak),
+    jadi ada satu sel kosong di ujung. Sel kosong di ujung dibuang. Kalau masih
+    lebih lebar dan Comment adalah kolom terakhir header, sisa sel disambung
+    kembali ke Comment dengan delimiter aslinya: kolom angka berada sebelum
+    Comment, jadi posisinya tetap pasti. Selain itu baris dibiarkan (STOP).
+    """
+    row = list(row)
+    while len(row) > lebar and _sel_kosong(row[-1]):
+        row.pop()
+    if len(row) <= lebar:
+        return row
+    pemisah = info.get("pemisah")
+    if (pemisah and idx.get("Comment") == lebar - 1
+            and re.fullmatch(r"\d+", _teks(_nilai(row, idx, "Deal")))
+            and re.fullmatch(r"\d+", _teks(_nilai(row, idx, "Login")))):
+        komentar = pemisah.join(_teks(c) for c in row[lebar - 1:])
+        row = row[:lebar - 1] + [komentar]
+        info["comment_rejoined"] = info.get("comment_rejoined", 0) + 1
+    return row
+
+
 def _alirkan_csv(reader, lebar, path, idx, info, nomor_mulai):
     """Satukan baris CSV yang terputus karena line break tanpa kutip.
 
@@ -475,6 +499,15 @@ def _alirkan_csv(reader, lebar, path, idx, info, nomor_mulai):
                 continue
             pendek = {"nomor": pendek["nomor"], "row": gabung}
             continue
+        if (pendek is None and 2 <= len(row) < lebar
+                and _sel_kosong(row[0]) and _sel_kosong(row[1])):
+            # Footer Raw Report (total, "Profit:", "Deposit:" ...): Deal dan
+            # Login kosong, lebih pendek dari header. Bukan potongan baris.
+            hasil = flush()
+            if hasil is not None:
+                yield hasil
+            yield nomor, list(row) + [None] * (lebar - len(row))
+            continue
         if len(row) < lebar:
             teks0 = _teks(row[0]) if row else ""
             if len(row) == 1 and teks0 and _NOTASI.fullmatch(teks0):
@@ -492,6 +525,8 @@ def _alirkan_csv(reader, lebar, path, idx, info, nomor_mulai):
                 yield hasil
             pendek = {"nomor": nomor, "row": list(row)}
             continue
+        if len(row) > lebar:
+            row = _rapikan_lebar_mt4(row, lebar, idx, info)
         if len(row) > lebar:
             hasil = flush()
             if hasil is not None:
