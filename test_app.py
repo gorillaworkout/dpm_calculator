@@ -121,9 +121,9 @@ assert b'name="saldo_jw"' not in halaman_segregate.data
 assert b"Download the template" not in halaman_segregate.data
 assert b"12 GB total upload limit" in halaman_segregate.data
 assert b"deleted from the server" in halaman_segregate.data
-assert b"50 files maximum" in halaman_segregate.data
+assert b"70 files maximum" in halaman_segregate.data
 assert b"in pieces automatically" in halaman_segregate.data
-assert b"files.length > 50" in halaman_segregate.data
+assert b"fileCount > MAX_FILES" in halaman_segregate.data
 assert b"file.size === 0" in halaman_segregate.data
 
 missing = c.post("/tool/segregate", data={}, content_type="multipart/form-data")
@@ -138,9 +138,9 @@ assert invalid.status_code == 400
 assert b".csv, .xlsx, or .xlsm" in invalid.data
 
 too_many = c.post("/tool/segregate", data={
-    "file": [(io.BytesIO(b"x"), f"{i}.csv") for i in range(51)]
+    "file": [(io.BytesIO(b"x"), f"{i}.csv") for i in range(71)]
 }, content_type="multipart/form-data")
-assert too_many.status_code == 400 and b"no more than 50 files" in too_many.data
+assert too_many.status_code == 400 and b"no more than 70 files" in too_many.data
 
 empty = c.post("/tool/segregate", data={
     "file": (io.BytesIO(b""), "empty.csv")

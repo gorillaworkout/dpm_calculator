@@ -43,7 +43,7 @@
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
     {% elif slug == "segregate" %}
-    <label for="deals-file">Deals History <span class="opt">— one or more files, 50 files maximum</span></label>
+    <label for="deals-file">Deals History <span class="opt">— one or more files, {{ max_files }} files maximum</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Deals History files here</strong><br><span>or click to choose one or more files</span>
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
@@ -144,6 +144,7 @@
   (function () {
     var CHUNK = 10 * 1024 * 1024;        // smaller requests survive unstable VPN/WARP links
     var DIRECT = {{ '0' if slug == 'segregate' else '80 * 1024 * 1024' }};
+    var MAX_FILES = {{ max_files }};
     // Deal Segregator always uses chunks, even for small files, so progress and
     // retry/error details are accurate from the first byte.
     var form = document.getElementById('uploadform'),
@@ -362,10 +363,12 @@
         return all.concat(Array.prototype.slice.call(input.files || []));
       }, []);
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
-      if (files.length > 50 || files.some(function (file) { return file.size === 0; })) {
+      var accountsInput = form.querySelector('input[type="file"][name="mt4_accounts"]');
+      var fileCount = files.length + (accountsInput ? (accountsInput.files || []).length : 0);
+      if (fileCount > MAX_FILES || files.some(function (file) { return file.size === 0; })) {
         ev.preventDefault();
-        var message = files.length > 50
-          ? 'Select no more than 50 files per run.'
+        var message = fileCount > MAX_FILES
+          ? 'Select no more than ' + MAX_FILES + ' files per run.'
           : 'Empty files cannot be processed. Remove the 0-byte file and try again.';
         updateProgress('Upload failed', message, 0, 'failed');
         return;

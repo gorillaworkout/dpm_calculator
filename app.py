@@ -421,7 +421,7 @@ DOC = {
             "<code>rate</code>. Any sheet name is fine and headers are not case-sensitive. "
             "Select it together with the Deals files.",
             f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
-            "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
+            f"<strong>{chunked.MAX_FILES}-file maximum</strong> per run. Large batches are sent to the server "
             "in pieces automatically &mdash; you will see "
             "the progress under the button, so leave the tab open until it says "
             "<em>Processing</em>. Duplicate Deal IDs are removed within each run.",
@@ -562,7 +562,7 @@ KVB_SEGREGATE_DOC = {
         "or <code>.csv</code> format with columns <code>date</code>, <code>currency</code>, "
         "<code>rate</code>. Any sheet name is fine and headers are not case-sensitive.",
         f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
-        "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
+        f"<strong>{chunked.MAX_FILES}-file maximum</strong> per run. Large batches are sent to the server "
         "in pieces automatically.",
     ],
     "langkah": [
@@ -615,7 +615,8 @@ def _nav():
     return {"tools": _tools_for(company) or {}, "company": company,
             "company_urls": {"dpm": "/", "kvb": "/kvb"},
             "can_dpm": auth.has_company(user, "dpm"),
-            "can_kvb": auth.has_company(user, "kvb")}
+            "can_kvb": auth.has_company(user, "kvb"),
+            "max_files": chunked.MAX_FILES}
 
 
 @app.template_filter("waktu")
@@ -686,7 +687,12 @@ def run(slug, company="dpm"):
     if slug == "segregate":
         if not uploads and not staged:
             return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
-        if len(uploads) + len(staged or []) > chunked.MAX_FILES:
+        # One count for every upload field: "file" (MT5 + MT4 Deals and the FX
+        # workbook), files already staged by /upload/chunk, and the KVB
+        # "mt4_accounts" account-type file.
+        akun = request.files.get("mt4_accounts") if company == "kvb" else None
+        n_akun = 1 if akun and akun.filename else 0
+        if len(uploads) + len(staged or []) + n_akun > chunked.MAX_FILES:
             return _gagal(f"Select no more than {chunked.MAX_FILES} files per run.")
         empty = []
         for upload in uploads:

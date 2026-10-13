@@ -83,6 +83,8 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from upload_limits import MAX_FILES
+
 KOLOM_WAJIB = ["Deal", "Login", "Time", "Type", "Entry",
                "Symbol", "Volume", "Commission", "Fee", "Swap", "Profit", "Currency"]
 
@@ -2098,6 +2100,10 @@ def main():
     args = ap.parse_args()
 
     paths_in = [Path(p) for p in args.input]
+    n_files = len(paths_in) + (1 if args.mt4_accounts else 0)
+    if n_files > MAX_FILES:
+        sys.exit(f"STOP: {n_files} files given; select no more than {MAX_FILES} files per run "
+                 "(Deals files, the FX workbook and --mt4-accounts all count).")
     for p in paths_in:
         if not p.is_file():
             sys.exit(f"STOP: file not found: {p}")
