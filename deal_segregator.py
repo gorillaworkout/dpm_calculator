@@ -312,6 +312,9 @@ def baca_file(path: Path):
             f"STOP: required columns are missing in '{path.name}': {hilang}\n"
             f"Header that was read ({len(header)} columns): {header}\n"
             "Make sure this file is a 'Deals History' export from MT5, not another file."
+            + ("\nHint: this header looks like an FX / rate file (date, currency, rate). "
+               "Upload it together with a Deals History file; it is detected automatically."
+               if _header_fx(header) else "")
         )
     return idx, rows, info
 
@@ -649,60 +652,134 @@ def _norm(v) -> str:
     return _teks(v).upper()
 
 
-def _adalah_file_fx(path: Path) -> bool:
-    """Identify Client Equity FX by sheet and header, never by filename."""
-    if path.suffix.lower() not in (".xlsx", ".xlsm"):
-        return False
-    wb = None
+FX_KOLOM = ("DATE", "CURRENCY", "RATE")
+
+
+def _header_fx(header) -> bool:
+    """True when a header row has date, currency and rate (case/space-insensitive)."""
+    norm = {_norm(v) for v in header}
+    return all(k in norm for k in FX_KOLOM)
+
+
+def _indeks_fx(header) -> dict:
+    idx = {}
+    for i, v in enumerate(header):
+        idx.setdefault(_norm(v), i)
+    return idx
+
+
+def _csv_header(path: Path):
+    enc = _deteksi_encoding(path)
+    with _buka_teks(path, enc) as f:
+        awal = f.readline()
+    return enc, next(csv.reader([awal], delimiter=_deteksi_pemisah(awal)), [])
+
+
+def _sheet_fx(path: Path):
+    """Return the sheet name holding the FX header (prefer 'Query result'), or None."""
+    wb = load_workbook(path, read_only=True, data_only=True)
     try:
-        wb = load_workbook(path, read_only=True, data_only=True)
-        sheet = next((s for s in wb.sheetnames if _norm(s) == FX_SHEET), None)
-        if not sheet:
-            return False
-        header = [_teks(v) for v in next(wb[sheet].iter_rows(max_row=1, values_only=True), [])]
-        return all(k in header for k in ("date", "Currency", "rate"))
+        names = sorted(wb.sheetnames, key=lambda s: _norm(s) != FX_SHEET)
+        for s in names:
+            first = next(wb[s].iter_rows(max_row=1, values_only=True), None)
+            if first and _header_fx(first):
+                return s
+        return None
+    finally:
+        wb.close()
+
+
+def _adalah_file_fx(path: Path) -> bool:
+    """Identify Client Equity FX by header (date, currency, rate) only, never by filename.
+    Any sheet name works ('Query result' preferred); .csv is accepted too."""
+    suffix = path.suffix.lower()
+    try:
+        if suffix in (".xlsx", ".xlsm"):
+            return _sheet_fx(path) is not None
+        if suffix == ".csv":
+            header = _csv_header(path)[1]
+            # Never steal a Deals History CSV.
+            if all(k in header for k in KOLOM_WAJIB):
+                return False
+            return _header_fx(header)
     except Exception:
         return False
+    return False
+
+
+def _baris_fx(path: Path):
+    """Yield (header, numbered rows) from the detected FX sheet or CSV."""
+    if path.suffix.lower() == ".csv":
+        enc = _deteksi_encoding(path)
+        with _buka_teks(path, enc) as f:
+            awal = f.readline()
+            f.seek(0)
+            reader = csv.reader(f, delimiter=_deteksi_pemisah(awal))
+            header = next(reader, [])
+            yield header, None
+            for number, row in enumerate(reader, start=2):
+                yield number, [v if v != "" else None for v in row]
+        return
+    sheet = _sheet_fx(path)
+    if sheet is None:
+        sys.exit(f"STOP: no sheet with columns date, currency, rate in FX file '{path.name}'")
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
+        it = wb[sheet].iter_rows(values_only=True)
+        yield list(next(it)), None
+        for number, row in enumerate(it, start=2):
+            yield number, list(row)
     finally:
-        if wb is not None:
-            wb.close()
+        wb.close()
+
+
+def _tanggal_fx(v, path: Path, nomor: int):
+    """FX dates: real date cells, MT5 text, or ISO / dd-mm text from CSV files."""
+    if isinstance(v, str):
+        teks = v.strip()
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d", "%Y.%m.%d", "%d/%m/%Y", "%d-%m-%Y"):
+            try:
+                return datetime.datetime.strptime(teks, fmt).date()
+            except ValueError:
+                pass
+    return tanggal_dari_waktu(v, path, nomor, "date")
 
 
 def baca_fx(path: Path):
     """Read {(date, CURRENCY): rate}; blank rate means already USD (rate 1)."""
     _ingat_berkas(path)
-    wb = load_workbook(path, read_only=True, data_only=True)
-    try:
-        sheet = next(s for s in wb.sheetnames if _norm(s) == FX_SHEET)
-        it = wb[sheet].iter_rows(values_only=True)
-        header = [_teks(v) for v in next(it)]
-        idx = {name: i for i, name in enumerate(header)}
-        result = {}
-        for number, row in enumerate(it, start=2):
-            _ingat_baris(number)
-            if not any(v is not None and _teks(v) for v in row):
-                continue
-            date = tanggal_dari_waktu(row[idx["date"]], path, number)
-            currency = _norm(row[idx["Currency"]])
-            if not currency:
-                sys.exit(f"STOP: empty Currency in FX file '{path.name}', row {number}")
-            raw = row[idx["rate"]]
-            if raw is None or _teks(raw) == "":
-                # Only USD is already denominated in USD. A blank rate for any
-                # other currency means conversion data is missing, not rate 1.
-                rate = None if currency == "USD" else 0.0
-            else:
-                rate = _angka(raw, path, number, "rate")
-                if rate <= 0:
-                    sys.exit(f"STOP: FX rate must be positive in '{path.name}', row {number}: {rate!r}")
-            key = (date, currency)
-            if key in result:
-                sys.exit(f"STOP: duplicate FX date/currency in '{path.name}', row {number}: "
-                         f"{date} {currency}")
-            result[key] = rate
-        return result
-    finally:
-        wb.close()
+    gen = _baris_fx(path)
+    header, _ = next(gen)
+    idx = _indeks_fx(header)
+    if not all(k in idx for k in FX_KOLOM):
+        sys.exit(f"STOP: FX file '{path.name}' needs columns date, currency, rate; "
+                 f"header read: {[_teks(v) for v in header]}")
+    i_date, i_cur, i_rate = (idx[k] for k in FX_KOLOM)
+    result = {}
+    for number, row in gen:
+        _ingat_baris(number)
+        if not any(v is not None and _teks(v) for v in row):
+            continue
+        cell = lambda i: row[i] if i < len(row) else None
+        date = _tanggal_fx(cell(i_date), path, number)
+        currency = _norm(cell(i_cur))
+        if not currency:
+            sys.exit(f"STOP: empty Currency in FX file '{path.name}', row {number}")
+        raw = cell(i_rate)
+        if raw is None or _teks(raw) == "":
+            # Only USD is already denominated in USD. A blank rate for any
+            # other currency means conversion data is missing, not rate 1.
+            rate = None if currency == "USD" else 0.0
+        else:
+            rate = _angka(raw, path, number, "rate")
+            if rate <= 0:
+                sys.exit(f"STOP: FX rate must be positive in '{path.name}', row {number}: {rate!r}")
+        key = (date, currency)
+        if key in result:
+            sys.exit(f"STOP: duplicate FX date/currency in '{path.name}', row {number}: "
+                     f"{date} {currency}")
+        result[key] = rate
+    return result
 
 
 def _angka(v, path: Path, nomor: int, kolom: str):
@@ -1474,7 +1551,9 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
     if len(fx_paths) > 1:
         sys.exit("STOP: upload only one Client Equity FX workbook per run.")
     if not deal_paths:
-        sys.exit("STOP: no Deals History file was uploaded; only Client Equity FX file(s) were found.")
+        names = ", ".join(p.name for p in fx_paths) or "(none)"
+        sys.exit("STOP: no Deals History file was uploaded; only Client Equity FX / rate file(s) "
+                 f"were found: {names}. Upload the MT5 Deals History export together with the FX file.")
     klasifikasi = [(path, _info_mt4(path)) for path in deal_paths]
     mt4_paths = [path for path, info in klasifikasi if info]
     if mt4_paths and not allow_mt4:

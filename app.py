@@ -303,7 +303,8 @@ HINT = {
           "'Payment Channel Balance' are used when present, so that Channel Balance and "
           "J Wallet come out complete.",
     "segregate": "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). You may "
-                 "also include one Client Equity FX workbook (.xlsx, sheet 'Query result'); "
+                 "also include one Client Equity FX / rate file (.xlsx or .csv, any sheet name, "
+                 "columns date/currency/rate, headers not case-sensitive); "
                  "the two file types are detected automatically.",
     "pl-desk": "Upload the FinanceOS settlement (PDF, or the converted Excel) and the "
                "Metabase workbook. The workbook must contain the desk-rebate export, "
@@ -415,9 +416,10 @@ DOC = {
         "siapkan": [
             "One or more MT5 Deals History files in <code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code> format.",
             "Each file (or each sheet of an Excel file) must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency columns. Group and Country are ignored and are not required.",
-            "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
-            "format with sheet <code>Query result</code> and columns <code>date</code>, "
-            "<code>Currency</code>, <code>rate</code>. Select it together with the Deals files.",
+            "Optional: one <strong>Client Equity FX</strong> / rate file in <code>.xlsx</code> "
+            "or <code>.csv</code> format with columns <code>date</code>, <code>currency</code>, "
+            "<code>rate</code>. Any sheet name is fine and headers are not case-sensitive. "
+            "Select it together with the Deals files.",
             f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
             "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
             "in pieces automatically &mdash; you will see "
@@ -556,9 +558,9 @@ KVB_SEGREGATE_DOC = {
         "Each MT4 file still has a <strong>USD</strong> or <strong>USC</strong> choice next to it, default USD. "
         "That choice is used only when the account-type file and the currency column do not already say.",
         "Each MT5 file must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency. Group and Country are ignored.",
-        "Optional: one <strong>Client Equity FX</strong> workbook in <code>.xlsx</code> "
-        "format with sheet <code>Query result</code> and columns <code>date</code>, "
-        "<code>Currency</code>, <code>rate</code>.",
+        "Optional: one <strong>Client Equity FX</strong> / rate file in <code>.xlsx</code> "
+        "or <code>.csv</code> format with columns <code>date</code>, <code>currency</code>, "
+        "<code>rate</code>. Any sheet name is fine and headers are not case-sensitive.",
         f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
         "<strong>50-file maximum</strong> per run. Large batches are sent to the server "
         "in pieces automatically.",
