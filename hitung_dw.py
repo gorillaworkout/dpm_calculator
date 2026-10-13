@@ -860,6 +860,59 @@ def kunci_gw(v):
     return re.sub(r"[^A-Z0-9]", "", norm(v))
 
 
+def peta_nama_gateway(ejaan_data, fee_table=None):
+    """{kunci_gw: nama tampilan}. Satu gateway = satu nama, walau di data ditulis
+    'Chippay', 'ChipPay', 'ChipPay ' (huruf besar/kecil & spasi diabaikan).
+    Ejaan tabel fee menang; kalau tidak ada di tabel fee, ejaan yang paling
+    sering muncul di data (spasi dirapikan)."""
+    hitung = defaultdict(Counter)
+    for v, n in (ejaan_data.items() if isinstance(ejaan_data, dict)
+                 else ((x, 1) for x in ejaan_data)):
+        t = " ".join(str(v if v is not None else "").split())
+        if t:
+            hitung[kunci_gw(t)][t] += n
+    peta = {k: c.most_common(1)[0][0] for k, c in hitung.items()}
+    for (_cur, k), row in (fee_table or {}).items():
+        if row.get("nama_asli") and k in peta:
+            peta[k] = row["nama_asli"]
+    return peta
+
+
+def satukan_nama_gateway(report, fee_table):
+    """Ganti nama gateway di records + gabungkan pivot D&W Report yang cuma beda
+    huruf besar/kecil atau spasi. Dipanggil setelah semua sheet diproses."""
+    ejaan = Counter()
+    for (_k, _c, g), v in report["pivot"].items():
+        if g:
+            ejaan[g] += v["n"]
+    peta = peta_nama_gateway(ejaan, fee_table)
+
+    def kanon(g):
+        t = " ".join(str(g if g is not None else "").split())
+        return peta.get(kunci_gw(t), t) if t else g
+
+    for rec in report["records"]:
+        if rec.get("Payment Gateway") not in (None, ""):
+            rec["Payment Gateway"] = kanon(rec["Payment Gateway"])
+    baru, digabung = {}, defaultdict(set)
+    for (k, c, g), v in report["pivot"].items():
+        c2 = " ".join(str(c).split())
+        g2 = kanon(g) if g else g
+        if g:
+            digabung[(c2, g2)].add(g)
+        kunci = (k, c2, g2)
+        if kunci not in baru:
+            baru[kunci] = dict(v)
+        else:
+            t = baru[kunci]
+            for f in ("crm_usd", "tx", "xero_usd", "charges", "n"):
+                t[f] += v[f]
+            t["urut"] = min(t["urut"], v["urut"])
+    report["pivot"] = baru
+    report["gateway_digabung"] = {k: sorted(v) for k, v in digabung.items() if len(v) > 1}
+    return peta
+
+
 def to_float(v):
     if v is None or v == "":
         return None
@@ -890,6 +943,12 @@ def as_date(v):
                 return datetime.datetime.strptime(s, "%Y%m%d").date()
             except ValueError:
                 pass
+        # Angka serial Excel (sel tanpa format tanggal, mis. 46235 = 1 Agu 2026).
+        # Dibatasi 1990-2100 supaya angka biasa / tanggal 'nol' 1970 tidak
+        # berubah jadi tanggal palsu.
+        if 32874 <= float(v) <= 73415:
+            return (datetime.datetime(1899, 12, 30)
+                    + datetime.timedelta(days=int(v))).date()
     for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y%m%d"):
         try:
             return datetime.datetime.strptime(str(v).strip(), fmt).date()
@@ -1023,7 +1082,8 @@ def _baca_satu_sheet_fee(ws):
         dep_raw = row[c_dep] if c_dep is not None and len(row) > c_dep else None
         wd_raw = row[c_wd] if c_wd is not None and len(row) > c_wd else None
         out[(cur, k_gw)] = {"deposit": dep, "withdrawal": wd, "fixed": legacy,
-                            "nama": gw, "dep_raw": dep_raw, "wd_raw": wd_raw}
+                            "nama": gw, "nama_asli": " ".join(str(row[c_gw]).split()),
+                            "dep_raw": dep_raw, "wd_raw": wd_raw}
     return out, h_idx + 1
 
 
@@ -1067,6 +1127,7 @@ def load_fee_table(wb, pakai_extra_fees=None):
                 "withdrawal": v["withdrawal"] if v["withdrawal"] is not None else lama.get("withdrawal"),
                 "fixed": v["fixed"] or lama.get("fixed", 0.0),
                 "nama": v.get("nama") or lama.get("nama", ""),
+                "nama_asli": v.get("nama_asli") or lama.get("nama_asli", ""),
                 "asal": jejak,
                 "ditimpa": catat,
                 "dep_raw": v.get("dep_raw") if v["deposit"] is not None else lama.get("dep_raw"),
@@ -4388,6 +4449,11 @@ def main():
         total_rows += n
         if date_col:
             date_cols_used[real] = date_col.title()
+
+    satukan_nama_gateway(report, fee_table)
+    for (c_, g_), varian in sorted(report.get("gateway_digabung", {}).items()):
+        print(f"Gabung : gateway {c_} {' / '.join(repr(x) for x in varian)} -> {g_!r} "
+              f"(huruf besar/kecil & spasi diabaikan)")
 
     if MAKE_CHANNEL_SHEETS and report["records"]:
         nama_ftt, ftt = baca_fund_transfer(wb, rates, xero_dates, report)
