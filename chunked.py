@@ -27,8 +27,9 @@ from pathlib import Path
 from flask import jsonify, request
 from werkzeug.utils import secure_filename
 
+from upload_limits import MAX_FILES
+
 CHUNK_SUFFIXES = (".csv", ".xlsx", ".xlsm")
-MAX_FILES = 50
 # Idle time since the last chunk, not the age of the staging directory.
 # A 10 GB upload can take several hours as long as chunks keep arriving.
 STAGE_MAX_AGE_HOURS = 1
