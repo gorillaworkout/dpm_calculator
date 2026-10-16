@@ -483,9 +483,6 @@
             hidden.value = id;
             form.appendChild(hidden);
             activeId = null; // processing route now owns and removes the staged files
-            {% if company == 'kvb' and slug == 'segregate' %}
-            stampMt4Currency();
-            {% endif %}
             form.submit();
           });
         })
