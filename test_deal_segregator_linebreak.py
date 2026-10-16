@@ -63,10 +63,20 @@ def daily_deals(path):
     return [dict(zip(header, row)) for row in rows[1:]]
 
 
+def _peta_kosong():
+    """Header-only account-type file: MT4 requires one; every login is then USD."""
+    import tempfile as _tf
+    from pathlib import Path as _P
+    p = _P(_tf.mkdtemp()) / "account_types.csv"
+    p.write_text("account,account_type\n", encoding="utf-8")
+    return p
+
+
 def run(path, allow_mt4=False):
     folder = Path(tempfile.mkdtemp())
     out = folder / "hasil.zip"
-    proses([path], out, allow_mt4=allow_mt4)
+    proses([path], out, allow_mt4=allow_mt4,
+           mt4_accounts=_peta_kosong() if allow_mt4 else None)
     return verification(out), daily_deals(out), out
 
 

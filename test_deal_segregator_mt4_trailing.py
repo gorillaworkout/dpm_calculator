@@ -30,9 +30,18 @@ def verifikasi(zip_path):
         return out, daily
 
 
+def _peta_kosong():
+    """Header-only account-type file: MT4 requires one; every login is then USD."""
+    import tempfile as _tf
+    from pathlib import Path as _P
+    p = _P(_tf.mkdtemp()) / "account_types.csv"
+    p.write_text("account,account_type\n", encoding="utf-8")
+    return p
+
+
 def run(path):
     out = path.with_suffix(".zip")
-    proses([path], out, allow_mt4=True)
+    proses([path], out, allow_mt4=True, mt4_accounts=_peta_kosong())
     return verifikasi(out)
 
 

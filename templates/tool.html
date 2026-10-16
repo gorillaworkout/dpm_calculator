@@ -22,7 +22,7 @@
     {% elif slug == "segregate" and company == "kvb" %}
     <style>
       #deals-drop .drop-files li span{flex:1}
-      select.mt4-currency{width:92px;flex:none;margin:0;padding:6px 26px 6px 8px;font-size:12px}
+      .mt4-tag{flex:none;font-size:12px;color:#555;margin-right:8px}
     </style>
     <label for="deals-file">Deals files <span class="opt">— MT5 Deals History; MT4 Raw Report is optional</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
@@ -30,9 +30,9 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
-    <label for="mt4-accounts">MT4 account types <span class="opt">— optional</span></label>
+    <label for="mt4-accounts">MT4 account types <span class="opt">— required when any MT4 file is uploaded</span></label>
     <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
-      <strong>Drop the account-type file here</strong><br><span>Optional. Columns account and account_type. CentAccount is USC; other types are USD.</span>
+      <strong>Drop the account-type file here</strong><br><span>Required with MT4. Columns account and account_type. CentAccount is USC (÷100); other types and unknown logins are USD.</span>
       <input id="mt4-accounts" type="file" name="mt4_accounts" accept=".csv,.xlsx,.xlsm">
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
@@ -198,7 +198,7 @@
           });
           item.appendChild(name);
           {% if company == 'kvb' and slug == 'segregate' %}
-          maybeMt4Currency(item, file);
+          sniffMt4(item, file);
           {% endif %}
           item.appendChild(button);
           list.appendChild(item);
@@ -228,9 +228,11 @@
       show();
     }
     {% if company == 'kvb' and slug == 'segregate' %}
-    var mt4Choice = {};
-    function maybeMt4Currency(item, file) {
-      file.slice(0, 400).arrayBuffer().then(function (buf) {
+    // name -> 'mt4' | 'accounts' | 'other', from the first bytes of the file.
+    // .xlsx cannot be sniffed here; the server checks those before the run.
+    var sniffed = {};
+    function sniffMt4(item, file) {
+      file.slice(0, 2000).arrayBuffer().then(function (buf) {
         var bytes = new Uint8Array(buf);
         var text = '';
         try {
@@ -244,36 +246,29 @@
         } catch (e) {
           return;
         }
-        if (!/Raw Report for/i.test(text) || !item.parentNode) return;
-        var select = document.createElement('select');
-        select.className = 'mt4-currency';
-        select.setAttribute('data-name', file.name);
-        select.setAttribute('aria-label', 'Currency for ' + file.name);
-        select.innerHTML = '<option value="USD">USD</option><option value="USC">USC</option>';
-        select.value = mt4Choice[file.name] || 'USD';
-        ['click', 'mousedown', 'keydown'].forEach(function (type) {
-          select.addEventListener(type, function (event) { event.stopPropagation(); });
-        });
-        select.addEventListener('change', function () { mt4Choice[file.name] = select.value; });
-        item.insertBefore(select, item.querySelector('.file-remove'));
+        var head = text.split(/\r?\n/).slice(0, 5).join('\n').toLowerCase();
+        var kind = 'other';
+        if (/raw report for/.test(head) || (/open time/.test(head) && /close time/.test(head))) {
+          kind = 'mt4';
+        } else if (/account_type/.test(head)) {
+          kind = 'accounts';
+        }
+        sniffed[file.name] = kind;
+        if (kind === 'mt4' && item.parentNode) {
+          var tag = document.createElement('span');
+          tag.className = 'mt4-tag';
+          tag.textContent = 'MT4';
+          item.insertBefore(tag, item.querySelector('.file-remove'));
+        }
       }).catch(function () {});
     }
-    function stampMt4Currency() {
-      var picks = form.querySelectorAll('select.mt4-currency');
-      var lines = [];
-      picks.forEach(function (sel) { lines.push(sel.getAttribute('data-name') + '|' + sel.value); });
-      var existing = form.querySelector('input[name="mt4_currency"]');
-      if (!lines.length) {
-        if (existing) existing.remove();
-        return;
-      }
-      if (!existing) {
-        existing = document.createElement('input');
-        existing.type = 'hidden';
-        existing.name = 'mt4_currency';
-        form.appendChild(existing);
-      }
-      existing.value = lines.join('\n');
+    function mt4WithoutAccounts() {
+      var deals = Array.prototype.slice.call(document.getElementById('deals-file').files || []);
+      var accounts = document.getElementById('mt4-accounts');
+      var hasAccounts = (accounts && (accounts.files || []).length > 0) ||
+        deals.some(function (f) { return sniffed[f.name] === 'accounts'; });
+      var mt4 = deals.filter(function (f) { return sniffed[f.name] === 'mt4'; });
+      return (mt4.length && !hasAccounts) ? mt4.map(function (f) { return f.name; }) : null;
     }
     {% endif %}
     setupDrop('deals-drop', document.getElementById('deals-file'), false);
@@ -398,7 +393,14 @@
 
     form.addEventListener('submit', function (ev) {
       {% if company == 'kvb' and slug == 'segregate' %}
-      stampMt4Currency();
+      var mt4Missing = mt4WithoutAccounts();
+      if (mt4Missing) {
+        ev.preventDefault();
+        updateProgress('STOP: account-type file required',
+          'STOP: MT4 file(s) ' + mt4Missing.join(', ') + ' need the account-type file ' +
+          '(columns account, account_type). Add it and run again. Nothing was uploaded.', 0, 'failed');
+        return;
+      }
       {% endif %}
       var files = inputs.reduce(function (all, input) {
         return all.concat(Array.prototype.slice.call(input.files || []));
