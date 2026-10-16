@@ -149,7 +149,7 @@ def buku_mt4():
         "Deal": "Text. Full deal id.",
         "Login": "Text. Full account number.",
         "Close Time": "Required for a closed buy/sell. Balance and credit rows are dropped.",
-        "Currency": "Optional trailing column. USD or USC. Used when the account-type file does not say.",
+        "Currency": "Optional trailing column. Cross-check only; the account-type file decides USD or USC.",
         "Type": "buy or sell for a trade. balance and credit are dropped.",
     })
     panduan.insert(2, [
@@ -169,11 +169,11 @@ def buku_akun():
     ]
     panduan = _panduan(HEADER_AKUN, _KOLOM_PETA, {
         "account": "Text. The MT4 login.",
-        "account_type": "CentAccount is USC. Classic, Plus, Pro, and every other type are USD.",
+        "account_type": "CentAccount (any case or spacing) is USC, divided by 100. Classic, Plus, Pro, and every other type are USD. Logins missing from this file are USD and listed on Verifikasi.",
     })
     panduan.insert(2, [
         "Layout", "",
-        "Optional, KVB only. One row per MT4 account. DPM does not use this file.",
+        "Required with any MT4 file, KVB only. One row per MT4 account. DPM does not use this file.",
     ])
     return _tulis("Accounts", HEADER_AKUN, contoh, panduan, ("account",))
 

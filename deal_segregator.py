@@ -51,8 +51,9 @@ Time, ...), bukan dari nama file. Dua bentuk: Raw Report berjudul (titik koma)
 dan export yang header-nya di baris pertama (koma, boleh ada kolom mata uang
 di ujung). Hanya buy/sell yang sudah ditutup (Close Time) yang masuk, ke sheet
 yang sama dengan MT5, dengan kolom Platform. Tanpa file MT4, sheet dan angka
-MT5 tidak berubah. Mata uang per baris: peta account_type (CentAccount = USC),
-lalu kolom mata uang di file, lalu pilihan USD/USC per file. USC MT4 dibagi 100
+MT5 tidak berubah. File account,account_type WAJIB untuk MT4. Mata uang per
+baris hanya dari peta itu (CentAccount = USC, tipe lain dan login yang tidak
+ada di peta = USD; kolom mata uang di file hanya cek silang). USC MT4 dibagi 100
 (bukan kurs Client Equity FX). Agent tidak masuk ke total manapun.
 
 Line break di dalam sebuah field (Name, Comment, atau kolom teks lain) disambung
@@ -1005,6 +1006,11 @@ def _adalah_peta_akun(path: Path) -> bool:
         return False
 
 
+def _adalah_cent(tipe) -> bool:
+    """CentAccount, centaccount, 'Cent Account', cent_account -> True."""
+    return re.sub(r"[\s_\-]+", "", _teks(tipe)).lower() == "centaccount"
+
+
 def baca_peta_akun(path: Path) -> dict:
     """account -> 'USD' atau 'USC'. CentAccount = USC. Tipe lain = USD.
 
@@ -1079,7 +1085,7 @@ def baca_peta_akun(path: Path) -> dict:
             if not akun:
                 continue
             tipe = _teks(row[idx["account_type"]] if idx["account_type"] < len(row) else "")
-            mata = "USC" if tipe.strip().lower() == "centaccount" else "USD"
+            mata = "USC" if _adalah_cent(tipe) else "USD"
             lama = hasil.get(akun)
             if lama is not None and lama != mata:
                 sys.exit(f"STOP: account {akun} has conflicting account types in '{path.name}', "
@@ -1090,21 +1096,19 @@ def baca_peta_akun(path: Path) -> dict:
     return hasil
 
 
-def _selesaikan_mata_uang_mt4(login, kolom, fallback, akun):
-    """(mata uang, sumber, beda). Sumber: mapping, column, atau fallback.
+def _selesaikan_mata_uang_mt4(login, kolom, akun):
+    """(mata uang, sumber, beda). Sumber: mapping atau unknown.
 
-    Beda diisi kalau peta dan kolom sama-sama USD/USC tapi tidak sama.
-    Peta menang.
+    Sumber mata uang hanya peta account type. Login yang tidak ada di peta = USD.
+    Kolom mata uang di file (kalau ada) hanya cek silang: beda diisi kalau
+    kolom berisi USD/USC yang tidak sama dengan hasil peta.
     """
     mapped = (akun or {}).get(_kunci_akun(login))
     col = _teks(kolom).strip().upper()
     col_ok = col in _MT4_MATA_UANG
-    if mapped:
-        beda = (_kunci_akun(login), mapped, col) if col_ok and col != mapped else None
-        return mapped, "mapping", beda
-    if col_ok:
-        return col, "column", None
-    return fallback, "fallback", None
+    mata, sumber = (mapped, "mapping") if mapped else ("USD", "unknown")
+    beda = (_kunci_akun(login), mata, col) if col_ok and col != mata else None
+    return mata, sumber, beda
 
 
 def _daftar_login(logins) -> str:
@@ -1298,27 +1302,11 @@ def _iter_mt4(path: Path, info: dict):
         yield from _alirkan_csv(reader, lebar, path, idx, info, skip)
 
 
-def _mata_uang_mt4(path: Path, mt4_currency):
-    """USD kalau nama file tidak ada di peta. Nilai lain selain USD/USC ditolak.
-
-    Entri untuk file yang bukan Raw Report diabaikan oleh pemanggil: fungsi ini
-    hanya dipanggil untuk file MT4.
-    """
-    table = mt4_currency or {}
-    if path.name not in table:
-        return "USD", False
-    mentah = table[path.name]
-    chosen = str(mentah).strip().upper()
-    if chosen not in _MT4_MATA_UANG:
-        sys.exit(f"STOP: MT4 currency for '{path.name}' must be USD or USC, not {mentah!r}.")
-    return chosen, True
-
-
-def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=None):
+def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, akun=None):
     """Satu export MT4 -> baris out saja, pada Close Time.
 
-    Mata uang tiap baris: peta account type, lalu kolom di file, lalu pilihan
-    per file. USC dibagi 100 pada Commission, Fee, Swap, dan Profit sebelum
+    Mata uang tiap baris hanya dari peta account type (CentAccount = USC,
+    lainnya USD; login tak dikenal = USD). Kolom mata uang hanya cek silang. USC dibagi 100 pada Commission, Fee, Swap, dan Profit sebelum
     diagregasi. Volume tidak dibagi. Agent hanya untuk Verifikasi.
     """
     header = info["header"]
@@ -1327,8 +1315,9 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
     total = n_out = n_bal = n_can = n_foot = n_lain = n_dup = 0
     profit_balance = agent_total = 0.0
     raw = {"Profit": 0.0, "Commission": 0.0, "Fee": 0.0, "Swap": 0.0}
-    sumber_baris = {"mapping": 0, "column": 0, "fallback": 0}
-    sumber_login = {"mapping": set(), "column": set(), "fallback": set()}
+    sumber_baris = {"mapping": 0, "unknown": 0}
+    sumber_login = {"mapping": set(), "unknown": set()}
+    currency = "USD"
     beda = []
     dipakai_peta = False
 
@@ -1341,7 +1330,7 @@ def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, currency, akun=
     def catat(login, row):
         nonlocal dipakai_peta
         mentah = row[kolom_uang] if kolom_uang is not None and kolom_uang < len(row) else ""
-        mata, sumber, salah = _selesaikan_mata_uang_mt4(login, mentah, currency, akun)
+        mata, sumber, salah = _selesaikan_mata_uang_mt4(login, mentah, akun)
         sumber_baris[sumber] += 1
         sumber_login[sumber].add(_kunci_akun(login))
         if salah:
@@ -1552,13 +1541,14 @@ def _hasil_agregat(kelompok):
 
 
 @_jaga
-def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
+def proses(paths_in, path_out: Path, allow_mt4=False,
            mt4_accounts=None, hapus_sumber=False) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
     'out' and 'in' rows go to separate sheets of each workbook.
     MT4 Raw Report files are accepted only when allow_mt4 is true (KVB).
-    mt4_currency maps an MT4 file name to USD or USC. Missing names default to USD.
-    Names that are not an MT4 Raw Report are ignored."""
+    Any MT4 Raw Report requires the account,account_type file (mt4_accounts or
+    uploaded among paths_in): CentAccount rows are USC (÷100), every other type
+    and any login missing from the file is USD."""
     paths_in = [Path(p) for p in paths_in]
     path_out = Path(path_out)
     fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
@@ -1599,6 +1589,13 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
             "STOP: DPM Deal Segregator accepts MT5 Deals History only. "
             f"MT4 Raw Report is not used on this page: {names}. "
             "Upload MT4 on the KVB Deal Segregator."
+        )
+    if mt4_paths and not peta_paths:
+        names = ", ".join(path.name for path in mt4_paths)
+        sys.exit(
+            "STOP: the MT4 account-type file is required for MT4 Raw Report(s): "
+            f"{names}. Upload the account-type file (columns account, account_type) "
+            "together with the MT4 file. CentAccount is USC (÷100); every other type is USD."
         )
     fx = {}
     for path in fx_paths:
@@ -1662,9 +1659,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
             per_file = []
             for path, info in klasifikasi:
                 if info:
-                    currency, selected = _mata_uang_mt4(path, mt4_currency)
-                    rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, currency, akun)
-                    rec["currency_selected"] = selected
+                    rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, akun)
                     per_file.append(rec)
                 else:
                     per_file.append(_normalisasi_satu_file(path, deals, pakai_baris))
@@ -1697,13 +1692,8 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
     yellow_labels = set()
     for r in per_file:
         if r.get("platform") == "mt4":
-            if r.get("currency_column") or r.get("used_mapping"):
-                how = ("resolved per row: account type, then the currency column, "
-                       "then the file choice")
-            elif r["currency_selected"]:
-                how = f"{r['currency']} (selected for this file)"
-            else:
-                how = f"{r['currency']} (default; no currency was selected for this file)"
+            how = ("per row from the account-type file (CentAccount = USC, other types "
+                   "and unknown logins = USD)")
             ringkasan[f"  - {r['nama']} (MT4 Raw Report)"] = (
                 f"{r['total']} rows, {r['out']} closed buy/sell, "
                 f"currency {how}, "
@@ -1813,17 +1803,13 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
                 sum(r["sources"]["mapping"] for r in berkas_mt4),
             "MT4 currency from account-type mapping (logins)":
                 len(set().union(*(r["source_logins"]["mapping"] for r in berkas_mt4))),
-            "MT4 currency from the currency column (rows)":
-                sum(r["sources"]["column"] for r in berkas_mt4),
-            "MT4 currency from the currency column (logins)":
-                len(set().union(*(r["source_logins"]["column"] for r in berkas_mt4))),
-            "MT4 currency from the per-file USD/USC choice (rows)":
-                sum(r["sources"]["fallback"] for r in berkas_mt4),
-            "MT4 currency from the per-file USD/USC choice (logins)":
-                len(set().union(*(r["source_logins"]["fallback"] for r in berkas_mt4))),
-            "MT4 logins still on the per-file currency fallback": _daftar_login(
-                set().union(*(r["source_logins"]["fallback"] for r in berkas_mt4))),
-            "MT4 account type and currency column disagree": _teks_beda_mt4(
+            "MT4 logins not in the account-type file, treated as USD (rows)":
+                sum(r["sources"]["unknown"] for r in berkas_mt4),
+            "MT4 logins not in the account-type file, treated as USD (logins)":
+                len(set().union(*(r["source_logins"]["unknown"] for r in berkas_mt4))),
+            "MT4 logins not in the account-type file (sample)": _daftar_login(
+                set().union(*(r["source_logins"]["unknown"] for r in berkas_mt4))),
+            "MT4 account type and currency column disagree (cross-check only)": _teks_beda_mt4(
                 [item for r in berkas_mt4 for item in r["disagree"]]),
             "MT4 USC ÷100":
                 "Commission, Fee, Swap and Profit on USC rows are divided by 100 into USD. "
@@ -1840,14 +1826,15 @@ def proses(paths_in, path_out: Path, allow_mt4=False, mt4_currency=None,
                 round(jumlah["out"]["Swap"] + jumlah_mt4["out"]["Swap"], 2),
             "Combined Total Volume (MT5 + MT4 out rows)":
                 jumlah["out"]["Volume"] + jumlah_mt4["out"]["Volume"],
-            "MT4 currency is chosen per file":
-                "Each row uses the account-type mapping first (CentAccount is USC, every "
-                "other type is USD), then a USD or USC value in the file, then the per-file "
-                "choice (default USD). Symbol suffix, the report title, login number and "
+            "MT4 currency rule":
+                "The account-type file is required. Each row's Login is matched to "
+                "account: CentAccount is USC, every other type is USD, and a login "
+                "missing from the file is USD (listed above). A currency column in the "
+                "file is only a cross-check, never the source. Symbol suffix, the report title, login number and "
                 "profit size cannot separate USD from USC. MT4 USC amounts on the sheet are "
                 "divided by 100. Balance and credit rows stay excluded, the same rule as MT5.",
         })
-        label_beda = "MT4 account type and currency column disagree"
+        label_beda = "MT4 account type and currency column disagree (cross-check only)"
         if ringkasan.get(label_beda) not in ("(none)", "", None):
             yellow_labels.add(label_beda)
 
@@ -2066,21 +2053,6 @@ def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_
         shutil.rmtree(folder, ignore_errors=True)
 
 
-def _mt4_currency_dari_argumen(items):
-    """NAME=USD|USC, diulang. Nama yang sama: nilai terakhir yang menang."""
-    hasil = {}
-    for item in items or []:
-        if "=" not in item:
-            sys.exit(f"STOP: --mt4-currency must look like NAME=USD, not {item!r}.")
-        name, cur = item.split("=", 1)
-        name = name.strip()
-        cur = cur.strip().upper()
-        if not name or cur not in _MT4_MATA_UANG:
-            sys.exit(f"STOP: --mt4-currency must look like NAME=USD or NAME=USC, not {item!r}.")
-        hasil[name] = cur
-    return hasil
-
-
 @_jaga
 def main():
     ap = argparse.ArgumentParser(description="Deal Segregator -- segregate Deals History per Login")
@@ -2088,12 +2060,10 @@ def main():
     ap.add_argument("-o", "--output", help="result .zip file (default: <input>-hasil.zip)")
     ap.add_argument("--allow-mt4", action="store_true",
                     help="accept an MT4 Manager Raw Report as well (KVB). DPM must leave this off.")
-    ap.add_argument("--mt4-currency", action="append", default=[], metavar="NAME=USD|USC",
-                    help="currency for one MT4 Raw Report, matched on the file name. "
-                         "Default USD. Ignored for files that are not an MT4 Raw Report.")
     ap.add_argument("--mt4-accounts",
-                    help="optional account,account_type file. CentAccount is USC; "
-                         "every other type is USD. Used only with --allow-mt4.")
+                    help="account,account_type file; REQUIRED when any MT4 Raw Report is given. "
+                         "CentAccount is USC (÷100); every other type and unknown logins are USD. "
+                         "Used only with --allow-mt4.")
     ap.add_argument("--delete-input", action="store_true",
                     help="After the result is written, delete the input files. "
                          "The web app passes this. Omit it to leave the files in place.")
@@ -2110,7 +2080,6 @@ def main():
     path_out = Path(args.output) if args.output else paths_in[0].with_name(f"{paths_in[0].stem}-hasil.zip")
 
     ringkasan = proses(paths_in, path_out, allow_mt4=args.allow_mt4,
-                       mt4_currency=_mt4_currency_dari_argumen(args.mt4_currency),
                        mt4_accounts=args.mt4_accounts,
                        hapus_sumber=args.delete_input)
     print("=== STAGE 1 DONE ===")

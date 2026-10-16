@@ -167,6 +167,15 @@ print("OK utf-8 invalid bytes in Name are counted, and in Profit they stop")
 
 # Header-first MT4: a cp1252 comment byte must not crash, and a UTF-16
 # surrogate in Comment is reported without changing the trade totals.
+def _peta_kosong():
+    """Header-only account-type file: MT4 requires one; every login is then USD."""
+    import tempfile as _tf
+    from pathlib import Path as _P
+    p = _P(_tf.mkdtemp()) / "account_types.csv"
+    p.write_text("account,account_type\n", encoding="utf-8")
+    return p
+
+
 with TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     header = ("Deal,Login,Open Time,Type,Symbol,Volume,Open Price,S/L,T/P,"
@@ -177,7 +186,7 @@ with TemporaryDirectory() as tmp:
              "2026.07.02 00:00:00,1,0,0,0,0,0,0,-1,0,0,15,0,")
     (tmp / "cp.csv").write_bytes((header + baris + "catatan\xd0\n").encode("latin1"))
     out = tmp / "cp.zip"
-    ringkas = proses([tmp / "cp.csv"], out, allow_mt4=True)
+    ringkas = proses([tmp / "cp.csv"], out, allow_mt4=True, mt4_accounts=_peta_kosong())
     assert ringkas["mt4_dipakai"] == 1, ringkas
     v = _verifikasi(out, tmp / "cpv")
     assert v["MT4 Total Profit (closed buy/sell)"] == 15
@@ -185,7 +194,7 @@ with TemporaryDirectory() as tmp:
     blob = b"\xff\xfe" + _u16(header) + _u16(baris) + SURROGATE + _u16("Z\n")
     (tmp / "sur.csv").write_bytes(blob)
     out2 = tmp / "sur.zip"
-    proses([tmp / "sur.csv"], out2, allow_mt4=True)
+    proses([tmp / "sur.csv"], out2, allow_mt4=True, mt4_accounts=_peta_kosong())
     v2 = _verifikasi(out2, tmp / "surv")
     assert v2["MT4 Total Profit (closed buy/sell)"] == 15
     kunci = next(k for k in v2 if "rows with unreadable characters (replaced)" in k)

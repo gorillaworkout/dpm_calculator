@@ -549,7 +549,7 @@ KVB_DOC = {
 KVB_SEGREGATE_HINT = (
     "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). "
     "MT4 Raw Report is optional and is detected from the file contents, not the file name. "
-    "Each MT4 file needs a currency: USD or USC, default USD. "
+    "Any MT4 file requires the account-type file (account, account_type): CentAccount = USC (÷100), other types = USD. "
     "You may also include one Client Equity FX workbook (.xlsx, sheet 'Query result')."
 )
 KVB_SEGREGATE_DOC = {
@@ -563,10 +563,13 @@ KVB_SEGREGATE_DOC = {
         "(semicolon-separated, starting with <code>Raw Report for ...</code>) or a header-first export "
         "(comma-separated, with or without a trailing currency column). "
         "MT4 is optional. If you do not upload one, the result is the same MT5 workbook as before.",
-        "Optional: an <strong>account-type</strong> file with columns <code>account</code> and "
-        "<code>account_type</code>. <code>CentAccount</code> is USC. Classic, Plus, Pro, and every other type are USD.",
-        "Each MT4 file still has a <strong>USD</strong> or <strong>USC</strong> choice next to it, default USD. "
-        "That choice is used only when the account-type file and the currency column do not already say.",
+        "<strong>Required with any MT4 file:</strong> the <strong>account-type</strong> file with columns "
+        "<code>account</code> and <code>account_type</code>. Without it the run stops before upload. "
+        "Each MT4 row's Login is matched to <code>account</code>: <code>CentAccount</code> (any case or spacing, "
+        "e.g. <code>Cent Account</code>, <code>cent_account</code>) is USC and its amounts are divided by 100 to USD. "
+        "Classic, Plus, Pro, and every other type are USD.",
+        "A Login missing from the account-type file is treated as USD and listed on the Verifikasi sheet. "
+        "There is no USD/USC choice per file; a currency column in the MT4 file is only a cross-check.",
         "Each MT5 file must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency. Group and Country are ignored.",
         "Optional: one <strong>Client Equity FX</strong> / rate file in <code>.xlsx</code> "
         "or <code>.csv</code> format with columns <code>date</code>, <code>currency</code>, "
@@ -600,8 +603,8 @@ KVB_SEGREGATE_DOC = {
          "with the same Platform column when MT4 was uploaded. Plus Verifikasi."),
     ],
     "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals. "
-                "It records which MT4 rows took their currency from the account-type file, "
-                "the currency column, or the per-file choice, and it notes MT4 USC ÷100. "
+                "It counts MT4 rows matched in the account-type file, lists logins missing from it "
+                "(treated as USD), flags any currency-column disagreement, and notes MT4 USC ÷100. "
                 "Agent is listed there as information and is not part of Profit, Commission or Fee.",
                 "After a successful run the uploaded file is deleted from the server. "
                 "The file on your computer is not changed. Verifikasi records this.",
@@ -721,9 +724,6 @@ def run(slug, company="dpm"):
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
                           f"{', '.join(invalid)}")
         if company == "kvb":
-            _mt4_pilihan, _mt4_salah = _mt4_currency_from_form(request.form.get("mt4_currency"))
-            if _mt4_salah:
-                return _gagal(_mt4_salah)
             _akun_upload = request.files.get("mt4_accounts")
             if _akun_upload and _akun_upload.filename:
                 if not _akun_upload.filename.lower().endswith((".csv", ".xlsx", ".xlsm")):
@@ -734,7 +734,6 @@ def run(slug, company="dpm"):
                     return _gagal("Empty files cannot be processed: " + _akun_upload.filename)
                 _akun_upload.stream.seek(pos)
         else:
-            _mt4_pilihan = []
             _akun_upload = None
         periode = saldo_jw = saldo_ch = None
     elif slug == "pl-desk":
@@ -864,6 +863,11 @@ def run(slug, company="dpm"):
                       "copying it. Nothing was started. The upload was not deleted.")
     if staged:
         chunked.discard(JOBS, upload_id)
+    if company == "kvb" and slug == "segregate" and not (_akun_upload and _akun_upload.filename):
+        salah_mt4 = _mt4_tanpa_peta_akun(sources, nama_asli)
+        if salah_mt4:
+            shutil.rmtree(job, ignore_errors=True)
+            return _gagal(salah_mt4)
     src = sources[0]
     if slug == "dw":
         dst = src.with_name(f"{src.stem}-hasil.xlsx")
@@ -900,16 +904,6 @@ def run(slug, company="dpm"):
         target = _tujuan(_akun_upload.filename, urutan)
         _akun_upload.save(str(target))
         mt4_accounts_path = target
-    mt4_flags = None
-    if company == "kvb" and slug == "segregate" and _mt4_pilihan:
-        antrian = defaultdict(deque)
-        for original, cur in _mt4_pilihan:
-            antrian[original].append(cur)
-        mt4_flags = []
-        for path, original in zip(sources, nama_asli):
-            queue = antrian.get(original)
-            if queue:
-                mt4_flags.append(f"{path.name}={queue.popleft()}")
     # The request returns now. gunicorn's 1800s timeout only kills a worker
     # that is stuck inside a request and cannot heartbeat. This thread, and
     # the subprocess it starts, keep running after the 303. There is no
@@ -919,7 +913,7 @@ def run(slug, company="dpm"):
     threading.Thread(target=_process_job,
                      args=(job_id, company, slug, job,
                            sources if slug in ("segregate", "pl-desk") else src,
-                           dst, periode, saldo_jw, saldo_ch, mt4_flags, mt4_accounts_path,
+                           dst, periode, saldo_jw, saldo_ch, mt4_accounts_path,
                            lock_fh),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
@@ -943,21 +937,29 @@ def _cleanup_completed_job(job, result):
             entry.unlink(missing_ok=True)
 
 
-def _mt4_currency_from_form(raw):
-    """Baris `namafile|USD`. Kosong = tidak ada pilihan (mesin memakai USD)."""
-    pilihan = []
-    for line in (raw or "").splitlines():
-        line = line.strip()
-        if not line:
+def _mt4_tanpa_peta_akun(paths, names):
+    """STOP text when an MT4 Raw Report is uploaded without the account-type file.
+
+    The account-type file may also arrive in the main file field; it is
+    recognised from its account / account_type header. Unreadable files are
+    left for the engine to report.
+    """
+    import deal_segregator as ds
+    mt4, peta = [], False
+    for path, name in zip(paths, names):
+        try:
+            if ds._adalah_peta_akun(path):
+                peta = True
+            elif ds._info_mt4(path):
+                mt4.append(name)
+        except (SystemExit, Exception):
             continue
-        name, sep, cur = line.rpartition("|")
-        if not sep or not name.strip():
-            return None, "Each MT4 currency must look like filename|USD or filename|USC."
-        cur = cur.strip().upper()
-        if cur not in ("USD", "USC"):
-            return None, f"MT4 currency must be USD or USC, not '{cur}'."
-        pilihan.append((name.strip(), cur))
-    return pilihan, None
+    if mt4 and not peta:
+        return ("STOP: the MT4 account-type file is required. MT4 file(s) uploaded: "
+                f"{', '.join(mt4)}. Add the account-type file (columns account, "
+                "account_type) and run again. CentAccount is USC (÷100); every other "
+                "type is USD.")
+    return None
 
 
 def _pisah_traceback(stderr):
@@ -993,20 +995,20 @@ def _pesan_gagal_job(stderr, stdout):
 
 
 def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
-                 saldo_ch=None, mt4_currency=None, mt4_accounts=None, lock_fh=None):
+                 saldo_ch=None, mt4_accounts=None, lock_fh=None):
     """Run the pipeline in the background and record the outcome.
 
     lock_fh is the job's flock; while it is held no cleanup touches this job.
     """
     try:
         _jalankan_job(job_id, company, slug, job, src, dst, periode, saldo_jw,
-                      saldo_ch, mt4_currency, mt4_accounts)
+                      saldo_ch, mt4_accounts)
     finally:
         cleanup.release_job_lock(lock_fh)
 
 
 def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
-                  saldo_ch=None, mt4_currency=None, mt4_accounts=None):
+                  saldo_ch=None, mt4_accounts=None):
     # Success: inputs and the deal index are deleted, only the result stays.
     # Failure or STOP: the whole job directory (inputs, index, partial output)
     # is deleted; the staged upload was already moved into it.
@@ -1042,8 +1044,6 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
                 perintah.append("--delete-input")
             if company == "kvb" and script == "deal_segregator.py":
                 perintah.append("--allow-mt4")
-                for item in mt4_currency or []:
-                    perintah += ["--mt4-currency", item]
                 if mt4_accounts:
                     perintah += ["--mt4-accounts", str(mt4_accounts)]
             flag_ch = CHANNEL_ARG.get(script)

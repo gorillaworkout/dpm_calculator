@@ -41,12 +41,10 @@ K_VOL = "MT4 Total Volume (closed buy/sell)"
 K_AGENT = "MT4 Agent column (sum of kept rows; not included in Profit, Commission, or Fee)"
 K_MAP_ROWS = "MT4 currency from account-type mapping (rows)"
 K_MAP_LOGINS = "MT4 currency from account-type mapping (logins)"
-K_COL_ROWS = "MT4 currency from the currency column (rows)"
-K_COL_LOGINS = "MT4 currency from the currency column (logins)"
-K_FB_ROWS = "MT4 currency from the per-file USD/USC choice (rows)"
-K_FB_LOGINS = "MT4 currency from the per-file USD/USC choice (logins)"
-K_FB_LIST = "MT4 logins still on the per-file currency fallback"
-K_DISAGREE = "MT4 account type and currency column disagree"
+K_FB_ROWS = "MT4 logins not in the account-type file, treated as USD (rows)"
+K_FB_LOGINS = "MT4 logins not in the account-type file, treated as USD (logins)"
+K_FB_LIST = "MT4 logins not in the account-type file (sample)"
+K_DISAGREE = "MT4 account type and currency column disagree (cross-check only)"
 K_USC = "MT4 USC ÷100"
 K_BAL = "MT4 balance/credit rows dropped (same rule as MT5 non-trade Entry)"
 K_CAN = "MT4 cancelled pending orders dropped"
@@ -67,11 +65,16 @@ def verification(rows):
     return {r[0]: r[1] for r in rows if r and r[0]}
 
 
-def run(paths, allow_mt4=False, mt4_currency=None, mt4_accounts=None):
+def run(paths, allow_mt4=False, mt4_accounts=None):
+    """MT4 needs an account-type file; a header-only one is written when none is given."""
+    from deal_segregator import _info_mt4
     folder = Path(tempfile.mkdtemp())
     out = folder / "hasil.zip"
-    summary = proses([Path(p) for p in paths], out, allow_mt4=allow_mt4,
-                     mt4_currency=mt4_currency, mt4_accounts=mt4_accounts)
+    paths = [Path(p) for p in paths]
+    if allow_mt4 and mt4_accounts is None and any(_info_mt4(p) for p in paths):
+        mt4_accounts = folder / "empty_types.csv"
+        mt4_accounts.write_text("account,account_type\n", encoding="utf-8")
+    summary = proses(paths, out, allow_mt4=allow_mt4, mt4_accounts=mt4_accounts)
     return summary, books(out), out
 
 
@@ -138,25 +141,27 @@ with tempfile.TemporaryDirectory() as tmp:
     assert got["10"]["Currency"] == "USD"
     assert got["10"]["Profit"] == 100 and got["10"]["Commission"] == -2
     assert got["10"]["Volume"] == 0.5
-    assert got["20"]["Currency"] == "USC"
-    assert got["20"]["Profit"] == 2.5 and got["20"]["Commission"] == -0.1
+    # The column says USC, but no account type says CentAccount: USD, not divided.
+    assert got["20"]["Currency"] == "USD"
+    assert got["20"]["Profit"] == 250 and got["20"]["Commission"] == -10
     assert got["20"]["Volume"] == 3
     assert "Agent" not in hasil["Deals - Daily.xlsx"]["Daily"][0]
     v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
-    assert v[K_PROFIT] == 102.5
+    assert v[K_PROFIT] == 350
     assert v[K_RAW] == 350
-    assert v[K_COMM] == -2.1 and v[K_COMM_RAW] == -12
+    assert v[K_COMM] == -12 and v[K_COMM_RAW] == -12
     assert v[K_FEE] == -4 and v[K_SWAP] == -1
     assert v[K_VOL] == 3.5
     assert v[K_AGENT] == 9
     assert v[K_BAL] == 1 and v[K_CAN] == 1
-    assert v[K_COL_ROWS] >= 2 and v[K_COL_LOGINS] == 2
-    assert v[K_FB_ROWS] == 2 and v[K_FB_LOGINS] == 2  # #N/A rows, not a currency
-    assert "30" in str(v[K_FB_LIST]) and "40" in str(v[K_FB_LIST])
-    assert "10" not in str(v[K_FB_LIST]) and "20" not in str(v[K_FB_LIST])
+    assert v[K_MAP_ROWS] == 0
+    assert v[K_FB_LOGINS] == 4
+    for login in ("10", "20", "30", "40"):
+        assert login in str(v[K_FB_LIST])
+    assert "20" in str(v[K_DISAGREE]) and "10" not in str(v[K_DISAGREE])
     assert "divided by 100" in str(v[K_USC])
     assert "Client Equity FX is not" in str(v[K_USC])
-print("OK header-first layout uses the currency column and divides USC by 100")
+print("OK currency column is only a cross-check; unmapped logins are USD")
 
 # Mapping wins over the column. Classic stays USD even when the column says USC.
 with tempfile.TemporaryDirectory() as tmp:
@@ -174,24 +179,53 @@ with tempfile.TemporaryDirectory() as tmp:
     assert got["10"]["Currency"] == "USD" and got["10"]["Profit"] == 80
     v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
     assert v[K_MAP_ROWS] == 2 and v[K_MAP_LOGINS] == 2
-    assert v[K_COL_ROWS] == 0
+    assert v[K_FB_ROWS] == 0
     assert "20" in str(v[K_DISAGREE]) and "10" in str(v[K_DISAGREE])
     assert v[K_FB_LIST] in ("", "(none)", None) or str(v[K_FB_LIST]) in ("(none)", "")
 print("OK account-type mapping overrides the currency column")
 
-# No column and no mapping: the per-file choice is the fallback, and those logins are listed.
+# Unknown login is USD and listed; CentAccount spellings are all USC (÷100).
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src, mapping = tmp / "plain.csv", tmp / "types.csv"
+    write_comma(src, [
+        trade("1", login="71", profit="100", volume="1"),
+        trade("2", login="72", profit="200"),
+        trade("3", login="73", profit="300"),
+        trade("4", login="74", profit="400"),
+        trade("5", login="75", profit="500"),
+        trade("6", login="99", profit="600"),
+    ], currency=False)
+    write_mapping(mapping, [("71", "CentAccount"), ("72", "centaccount"),
+                            ("73", " Cent Account "), ("74", "cent_account"),
+                            ("75", "Plus")])
+    _, hasil, _ = run([src], allow_mt4=True, mt4_accounts=mapping)
+    got = by_login(hasil)
+    assert got["71"]["Currency"] == "USC" and got["71"]["Profit"] == 1
+    assert got["71"]["Volume"] == 1
+    assert got["72"]["Currency"] == "USC" and got["72"]["Profit"] == 2
+    assert got["73"]["Currency"] == "USC" and got["73"]["Profit"] == 3
+    assert got["74"]["Currency"] == "USC" and got["74"]["Profit"] == 4
+    assert got["75"]["Currency"] == "USD" and got["75"]["Profit"] == 500
+    assert got["99"]["Currency"] == "USD" and got["99"]["Profit"] == 600
+    v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
+    assert v[K_FB_ROWS] == 1 and v[K_FB_LOGINS] == 1
+    assert str(v[K_FB_LIST]) == "99"
+    assert v[K_MAP_ROWS] == 5
+print("OK case/space-insensitive CentAccount; unknown login is USD and listed")
+
+# MT4 without the account-type file stops.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     src = tmp / "plain.csv"
-    write_comma(src, [trade("1", login="77", profit="100", volume="1")], currency=False)
-    _, hasil, _ = run([src], allow_mt4=True, mt4_currency={src.name: "USC"})
-    got = by_login(hasil)
-    assert got["77"]["Currency"] == "USC" and got["77"]["Profit"] == 1
-    assert got["77"]["Volume"] == 1
-    v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
-    assert v[K_FB_ROWS] == 1 and "77" in str(v[K_FB_LIST])
-    assert v[K_MAP_ROWS] == 0 and v[K_COL_ROWS] == 0
-print("OK per-file USD/USC choice remains the fallback")
+    write_comma(src, [trade("1", login="77", profit="100")], currency=False)
+    try:
+        proses([src], tmp / "out.zip", allow_mt4=True)
+    except SystemExit as exc:
+        assert str(exc).startswith("STOP:") and "account-type file is required" in str(exc)
+    else:
+        raise AssertionError("MT4 ran without the account-type file")
+print("OK MT4 without the account-type file is rejected")
 
 # MT5 USC still uses the FX rate. MT4 USC ignores that rate and divides by 100.
 with tempfile.TemporaryDirectory() as tmp:
@@ -211,7 +245,9 @@ with tempfile.TemporaryDirectory() as tmp:
     ws.append([datetime.date(2026, 7, 1), "USC", 50])
     wb.save(fx)
     wb.close()
-    _, _, out = run([mt5, mt4, fx], allow_mt4=True)
+    cent = tmp / "types.csv"
+    write_mapping(cent, [("20", "CentAccount")])
+    _, _, out = run([mt5, mt4, fx], allow_mt4=True, mt4_accounts=cent)
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
         headers = [c.value for c in wb["Daily"][1]]

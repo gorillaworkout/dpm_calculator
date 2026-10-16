@@ -52,7 +52,7 @@ K_DAILY = "Daily 'out' rows (Platform+Login+Date+Type+Symbol+Currency)"
 K_DAILY_IN = "Daily 'in' rows (Platform+Login+Date+Type+Symbol+Currency, sheet 'Daily - In')"
 K_COMB_P = "Combined Total Profit (MT5 + MT4 out rows)"
 K_COMB_C = "Combined Total Commission (MT5 + MT4 out rows)"
-K_WHY = "MT4 currency is chosen per file"
+K_WHY = "MT4 currency rule"
 SHEETS = ["Daily", "Daily - In", "Verifikasi"]
 
 
@@ -115,11 +115,28 @@ def verification(rows):
     return {r[0]: r[1] for r in rows if r and r[0]}
 
 
-def run(paths, allow_mt4=False, mt4_currency=None):
+def write_accounts(path, cent=(), other=()):
+    """account,account_type file. cent logins are CentAccount (USC)."""
+    with Path(path).open("w", encoding="utf-8", newline="") as f:
+        f.write("account,account_type\n")
+        for login in cent:
+            f.write(f"{login},CentAccount\n")
+        for login in other:
+            f.write(f"{login},Classic\n")
+    return Path(path)
+
+
+def run(paths, allow_mt4=False, cent=None):
+    """cent: CentAccount logins. With allow_mt4 and an MT4 file, the required
+    account-type file is always written (header only when cent is empty)."""
+    from deal_segregator import _info_mt4
     folder = Path(tempfile.mkdtemp())
     out = folder / "hasil.zip"
-    summary = proses([Path(p) for p in paths], out, allow_mt4=allow_mt4,
-                     mt4_currency=mt4_currency)
+    paths = [Path(p) for p in paths]
+    accounts = None
+    if allow_mt4 and (cent or any(_info_mt4(p) for p in paths)):
+        accounts = write_accounts(folder / "account_types.csv", cent or ())
+    summary = proses(paths, out, allow_mt4=allow_mt4, mt4_accounts=accounts)
     return summary, books(out), out
 
 
@@ -241,7 +258,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert v["MT4 balance/credit Profit excluded"] == round(-2.35 + 9, 2)
     assert summary["mt4_dipakai"] == 3 and "mt4_dipakai_in" not in summary
     file_line = next(val for key, val in v.items() if "notes.csv" in key and "MT4" in key)
-    assert "currency USD (default; no currency was selected for this file)" in file_line
+    assert "currency per row from the account-type file" in file_line
     assert "balance/credit" in file_line and "cancelled" in file_line
     assert "opening" not in file_line
 print("OK MT4 out-only rows, Agent excluded, balance rows dropped")
@@ -276,7 +293,8 @@ with tempfile.TemporaryDirectory() as tmp:
     blank = tmp / "blank.csv"
     write_mt4(blank, [mt4_trade("z", login="", profit="1")], footer=False)
     try:
-        proses([blank], tmp / "out.zip", allow_mt4=True)
+        proses([blank], tmp / "out.zip", allow_mt4=True,
+               mt4_accounts=write_accounts(tmp / "types.csv"))
     except SystemExit as exc:
         assert "blank Login" in str(exc) and "blank.csv" in str(exc)
     else:
@@ -330,7 +348,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ws.append([datetime.date(2026, 10, 4), "USC", 50])
     wb.save(fx)
     wb.close()
-    _, hasil, out = run([deals, fx], allow_mt4=True, mt4_currency={deals.name: "USC"})
+    _, hasil, out = run([deals, fx], allow_mt4=True, cent=["8"])
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
         headers = [c.value for c in wb["Daily"][1]]
@@ -349,9 +367,10 @@ with tempfile.TemporaryDirectory() as tmp:
         wb.close()
     v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
     line = next(val for key, val in v.items() if "mt4.csv" in key)
-    assert "currency USC (selected for this file)" in line
+    assert "account-type file" in line
+    assert v["MT4 currency from account-type mapping (rows)"] == 1
 
-    # Explicit USD is recorded as selected, and still converts with the USD rate.
+    # Login 8 not in the account-type file is USD and converts with the USD rate.
     wb = Workbook()
     ws = wb.active
     ws.title = "Query result"
@@ -360,7 +379,7 @@ with tempfile.TemporaryDirectory() as tmp:
     usd_fx = tmp / "usd-fx.xlsx"
     wb.save(usd_fx)
     wb.close()
-    _, hasil, out = run([deals, usd_fx], allow_mt4=True, mt4_currency={deals.name: "USD"})
+    _, hasil, out = run([deals, usd_fx], allow_mt4=True)
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
         headers = [c.value for c in wb["Daily"][1]]
@@ -369,8 +388,7 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         wb.close()
     chosen = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
-    assert "currency USD (selected for this file)" in next(
-        val for key, val in chosen.items() if "mt4.csv" in key)
+    assert chosen["MT4 logins not in the account-type file (sample)"] == "8"
 
     # Blank/missing USC rate is not 1.
     wb = Workbook()
@@ -381,7 +399,7 @@ with tempfile.TemporaryDirectory() as tmp:
     missing = tmp / "missing-fx.xlsx"
     wb.save(missing)
     wb.close()
-    _, _, out = run([deals, missing], allow_mt4=True, mt4_currency={deals.name: "USC"})
+    _, _, out = run([deals, missing], allow_mt4=True, cent=["8"])
     wb = load_workbook(io.BytesIO(zipfile.ZipFile(out).read("Deals - Daily.xlsx")))
     try:
         headers = [c.value for c in wb["Daily"][1]]
@@ -392,47 +410,39 @@ with tempfile.TemporaryDirectory() as tmp:
         assert not (isinstance(rgb, str) and rgb.endswith("FFFF00"))
     finally:
         wb.close()
-print("OK MT4 USD/USC choice and FX")
+print("OK MT4 CentAccount USC and FX")
 
-# Two MT4 files keep their own currency, so the same login does not merge.
+# Currency is per login from the account-type file, not per MT4 file.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     usd, usc = tmp / "usd.csv", tmp / "usc.csv"
-    trade = dict(login="77", symbol="btcusd", volume="1", profit="10",
-                  close_time="2026.10.04 02:00:00")
-    write_mt4(usd, [mt4_trade("1", **trade)], footer=False)
-    write_mt4(usc, [mt4_trade("2", profit="1000", **{k: v for k, v in trade.items() if k != "profit"})],
-              footer=False)
-    _, hasil, _ = run([usd, usc], allow_mt4=True, mt4_currency={usc.name: "USC"})
+    trade = dict(symbol="btcusd", volume="1", close_time="2026.10.04 02:00:00")
+    write_mt4(usd, [mt4_trade("1", login="77", profit="10", **trade)], footer=False)
+    write_mt4(usc, [mt4_trade("2", login="78", profit="1000", **trade)], footer=False)
+    _, hasil, _ = run([usd, usc], allow_mt4=True, cent=["78"])
     rows = hasil["Deals - Daily.xlsx"]["Daily"][1:]
     assert [(r[0], r[1], r[10], r[11]) for r in rows] == [
         ("MT4", "77", 10, "USD"),
-        ("MT4", "77", 10, "USC"),
+        ("MT4", "78", 10, "USC"),
     ]
-    v = verification(hasil["Deals - Daily.xlsx"]["Verifikasi"])
-    usd_line = next(val for key, val in v.items() if key.strip().startswith("- usd.csv"))
-    usc_line = next(val for key, val in v.items() if "usc.csv" in key)
-    assert "currency USD (default; no currency was selected for this file)" in usd_line
-    assert "currency USC (selected for this file)" in usc_line
-print("OK two MT4 files do not share a currency")
+print("OK MT4 currency comes from the login, not the file")
 
-# A currency meant for a non-MT4 file is ignored. A bad MT4 currency stops the run.
+# MT5 ignores the account-type file. MT4 without it stops.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     mt5 = tmp / "deals.csv"
     write_mt5(mt5, [mt5_row(currency="USD")])
-    _, hasil, _ = run([mt5], allow_mt4=True, mt4_currency={mt5.name: "USC"})
+    _, hasil, _ = run([mt5], allow_mt4=True, cent=["1"])
     assert hasil["Deals - Daily.xlsx"]["Daily"][1][10] == "USD"
-    assert hasil["Deals - Daily.xlsx"]["Daily"][0][0] == "Login"
     bad = tmp / "raw.csv"
     write_mt4(bad, [mt4_trade("1", profit="1")], footer=False)
     try:
-        proses([bad], tmp / "out.zip", allow_mt4=True, mt4_currency={bad.name: "EUR"})
+        proses([bad], tmp / "out.zip", allow_mt4=True)
     except SystemExit as exc:
-        assert "USD or USC" in str(exc) and "EUR" in str(exc)
+        assert "account-type file is required" in str(exc) and "raw.csv" in str(exc)
     else:
-        raise AssertionError("EUR was accepted as an MT4 currency")
-print("OK currency map ignores MT5 files and rejects a bad MT4 currency")
+        raise AssertionError("MT4 ran without the account-type file")
+print("OK MT5 unaffected; MT4 without account-type file stops")
 
 # Trimmed copies of the attached 2026-10-04 samples.
 summary, hasil, _ = run([MT5_FIXTURE, MT4_FIXTURE], allow_mt4=True)
@@ -496,20 +506,22 @@ client.environ_base["HTTP_ACCEPT"] = "text/html"
 kvb_page = client.get("/kvb/tool/segregate")
 assert kvb_page.status_code == 200
 assert b"MT4 Raw Report is optional" in kvb_page.data
-assert b"mt4-currency" in kvb_page.data
-assert b'value="USC"' in kvb_page.data
+assert b"mt4-currency" not in kvb_page.data and b"mt4_currency" not in kvb_page.data
+assert b'value="USC"' not in kvb_page.data
+assert b"required when any MT4 file is uploaded" in kvb_page.data
+assert b"mt4WithoutAccounts" in kvb_page.data
 assert b"separate sheets" in kvb_page.data
 assert b"deleted from the server" in kvb_page.data
 dpm_page = client.get("/tool/segregate")
 assert dpm_page.status_code == 200
 assert b"MT4 Raw Report is optional" not in dpm_page.data
 assert b"deleted from the server" in dpm_page.data
-assert b"mt4-currency" not in dpm_page.data
+assert b"mt4-accounts" not in dpm_page.data
 assert b"Drop Deals History files here" in dpm_page.data
 kvb_home = client.get("/kvb")
 assert b"MT4 Raw Report is optional" in kvb_home.data
 assert b"Platform column" in kvb_home.data
-print("OK KVB tool page offers USD/USC per MT4 file; DPM page does not")
+print("OK KVB tool page has no USD/USC dropdown and requires account types for MT4")
 
 mt4_body = (
     "Raw Report for 'abcc' from 2026.10.04 to 2026.10.04\n"
@@ -518,18 +530,18 @@ mt4_body = (
                 "2026.10.04 02:00:00", "", "", "", "", "", "", "0", "-1", "0", "0", "4", "", ""])
     + "\n"
 ).encode()
+accounts_body = b"account,account_type\n100,Cent Account\n"
 
-bad_currency = client.post(
+no_accounts = client.post(
     "/kvb/tool/segregate",
-    data={"file": (io.BytesIO(mt4_body), "whatever.csv"),
-          "mt4_currency": "whatever.csv|EUR"},
+    data={"file": (io.BytesIO(mt4_body), "whatever.csv")},
     content_type="multipart/form-data")
-assert bad_currency.status_code == 400, bad_currency.status_code
-assert b"USD or USC" in bad_currency.data
+assert no_accounts.status_code == 400, no_accounts.status_code
+assert b"STOP" in no_accounts.data and b"account-type file is required" in no_accounts.data
+assert b"whatever.csv" in no_accounts.data
 
 dpm = client.post("/tool/segregate",
-                  data={"file": (io.BytesIO(mt4_body), "Deals History.csv"),
-                        "mt4_currency": "Deals History.csv|USC"},
+                  data={"file": (io.BytesIO(mt4_body), "Deals History.csv")},
                   content_type="multipart/form-data")
 assert dpm.status_code == 303, (dpm.status_code, dpm.data[:300])
 _, dpm_state = wait(client, dpm.headers["Location"])
@@ -550,17 +562,26 @@ A.subprocess.run = capture
 try:
     kvb = client.post("/kvb/tool/segregate",
                       data={"file": (io.BytesIO(mt4_body), "whatever.csv"),
-                            "mt4_currency": "whatever.csv|USC"},
+                            "mt4_accounts": (io.BytesIO(accounts_body), "types.csv"),
+                            "mt4_currency": "whatever.csv|USD"},
                       content_type="multipart/form-data")
     assert kvb.status_code == 303, (kvb.status_code, kvb.data[:300])
     _, kvb_state = wait(client, kvb.headers["Location"])
     assert kvb_state["state"] == "done", kvb_state
     assert commands and "--allow-mt4" in commands[-1]
-    assert "--mt4-currency" in commands[-1]
-    assert "whatever.csv=USC" in commands[-1]
+    assert "--mt4-currency" not in commands[-1]
+    assert "--mt4-accounts" in commands[-1]
     assert Path(commands[-1][1]).name == "deal_segregator.py"
+    # The account-type file may also arrive in the main file field.
+    kvb2 = client.post("/kvb/tool/segregate",
+                       data={"file": [(io.BytesIO(mt4_body), "whatever.csv"),
+                                      (io.BytesIO(accounts_body), "types.csv")]},
+                       content_type="multipart/form-data")
+    assert kvb2.status_code == 303, (kvb2.status_code, kvb2.data[:300])
+    _, kvb2_state = wait(client, kvb2.headers["Location"])
+    assert kvb2_state["state"] == "done", kvb2_state
 finally:
     A.subprocess.run = real_run
-print("OK KVB runs MT4 with the chosen currency and DPM's job rejects it")
+print("OK KVB MT4 needs the account-type file; a stale mt4_currency field is ignored")
 
 print("OK deal segregator MT4")
