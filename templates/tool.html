@@ -231,6 +231,17 @@
     // name -> 'mt4' | 'accounts' | 'other', from the first bytes of the file.
     // .xlsx cannot be sniffed here; the server checks those before the run.
     var sniffed = {};
+    // Same rule as deal_segregator._cocok_judul_mt4: the title may be padded with
+    // ',' / ';' / tab by Excel ("Raw Report ...,,,,") or quoted in the first cell.
+    var MT4_TITLE = /^\uFEFF?\s*"?raw report for ['"][^'"]*['"] from \d{4}\.\d{2}\.\d{2} to \d{4}\.\d{2}\.\d{2}"?[\s,;]*$/i;
+    function isMt4Head(text) {
+      var lines = text.split(/\r?\n/).filter(function (l) {
+        return l.replace(/[\s,;\uFEFF]+/g, '') !== '';   // blank or delimiter-only rows
+      }).slice(0, 5);
+      if (lines.length && MT4_TITLE.test(lines[0])) return true;
+      var head = lines.join('\n').toLowerCase();
+      return /raw report for/.test(head) || (/open time/.test(head) && /close time/.test(head));
+    }
     function sniffMt4(item, file) {
       file.slice(0, 2000).arrayBuffer().then(function (buf) {
         var bytes = new Uint8Array(buf);
@@ -248,7 +259,7 @@
         }
         var head = text.split(/\r?\n/).slice(0, 5).join('\n').toLowerCase();
         var kind = 'other';
-        if (/raw report for/.test(head) || (/open time/.test(head) && /close time/.test(head))) {
+        if (isMt4Head(text)) {
           kind = 'mt4';
         } else if (/account_type/.test(head)) {
           kind = 'accounts';
