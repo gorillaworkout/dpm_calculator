@@ -106,6 +106,9 @@ _MT4_JUDUL = re.compile(
     r"^Raw Report for ['\"][^'\"]*['\"] from (\d{4}\.\d{2}\.\d{2}) to (\d{4}\.\d{2}\.\d{2})\s*$",
     re.IGNORECASE,
 )
+# Excel pads every row of a re-saved CSV to the same width, so the title line can
+# end in ",,,," / ";;;;" / tabs, or sit quoted in the first cell of that row.
+_MT4_PADDING = re.compile(r"[,;\t\s]+$")
 _MT4_WAJIB = ["Deal", "Login", "Open Time", "Type", "Symbol", "Volume",
               "Close Time", "Agent", "Commission", "Taxes", "Swap", "Profit"]
 _MT4_MATA_UANG = ("USD", "USC")
@@ -948,20 +951,77 @@ def _parse_header_mt4(baris: str):
     return pemisah, header
 
 
-def _indeks_mata_uang_mt4(header):
-    """Kolom trailing yang headernya kosong (atau bernama Currency).
+def _cocok_judul_mt4(teks):
+    """re.Match untuk judul `Raw Report for ...`, kalau tidak None.
 
-    Layout Juli: 23 kolom biasa, satu kolom kosong, lalu mata uang tanpa judul.
-    Satu sel kosong di ujung karena delimiter sisa tidak dihitung.
+    Menerima judul polos, judul yang diberi delimiter sisa oleh Excel
+    (`Raw Report ...,,,,` atau `;;;;` atau tab), dan judul yang ada di sel pertama
+    baris berdelimiter (termasuk yang dikutip Excel). Sel lain harus kosong.
     """
-    if not header:
+    if teks is None:
         return None
-    terakhir = header[-1].strip().lower()
-    if terakhir == "currency":
-        return len(header) - 1
-    if terakhir == "" and len(header) >= 2 and header[-2].strip() == "":
-        return len(header) - 1
+    teks = _teks(teks).strip("\ufeff").strip()
+    if not teks:
+        return None
+    cocok = _MT4_JUDUL.match(teks)
+    if cocok:
+        return cocok
+    cocok = _MT4_JUDUL.match(_MT4_PADDING.sub("", teks))
+    if cocok:
+        return cocok
+    for pemisah in (",", ";", "\t"):
+        if pemisah not in teks:
+            continue
+        try:
+            sel = next(csv.reader([teks], delimiter=pemisah))
+        except (csv.Error, StopIteration):
+            continue
+        if sel and all(_sel_kosong(c) for c in sel[1:]):
+            cocok = _MT4_JUDUL.match(_teks(sel[0]))
+            if cocok:
+                return cocok
     return None
+
+
+def _baris_hanya_pemisah(baris: str) -> bool:
+    """Baris kosong yang oleh Excel diisi delimiter saja (`,,,,` / `;;;;`)."""
+    return not _MT4_PADDING.sub("", baris.strip("\ufeff"))
+
+
+def _rapikan_header_mt4(header, contoh=None):
+    """(header, indeks mata uang) setelah membuang kolom kosong di ujung header.
+
+    Layout Juli: `...;Comment;;` lalu mata uang tanpa judul di kolom ke-2 setelah
+    kolom terakhir yang berjudul. Excel yang menyimpan ulang file menambah kolom
+    kosong di ujung semua baris, jadi jumlah sel kosong di ujung header bukan
+    bukti adanya kolom mata uang. Dengan dua sel kosong atau lebih, kolom itu
+    dipakai hanya kalau baris contoh (`contoh`) memang berisi USD/USC di sana.
+    Tanpa contoh, perilaku lama dipertahankan (tepat dua sel kosong = mata uang).
+    """
+    header = [_teks(h) for h in header]
+    if not header:
+        return header, None
+    for i, h in enumerate(header):
+        if h.strip().lower() == "currency":
+            return header[:max(i + 1, _terakhir_isi(header) + 1)], i
+    terakhir = _terakhir_isi(header)
+    kosong = len(header) - 1 - terakhir
+    if kosong < 2:
+        return header[:terakhir + 1], None
+    kolom = terakhir + 2
+    if contoh is None:
+        if kosong == 2:
+            return header, kolom
+        return header[:terakhir + 1], None
+    for row in contoh:
+        if kolom < len(row) and _teks(row[kolom]).upper() in _MT4_MATA_UANG:
+            return header[:kolom + 1], kolom
+    return header[:terakhir + 1], None
+
+
+def _indeks_mata_uang_mt4(header):
+    """Indeks kolom mata uang dari header saja (lihat _rapikan_header_mt4)."""
+    return _rapikan_header_mt4(header)[1]
 
 
 _KOLOM_PETA = ("account", "account_type")
@@ -1145,7 +1205,7 @@ def _baris_awal_csv(path: Path, enc: str):
     _ingat_berkas(path)
     with _buka_teks(path, enc) as f:
         for line in f:
-            if line.strip():
+            if line.strip() and not _baris_hanya_pemisah(line):
                 lines.append(line.strip("\ufeff\r\n"))
             if len(lines) == 2:
                 break
@@ -1187,9 +1247,61 @@ def _dua_baris_awal(path: Path):
     return "csv", lines
 
 
-def _bungkus_info_mt4(kind, header, pemisah, skip, mulai, akhir):
+def _contoh_baris_mt4(path: Path, kind, pemisah, skip, batas=1000):
+    """Sampai `batas` baris data pertama (setelah judul/header) untuk cek kolom mata uang."""
+    hasil = []
+    if kind == "xlsx":
+        wb = load_workbook(path, read_only=True, data_only=True)
+        try:
+            it = _lewati_awal_mt4(wb.worksheets[0].iter_rows(values_only=True), skip)
+            for _, row in it:
+                if not _baris_kosong(row):
+                    hasil.append(list(row))
+                if len(hasil) >= batas:
+                    break
+        finally:
+            wb.close()
+        return hasil
+    with _buka_teks(path, _deteksi_encoding(path)) as f:
+        it = _lewati_awal_mt4(csv.reader(f, delimiter=pemisah), skip)
+        for _, row in it:
+            if not _baris_kosong(row):
+                hasil.append(row)
+            if len(hasil) >= batas:
+                break
+    return hasil
+
+
+def _lewati_awal_mt4(reader, skip):
+    """Lewati `skip` baris tidak kosong (judul, header). -> iterator (nomor, row).
+
+    Baris kosong atau berisi delimiter saja (`,,,,` dari Excel) sebelum header
+    tidak dihitung, sama seperti deteksi di _baris_awal_csv.
+    """
+    nomor = 0
+    dilewati = 0
+    it = iter(reader)
+    while dilewati < skip:
+        row = next(it, None)
+        if row is None:
+            return
+        nomor += 1
+        if not _baris_kosong(row):
+            dilewati += 1
+    for row in it:
+        nomor += 1
+        yield nomor, row
+
+
+def _bungkus_info_mt4(kind, header, pemisah, skip, mulai, akhir, path=None):
+    contoh = None
+    mentah = [_teks(h) for h in header]
+    if path is not None and len(mentah) - 1 - _terakhir_isi(mentah) >= 2 and not any(
+            h.strip().lower() == "currency" for h in mentah):
+        contoh = _contoh_baris_mt4(path, kind, pemisah, skip)
+    header, kolom_uang = _rapikan_header_mt4(mentah, contoh)
     return {"awal": mulai, "akhir": akhir, "pemisah": pemisah, "header": header,
-            "kind": kind, "skip": skip, "currency_index": _indeks_mata_uang_mt4(header)}
+            "kind": kind, "skip": skip, "currency_index": kolom_uang}
 
 
 def _info_mt4(path: Path):
@@ -1204,9 +1316,10 @@ def _info_mt4(path: Path):
     if kind == "xlsx":
         header = [_teks(c) for c in awal[0]]
         if all(k in header for k in _MT4_WAJIB):
-            return _bungkus_info_mt4("xlsx", header, None, 1, None, None)
-        judul = _teks(awal[0][0]) if awal[0] else ""
-        cocok = _MT4_JUDUL.match(judul.strip())
+            return _bungkus_info_mt4("xlsx", header, None, 1, None, None, path)
+        isi = [c for c in header if c]
+        judul = isi[0] if isi else ""
+        cocok = _cocok_judul_mt4(judul)
         if not cocok:
             return None
         header = [_teks(c) for c in awal[1]]
@@ -1219,13 +1332,13 @@ def _info_mt4(path: Path):
         if akhir < mulai:
             sys.exit(f"STOP: MT4 Raw Report period is backwards in '{path.name}': "
                      f"{mulai} to {akhir}")
-        return _bungkus_info_mt4("xlsx", header, None, 2, mulai, akhir)
+        return _bungkus_info_mt4("xlsx", header, None, 2, mulai, akhir, path)
 
     parsed = _parse_header_mt4(awal[0])
     if parsed:
         pemisah, header = parsed
-        return _bungkus_info_mt4("csv", header, pemisah, 1, None, None)
-    cocok = _MT4_JUDUL.match(awal[0].strip())
+        return _bungkus_info_mt4("csv", header, pemisah, 1, None, None, path)
+    cocok = _cocok_judul_mt4(awal[0])
     if not cocok:
         return None
     if len(awal) < 2 or not _parse_header_mt4(awal[1]):
@@ -1237,7 +1350,7 @@ def _info_mt4(path: Path):
     if akhir < mulai:
         sys.exit(f"STOP: MT4 Raw Report period is backwards in '{path.name}': "
                  f"{mulai} to {akhir}")
-    return _bungkus_info_mt4("csv", header, pemisah, 2, mulai, akhir)
+    return _bungkus_info_mt4("csv", header, pemisah, 2, mulai, akhir, path)
 
 
 def _macam_mt4(tipe: str, comment: str) -> str:
@@ -1280,12 +1393,10 @@ def _iter_mt4(path: Path, info: dict):
     if info["kind"] == "xlsx":
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
-            it = wb.worksheets[0].iter_rows(values_only=True)
-            for _ in range(skip):
-                next(it, None)
+            it = _lewati_awal_mt4(wb.worksheets[0].iter_rows(values_only=True), skip)
 
             def sumber():
-                for nomor, row in enumerate(it, start=skip + 1):
+                for nomor, row in it:
                     if any(v is not None and _teks(v) != "" for v in row):
                         yield nomor, list(row)
 
@@ -1297,9 +1408,16 @@ def _iter_mt4(path: Path, info: dict):
     _ingat_berkas(path)
     with _buka_teks(path, enc) as f:
         reader = csv.reader(f, delimiter=info["pemisah"])
-        for _ in range(skip):
-            next(reader, None)
-        yield from _alirkan_csv(reader, lebar, path, idx, info, skip)
+        nomor = 0
+        dilewati = 0
+        while dilewati < skip:
+            row = next(reader, None)
+            if row is None:
+                return
+            nomor += 1
+            if not _baris_kosong(row):
+                dilewati += 1
+        yield from _alirkan_csv(reader, lebar, path, idx, info, nomor)
 
 
 def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, akun=None):
