@@ -934,13 +934,44 @@ def _encoding_mt4_penuh(path: Path) -> str:
                 return "cp1252"
 
 
+_PEMISAH_MT4 = (";", "\t", ",")
+
+
+def _buang_padding_mt4(row, pemisah):
+    """Buang delimiter LAIN yang menempel di ujung sel terakhir.
+
+    Raw Report ';' yang dibuka Excel dengan locale ',' dipecah hanya pada koma
+    (Comment "CRM-S-1333365,261003,Swap"), lalu setiap baris diberi koma sisa
+    sampai selebar baris terlebar dan disimpan dengan ','. Hasilnya baris ';'
+    asli + ",,,,," di ujung: sel terakhir menjadi ",,,,," (bukan kosong) atau
+    "-1899.71,,,,", dan header menjadi "...;Comment,,,,,". Sel yang hanya berisi
+    delimiter lain sama dengan sel kosong, jadi aman dibuang. Isi lain tidak
+    disentuh: sel tambahan yang berisi data tetap STOP.
+    """
+    if not row:
+        return row
+    akhir = row[-1]
+    if not isinstance(akhir, str):
+        return row
+    buang = "".join(c for c in _PEMISAH_MT4 if c != pemisah) + " \r\n"
+    bersih = akhir.rstrip(buang)
+    if bersih == akhir:
+        return row
+    return list(row[:-1]) + [bersih]
+
+
+def _baca_mt4(reader, pemisah):
+    for row in reader:
+        yield _buang_padding_mt4(row, pemisah)
+
+
 def _parse_header_mt4(baris: str):
     """(pemisah, header) kalau baris ini header MT4, kalau tidak None."""
     calon = []
-    for pemisah in (";", "\t", ","):
+    for pemisah in _PEMISAH_MT4:
         if baris.count(pemisah) == 0:
             continue
-        sel = next(csv.reader([baris], delimiter=pemisah))
+        sel = _buang_padding_mt4(next(csv.reader([baris], delimiter=pemisah)), pemisah)
         header = [_teks(h) for h in sel]
         if all(k in header for k in _MT4_WAJIB):
             calon.append((baris.count(pemisah), pemisah, header))
@@ -1263,7 +1294,7 @@ def _contoh_baris_mt4(path: Path, kind, pemisah, skip, batas=1000):
             wb.close()
         return hasil
     with _buka_teks(path, _deteksi_encoding(path)) as f:
-        it = _lewati_awal_mt4(csv.reader(f, delimiter=pemisah), skip)
+        it = _lewati_awal_mt4(_baca_mt4(csv.reader(f, delimiter=pemisah), pemisah), skip)
         for _, row in it:
             if not _baris_kosong(row):
                 hasil.append(row)
@@ -1407,7 +1438,7 @@ def _iter_mt4(path: Path, info: dict):
     enc = _encoding_mt4_penuh(path)
     _ingat_berkas(path)
     with _buka_teks(path, enc) as f:
-        reader = csv.reader(f, delimiter=info["pemisah"])
+        reader = _baca_mt4(csv.reader(f, delimiter=info["pemisah"]), info["pemisah"])
         nomor = 0
         dilewati = 0
         while dilewati < skip:
