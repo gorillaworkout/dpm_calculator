@@ -23,6 +23,8 @@ from pathlib import Path
 
 from flask import (Flask, abort, flash, g, redirect, render_template, request,
                    send_file, url_for)
+from markupsafe import escape
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 import auth
@@ -33,6 +35,50 @@ BASE = Path(__file__).resolve().parent
 JOBS = Path(os.environ.get("DW_JOB_DIR", Path(tempfile.gettempdir()) /
                            "dw-calculator-jobs")).expanduser().resolve()
 JOBS.mkdir(exist_ok=True)
+
+
+# --------------------------------------------------------------------- version
+# The server has no .git (deploys copy single files from raw GitHub at a SHA),
+# so the running version comes from the VERSION file, read once at startup.
+# Bump VERSION in every PR; see the header of that file.
+APP_NAME = "DW Calculator"
+
+
+def baca_versi(path=None):
+    """{'version', 'build'} from VERSION. Missing or unreadable -> 'unknown'.
+
+    Accepts `key=value` lines (`#` comments allowed) or a bare version on the
+    first non-comment line.
+    """
+    path = Path(path) if path else BASE / "VERSION"
+    hasil = {"version": "unknown", "build": ""}
+    try:
+        teks = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return hasil
+    for baris in teks.splitlines():
+        baris = baris.strip()
+        if not baris or baris.startswith("#"):
+            continue
+        if "=" in baris:
+            kunci, _, nilai = baris.partition("=")
+            kunci = kunci.strip().lower()
+            if kunci in hasil and nilai.strip():
+                hasil[kunci] = nilai.strip()
+        elif hasil["version"] == "unknown":
+            hasil["version"] = baris
+    return hasil
+
+
+def label_versi(info):
+    """'DW Calculator v1.22 · 2026-10-19' (no date part when build is empty)."""
+    v = info.get("version") or "unknown"
+    teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
+    return f"{teks} · {info['build']}" if info.get("build") else teks
+
+
+VERSI = baca_versi()
+VERSI_LABEL = label_versi(VERSI)
 
 
 # Job state lives in a small JSON file NEXT TO the job directory, not inside it.
@@ -622,6 +668,36 @@ def _copy_for(company, slug):
 
 
 @app.context_processor
+def _versi():
+    # Every template, the sign-in page included (auth.py renders through this app).
+    return {"app_version": VERSI["version"], "app_build": VERSI["build"],
+            "app_version_label": VERSI_LABEL}
+
+
+@app.get("/version")
+def version():
+    """Running version as JSON. Behind the login hook like every other route."""
+    return {"name": APP_NAME, "version": VERSI["version"], "build": VERSI["build"],
+            "label": VERSI_LABEL}
+
+
+@app.errorhandler(HTTPException)
+def _halaman_error(exc):
+    """Werkzeug's own error page with the version under it (403/404/405/500...).
+
+    Status, headers, and the description stay the same; only a footer line is added
+    so a screenshot of an error shows which version is running.
+    """
+    resp = exc.get_response()
+    if exc.code is None or exc.code < 400 or exc.response is not None:
+        return resp
+    if (resp.mimetype or "") != "text/html":
+        return resp
+    resp.set_data(exc.get_body().rstrip() + f'\n<p><small>{escape(VERSI_LABEL)}</small></p>\n')
+    return resp
+
+
+@app.context_processor
 def _nav():
     company = getattr(request, "company", "kvb" if request.path.startswith("/kvb") else "dpm")
     user = getattr(request, "user", None)
@@ -893,7 +969,7 @@ def run(slug, company="dpm"):
         download_name = f"{label}-hasil.zip"
     _write_state(job_id, state="running", name=download_name,
                  started=time.time(), error=None, log=None, path=None, slug=slug,
-                 company=company,
+                 company=company, version=VERSI_LABEL,
                  owner_pid=os.getpid(),
                  periode=periode, saldo_jw=saldo_jw or None,
                  saldo_ch_baris=(len([x for x in saldo_ch.splitlines() if x.strip()])
@@ -1101,6 +1177,7 @@ def job_status(job_id):
                                hint=hint, doc=doc,
                                error=info["error"],
                                log=info["log"] or "Failed with no message.",
+                               job_version=info.get("version"),
                                **pilihan), 422
     elapsed = int(time.time() - info["started"])
     return render_template("job.html", job_id=job_id, info=info, elapsed=elapsed,

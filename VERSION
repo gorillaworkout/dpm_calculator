@@ -1,0 +1,10 @@
+# DW Calculator version, shown in the footer of every page, on error/STOP
+# messages, and at GET /version. app.py reads this file once at startup.
+#
+# Bump it in EVERY PR that will be deployed:
+#   version = 1.<PR number>   (this file was added after PR #22, so it starts at 1.22)
+#   build   = date the PR is prepared/merged, YYYY-MM-DD
+# Do not put a commit SHA here: a commit cannot contain its own SHA, and the
+# server has no .git. Deploys copy files from raw GitHub, so copy VERSION too.
+version=1.22
+build=2026-10-19

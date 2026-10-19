@@ -185,6 +185,8 @@ pre{
 .upload-progress.failed #upload-progress-bar{background:#ff6b6b}
 .upload-progress.failed .upload-progress-detail{color:#ffb4b4}
 .upload-progress.processing #upload-progress-bar{background:#72d6a0}
+.appver{position:relative; margin:48px 0 0; color:#7a86a3; font-size:11.5px; letter-spacing:.02em}
+.vertag{font-size:11.5px; opacity:.75; white-space:nowrap}
 </style>
 </head>
 <body>
@@ -223,8 +225,9 @@ pre{
 </aside>
 <main><div class="inner{% block wide %}{% endblock %}">
 {% with messages = get_flashed_messages() %}
-{% if messages %}<div class="note warn" role="status">{{ messages[0] }}</div>{% endif %}
+{% if messages %}<div class="note warn" role="status">{{ messages[0] }} <span class="vertag">· {{ app_version_label }}</span></div>{% endif %}
 {% endwith %}
-{% block body %}{% endblock %}</div></main>
+{% block body %}{% endblock %}
+<p class="appver" id="app-version">{{ app_version_label }}</p></div></main>
 </body>
 </html>
