@@ -112,9 +112,10 @@ assert b'id="upload-progress-detail"' in halaman_segregate.data
 assert b"function updateProgress" in halaman_segregate.data
 assert b"function uploadError" in halaman_segregate.data
 assert b"File ' + (fileIndex + 1) + ' of ' + files.length" in halaman_segregate.data
-assert b"Retry ' + attempt + ' of 3" in halaman_segregate.data
+assert b"retrying ' + info.n + '/' +" in halaman_segregate.data
+assert b"var RETRY = {max: 8," in halaman_segregate.data
 assert b"MB uploaded" in halaman_segregate.data
-assert b"Check your internet, VPN/WARP, or try another network" in halaman_segregate.data
+assert b"office firewall/antivirus or VPN/WARP, or try another network" in halaman_segregate.data
 assert b"multiple" in halaman_segregate.data
 assert b'name="bulan"' not in halaman_segregate.data
 assert b'name="saldo_jw"' not in halaman_segregate.data
