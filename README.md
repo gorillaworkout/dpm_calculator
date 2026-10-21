@@ -64,13 +64,27 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.23 · 2026-10-19`.
+required) show the running version, for example `DW Calculator v1.24 · 2026-10-21`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
 **Bump `VERSION` in every PR:** `version=1.<PR number>`, `build=<YYYY-MM-DD>`.
 Do not put a commit SHA in it. Copy `VERSION` with the other files on every
 deploy and restart the app. A missing file shows `version unknown`.
+
+### Upload log (`/upload/*`)
+
+Every `/upload/*` request writes one line to stderr (the pm2 error log), for
+example:
+
+    upload 2026-10-21T11:40:12+07:00 POST /upload/chunk 200 bytes=10486123 ms=812 id=1a2b… file=0 seq=0 ip=203.0.113.9 user=kvb-ops
+
+`ip` is `CF-Connecting-IP` (cloudflared connects from 127.0.0.1). A `note=` is
+added for a re-sent chunk that was already stored, an out-of-order chunk, a short
+or cut-off body (`408`, the browser retries), and a request that raised. File
+contents are never logged. To check an incident: `grep '^upload ' <pm2 error log>`.
+If no line exists for a chunk the browser says it sent, the request never reached
+gunicorn (network, firewall, antivirus, or Cloudflare).
 
 ---
 

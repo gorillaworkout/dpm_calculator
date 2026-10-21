@@ -308,40 +308,215 @@
       progressTrack.setAttribute('aria-valuenow', String(percent));
     }
 
+    // --- chunk-retry core: no DOM; test_upload_retry.py runs it under node ---
+    // A chunk can be lost on the way out OR its acknowledgement on the way back
+    // (office firewall, antivirus, flaky Wi-Fi). Retries back off with jitter up to
+    // 30 s, wait for the network to come back, and first ask the server what it
+    // already has, so an acked-but-lost chunk is not sent twice. The server also
+    // acknowledges a repeated chunk without storing it again.
+    var RETRY = {max: 8, baseMs: 1000, capMs: 30000, timeoutMs: 180000, offlineWaitMs: 600000};
+    function retryDelay(n, random) {
+      var full = Math.min(RETRY.capMs, RETRY.baseMs * Math.pow(2, n - 1));
+      return Math.round(full / 2 + random() * full / 2);
+    }
+    function describeResponse(r) {
+      return {status: r.status, type: r.type || '', redirected: !!r.redirected,
+              opaque: r.type === 'opaque' || r.type === 'opaqueredirect'};
+    }
+    function sessionError(why) {
+      var e = new Error('Your session expired, or a sign-in page (for example Cloudflare Access) ' +
+        'answered instead of this server' + (why ? ' (' + why + ')' : '') + '.');
+      e.name = 'SessionExpired'; e.sessionExpired = true; e.noRetry = true;
+      return e;
+    }
+    // A redirect (to /login or to another origin) or a 401 is never a real upload reply:
+    // the upload routes answer JSON. With redirect:'manual' a redirect shows up as
+    // type 'opaqueredirect' instead of a cross-origin fetch rejection.
+    function loginResponse(r, origin) {
+      if (r.type === 'opaqueredirect' || r.status === 401) return 'HTTP ' + (r.status || 'redirect');
+      if (r.redirected && r.url && (r.url.indexOf(origin) !== 0 || /\/login\b/.test(r.url))) {
+        return 'redirected to ' + r.url.split('?')[0];
+      }
+      return null;
+    }
+    function isJson(r) {
+      var ct = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
+      return ct.indexOf('json') >= 0;
+    }
+    // env: fetch(url, opts), sleep(ms, onTick), waitOnline(ms), online(), now(), random(),
+    //      status(id) -> Promise(json|null), onRetry(info), origin
+    function makeChunkSender(env) {
+      return function send(req) {
+        var diag = {attempts: 0, started: env.now(), lastError: null, lastResponse: null,
+                    chunkSize: req.size, uploadId: req.id, resumed: false, duplicate: false};
+        function fail(err) { err.diag = diag; diag.ended = env.now(); throw err; }
+        function alreadyThere() {
+          return Promise.resolve().then(function () { return env.status(req.id); }).then(function (st) {
+            var f = st && st.files ? st.files.filter(function (x) { return x.index === req.index; })[0] : null;
+            return !!f && f.chunks > req.seq;
+          }, function () { return false; });
+        }
+        function retry(err) {
+          diag.lastError = err;
+          var n = diag.attempts;              // retry number: 1 after the first failure
+          if (n > RETRY.max) return fail(err);
+          var wait = retryDelay(n, env.random);
+          var offline = !env.online();
+          if (offline) env.onRetry({n: n, max: RETRY.max, leftMs: 0, offline: true, err: err});
+          return (offline ? env.waitOnline(RETRY.offlineWaitMs) : Promise.resolve())
+            .then(function () {
+              return env.sleep(wait, function (leftMs) {
+                env.onRetry({n: n, max: RETRY.max, leftMs: leftMs, offline: false, err: err});
+              });
+            })
+            .then(alreadyThere)
+            .then(function (have) {
+              if (have) { diag.resumed = true; diag.ended = env.now(); return {resumed: true, diag: diag}; }
+              return attempt();
+            });
+        }
+        function attempt() {
+          diag.attempts++;
+          return env.fetch('/upload/chunk', {method: 'POST', body: req.makeBody(), redirect: 'manual',
+                                             credentials: 'same-origin', timeoutMs: RETRY.timeoutMs})
+            .then(function (r) {
+              diag.lastResponse = describeResponse(r);
+              var login = loginResponse(r, env.origin);
+              if (login) return fail(sessionError(login));
+              if (r.ok) {
+                if (!isJson(r)) return fail(sessionError('HTML instead of the upload reply'));
+                return r.json().then(function (j) {
+                  diag.duplicate = !!(j && j.duplicate); diag.ended = env.now();
+                  return {received: j && j.received, diag: diag};
+                });
+              }
+              return r.json().catch(function () { return {}; }).then(function (e) {
+                if (r.status === 409) {
+                  return alreadyThere().then(function (have) {
+                    if (have) { diag.resumed = true; diag.ended = env.now(); return {resumed: true, diag: diag}; }
+                    var x = new Error(e.error || 'Chunk arrived out of order.'); x.noRetry = true;
+                    return fail(x);
+                  });
+                }
+                if (r.status >= 500 || r.status === 429 || r.status === 408 || e.retry) {
+                  var h = new Error(e.error || ('HTTP ' + r.status)); h.name = 'HTTP ' + r.status;
+                  return retry(h);
+                }
+                var err = new Error(e.error || ('The upload was interrupted (HTTP ' + r.status + ').'));
+                err.noRetry = true;
+                return fail(err);
+              });
+            }, function (err) {
+              if (err && err.diag) throw err;   // already final (thrown by fail above)
+              return retry(err);
+            });
+        }
+        return attempt();
+      };
+    }
+    function fmtDuration(ms) {
+      var s = Math.max(0, Math.round(ms / 1000));
+      return s < 60 ? s + 's' : Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    }
+    function diagText(err, now, online) {
+      var d = (err && err.diag) || {};
+      var parts = ['error=' + ((err && err.name) || 'Error') + ': ' + ((err && err.message) || 'unknown'),
+                   'online=' + (online ? 'yes' : 'no')];
+      if (d.attempts) parts.push('attempts=' + d.attempts + ' of ' + (RETRY.max + 1));
+      if (d.started) parts.push('elapsed=' + fmtDuration((d.ended || now) - d.started));
+      if (d.chunkSize != null) parts.push('chunk=' + (d.chunkSize / 1048576).toFixed(2) + ' MB');
+      var r = d.lastResponse;
+      parts.push('response=' + (r ? 'HTTP ' + r.status + ' type=' + (r.type || '?') +
+        ' redirected=' + (r.redirected ? 'yes' : 'no') + (r.opaque ? ' opaque' : '') : 'none'));
+      if (d.lastError && d.lastError !== err) {
+        parts.push('last network error=' + (d.lastError.name || 'Error') + ': ' + d.lastError.message);
+      }
+      if (d.uploadId) parts.push('upload=' + String(d.uploadId).slice(0, 8));
+      return parts.join(' · ');
+    }
+    // --- end chunk-retry core ---
+
     function uploadError(err, context) {
+      var when = new Date().toTimeString().slice(0, 8);
+      var details = ' Details: ' + diagText(err, Date.now(), navigator.onLine) + ' · at ' + when + '.';
+      if (err && err.sessionExpired) {
+        return 'Session expired — please sign in again. ' + err.message +
+          ' Open this site in a new tab, sign in, then come back and press Run again. ' +
+          'Your selected files are still in the list.' + details;
+      }
       var where = context && context.file
         ? 'Upload stopped at file ' + context.fileIndex + ' of ' + context.fileCount +
           ' (' + context.file + '), chunk ' + context.chunk + ' of ' + context.chunks + '. '
         : 'Upload could not start; 0 MB reached the server. ';
-      var reason = err && err.message && err.message !== 'Failed to fetch'
+      var reason = err && err.message && err.message !== 'Failed to fetch' && !/NetworkError|Load failed|network/i.test(err.message) && err.name !== 'TimeoutError'
         ? err.message + ' '
-        : 'The browser lost its connection before the server acknowledged this chunk. ';
-      return where + reason + 'Your selected files are still in the list. Check your internet, VPN/WARP, or try another network, then press Run again.';
+        : 'The browser lost its connection before the server acknowledged this chunk' +
+          (err && err.diag ? ', even after ' + err.diag.attempts + ' attempts' : '') + '. ';
+      return where + reason + 'Your selected files are still in the list. Check your internet, Wi-Fi, ' +
+        'office firewall/antivirus or VPN/WARP, or try another network, then press Run again.' + details;
     }
 
-    function sendChunk(fd, attempt, context) {
-      return fetch('/upload/chunk', { method: 'POST', body: fd })
-        .then(function (r) {
-          if (r.ok) return;
-          if ((r.status >= 500 || r.status === 429) && attempt < 3) {
-            updateProgress('Connection interrupted — retrying', context.label + ' · Retry ' + attempt + ' of 3', context.percent, 'retrying');
-            return new Promise(function (resolve) {
-              setTimeout(resolve, 1000 * Math.pow(2, attempt));
-            }).then(function () { return sendChunk(fd, attempt + 1, context); });
-          }
-          return r.json().catch(function () { return {}; }).then(function (e) {
-            var err = new Error(e.error || 'The upload was interrupted.');
-            err.noRetry = true;
-            throw err;
-          });
-        }, function (err) {
-          if (attempt >= 3) throw err;
-          updateProgress('Connection interrupted — retrying', context.label + ' · Retry ' + attempt + ' of 3', context.percent, 'retrying');
-          return new Promise(function (resolve) {
-            setTimeout(resolve, 1000 * Math.pow(2, attempt));
-          }).then(function () { return sendChunk(fd, attempt + 1, context); });
-        });
+    // Browser side of the core: real fetch with a timeout, a ticking sleep, and the
+    // online/offline events.
+    function fetchWithTimeout(url, opts) {
+      var ctl = window.AbortController ? new AbortController() : null;
+      var timer = null;
+      if (ctl) {
+        opts.signal = ctl.signal;
+        timer = setTimeout(function () { ctl.abort(); }, opts.timeoutMs);
+      }
+      return fetch(url, opts).then(function (r) { clearTimeout(timer); return r; }, function (err) {
+        clearTimeout(timer);
+        if (err && err.name === 'AbortError') {
+          var t = new Error('No response within ' + Math.round(opts.timeoutMs / 1000) + ' s');
+          t.name = 'TimeoutError';
+          throw t;
+        }
+        throw err;
+      });
     }
+    function sleepTicking(ms, onTick) {
+      return new Promise(function (resolve) {
+        var end = Date.now() + ms;
+        (function tick() {
+          var left = end - Date.now();
+          if (left <= 0) { resolve(); return; }
+          onTick(left);
+          setTimeout(tick, Math.min(1000, left));
+        })();
+      });
+    }
+    function waitOnline(ms) {
+      if (navigator.onLine) return Promise.resolve();
+      return new Promise(function (resolve) {
+        var done = function () { window.removeEventListener('online', done); clearTimeout(t); resolve(); };
+        var t = setTimeout(done, ms);
+        window.addEventListener('online', done);
+      });
+    }
+    function uploadStatus(id) {
+      return fetchWithTimeout('/upload/status?id=' + encodeURIComponent(id),
+        {method: 'GET', redirect: 'manual', credentials: 'same-origin', timeoutMs: 20000})
+        .then(function (r) { return r.ok && isJson(r) ? r.json() : null; });
+    }
+    var activeContext = null;
+    var sendChunk = makeChunkSender({
+      fetch: fetchWithTimeout, sleep: sleepTicking, waitOnline: waitOnline,
+      online: function () { return navigator.onLine !== false; },
+      now: function () { return Date.now(); }, random: Math.random,
+      status: uploadStatus, origin: location.origin,
+      onRetry: function (info) {
+        var c = activeContext || {label: '', percent: 0};
+        var why = info.err && info.err.name && info.err.name.indexOf('HTTP') === 0 ? ' (' + info.err.name + ')' : '';
+        if (info.offline) {
+          updateProgress('Offline — waiting for the network', c.label + ' · The browser reports no network. ' +
+            'Retry ' + info.n + '/' + info.max + ' starts when it is back.', c.percent, 'retrying');
+        } else {
+          updateProgress('Connection lost — retrying', 'Connection lost' + why + ', retrying ' + info.n + '/' +
+            info.max + ' in ' + Math.ceil(info.leftMs / 1000) + 's… · ' + c.label, c.percent, 'retrying');
+        }
+      }
+    });
 
     // Queue state: the server answers 202 while another user's heavy job runs.
     var queue = {ticket: '', cancelled: false, timer: null, wake: null, button: null};
@@ -371,7 +546,10 @@
       }
       var fd = new FormData(); fd.append('bytes', total);
       if (queue.ticket) fd.append('ticket', queue.ticket);
-      return fetch('/upload/begin', { method: 'POST', body: fd }).then(function (r) {
+      return fetch('/upload/begin', { method: 'POST', body: fd, redirect: 'manual',
+                                      credentials: 'same-origin' }).then(function (r) {
+        var login = loginResponse(r, location.origin);
+        if (login) { var se = sessionError(login); se.diag = {lastResponse: describeResponse(r)}; throw se; }
         if (r.status === 202) {
           return r.json().then(function (q) {
             queue.ticket = q.ticket;
@@ -397,7 +575,8 @@
           throw new Error(e.error || ('Could not start the upload (HTTP ' + r.status + ').'));
         });
       }, function (err) {
-        if (attempt >= 3) throw err;
+        if (err && err.sessionExpired) throw err;
+        if (attempt >= 3) { err.diag = {attempts: attempt}; throw err; }
         return new Promise(function (resolve) {
           setTimeout(resolve, 1000 * Math.pow(2, attempt));
         }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
@@ -464,13 +643,20 @@
                     chunk: mySeq + 1, chunks: chunks, label: label, percent: total ? sent / total * 100 : 0};
                   updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),
                     currentContext.percent, 'uploading');
-                  var fd = new FormData();
-                  fd.append('id', id);
-                  fd.append('name', file.name);
-                  fd.append('index', fileIndex);
-                  fd.append('seq', mySeq);
-                  fd.append('chunk', file.slice(offset, offset + CHUNK));
-                  return sendChunk(fd, 1, currentContext)
+                  var piece = file.slice(offset, offset + CHUNK);
+                  activeContext = currentContext;
+                  return sendChunk({id: id, index: fileIndex, seq: mySeq, size: piece.size,
+                    makeBody: function () {
+                      // A fresh FormData per attempt: a body is consumed once sent.
+                      var fd = new FormData();
+                      fd.append('id', id);
+                      fd.append('name', file.name);
+                      fd.append('index', fileIndex);
+                      fd.append('seq', mySeq);
+                      fd.append('size', piece.size);
+                      fd.append('chunk', piece);
+                      return fd;
+                    }})
                     .then(function () {
                       sent += Math.min(CHUNK, file.size - offset);
                       updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),

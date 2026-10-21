@@ -13,18 +13,32 @@ discarded from memory. There is never a second assembled copy beside the chunks.
 Flow:
     POST /upload/begin                  -> {"id": "<hex>"}
     POST /upload/chunk  (repeat)        -> {"received": <bytes>}
+    GET  /upload/status?id=<hex>        -> what the server already has (resume)
     POST /tool/<slug>   upload_id=<hex> -> the part is renamed into the job
+
+A chunk can reach the server while its acknowledgement is lost on the way back
+(office firewall, antivirus, Wi-Fi). The browser then sends the same chunk again.
+Every committed chunk keeps its size and a short hash in the manifest, so a
+repeat of ANY already-stored chunk is acknowledged without writing it twice.
+
+Every /upload/* request is logged to stderr (the pm2 error log) as one line,
+so a failed upload leaves evidence on the server. File contents are never logged.
 """
+import datetime
+import hashlib
+import logging
 import math
 import fcntl
 import json
 import os
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path
 
-from flask import jsonify, request
+from flask import g, jsonify, request
+from werkzeug.exceptions import ClientDisconnected
 from werkzeug.utils import secure_filename
 
 import cleanup
@@ -238,8 +252,119 @@ def discard(jobs_dir, upload_id):
         shutil.rmtree(stage, ignore_errors=True)
 
 
+# ------------------------------------------------------------------ request log
+log = logging.getLogger("dw.upload")
+if not log.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    log.addHandler(_h)
+    log.setLevel(logging.INFO)
+    log.propagate = False
+
+
+def _ip():
+    """Client IP as Cloudflare saw it. cloudflared connects from 127.0.0.1."""
+    return (request.headers.get("CF-Connecting-IP")
+            or (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            or request.remote_addr or "-")
+
+
+def _bidang(nama):
+    """A form/query field, without forcing a body parse the view did not do."""
+    nilai = request.args.get(nama)
+    if nilai is None and "form" in request.__dict__:
+        nilai = request.form.get(nama)
+    return nilai
+
+
+def _catat(status, catatan=None):
+    mulai = g.get("upload_t0")
+    ms = int((time.perf_counter() - mulai) * 1000) if mulai else -1
+    user = getattr(request, "user", None)
+    nama = user["username"] if user else "-"
+    bagian = [
+        "upload",
+        datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        request.method, request.path, str(status),
+        f"bytes={request.content_length if request.content_length is not None else '-'}",
+        f"ms={ms}",
+        f"id={(_bidang('id') or '-')[:32]}",
+        f"file={_bidang('index') or '-'}",
+        f"seq={_bidang('seq') or '-'}",
+        f"ip={_ip()}",
+        f"user={nama}",
+    ]
+    catatan = catatan or g.get("upload_note")
+    if catatan:
+        bagian.append(f"note={str(catatan)[:160]}")
+    log.info(" ".join(bagian))
+
+
+def _hash(data):
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
+def _tidak_lengkap(alasan):
+    """The body arrived short: the connection dropped mid-request. Retryable."""
+    g.upload_note = alasan
+    return jsonify({"error": "The chunk arrived incomplete (the connection dropped while "
+                             "it was being sent). It will be sent again.",
+                    "retry": True}), 408
+
+
+def _sudah_ada(entry, seq, data, sidik, target):
+    """True when chunk `seq` of this file is already stored with these exact bytes."""
+    sizes, hashes = entry.get("sizes"), entry.get("hashes")
+    if (isinstance(sizes, list) and isinstance(hashes, list)
+            and len(sizes) == len(hashes) == entry["chunks"]):
+        return sizes[seq] == len(data) and hashes[seq] == sidik
+    # Manifest written before hashes were kept: only the last chunk can be checked.
+    if seq != entry["chunks"] - 1 or not target.is_file() or target.stat().st_size < len(data):
+        return False
+    with open(target, "rb") as fh:
+        fh.seek(-len(data), 2)
+        return fh.read() == data
+
+
 def register(app, jobs_dir):
-    """Attach the two upload endpoints. Auth is handled by the app's global hook."""
+    """Attach the upload endpoints. Auth is handled by the app's global hook."""
+
+    @app.before_request
+    def _upload_mulai():
+        if request.path.startswith("/upload/"):
+            g.upload_t0 = time.perf_counter()
+
+    @app.after_request
+    def _upload_log(resp):
+        if request.path.startswith("/upload/"):
+            g.upload_logged = True
+            try:
+                _catat(resp.status_code)
+            except Exception:                    # logging must never break an upload
+                pass
+        return resp
+
+    @app.teardown_request
+    def _upload_log_error(exc=None):
+        # after_request does not run when the view raised: log that too.
+        if request.path.startswith("/upload/") and not g.get("upload_logged"):
+            try:
+                _catat(500, f"exception {type(exc).__name__}: {exc}" if exc else "no response")
+            except Exception:
+                pass
+
+    @app.get("/upload/status")
+    def upload_status():
+        """What the server already holds, so a browser can resume after a lost ack."""
+        upload_id = request.args.get("id")
+        stage = _stage_dir(jobs_dir, upload_id)
+        manifest = _read_manifest(stage) if stage and stage.is_dir() else None
+        if manifest is None:
+            return jsonify({"error": "This upload has expired. Please pick the files again."}), 404
+        return jsonify({"id": upload_id, "bytes": manifest["bytes"],
+                        "declared_bytes": manifest.get("declared_bytes"),
+                        "files": [{"index": e["index"], "chunks": e["chunks"],
+                                   "bytes": e["bytes"]} for e in manifest["files"]]})
 
     @app.post("/upload/begin")
     def upload_begin():
@@ -299,6 +424,15 @@ def register(app, jobs_dir):
 
     @app.post("/upload/chunk")
     def upload_chunk():
+        try:
+            form = request.form
+            blob = request.files.get("chunk")
+        except ClientDisconnected:
+            return _tidak_lengkap("client disconnected while sending the body")
+        if (request.content_length or 0) > 0 and (not form.get("id") or not blob):
+            # A body cut off mid-way parses as an empty form; do not call it expired.
+            return _tidak_lengkap(f"incomplete body: Content-Length {request.content_length}, "
+                                  f"fields {sorted(form.keys())}, chunk {'yes' if blob else 'no'}")
         stage = _stage_dir(jobs_dir, request.form.get("id"))
         if not stage or not stage.is_dir():
             return jsonify({"error": "This upload has expired. Please pick the files again."}), 404
@@ -313,10 +447,16 @@ def register(app, jobs_dir):
         if not 0 <= index < MAX_FILES:
             return jsonify({"error": f"At most {MAX_FILES} files can be sent in one run."}), 400
 
-        blob = request.files.get("chunk")
         if not blob:
             return jsonify({"error": "Malformed upload request."}), 400
-        data = blob.read()
+        try:
+            data = blob.read()
+        except ClientDisconnected:
+            return _tidak_lengkap("client disconnected while reading the chunk")
+        size = request.form.get("size")
+        if size not in (None, "") and size.isdigit() and int(size) != len(data):
+            return _tidak_lengkap(f"short read: {len(data)} of {size} bytes")
+        sidik = _hash(data)
 
         # Four Gunicorn workers can receive a retry and its original request at
         # once. Lock the upload while checking sequence, appending, and updating
@@ -332,14 +472,17 @@ def register(app, jobs_dir):
             entries = {e["index"]: e for e in manifest["files"]}
             entry = entries.get(index)
             expected = entry["chunks"] if entry else 0
-            if seq == expected - 1 and target.is_file() and target.stat().st_size >= len(data):
-                with open(target, "rb") as fh:
-                    fh.seek(-len(data), 2)
-                    if fh.read() == data:
-                        manifest["last_chunk"] = time.time()
-                        _write_manifest(stage, manifest)
-                        return jsonify({"received": manifest["bytes"]})
+            if 0 <= seq < expected:
+                # Already stored: the ack was lost and the browser sent it again.
+                if _sudah_ada(entry, seq, data, sidik, target):
+                    manifest["last_chunk"] = time.time()
+                    _write_manifest(stage, manifest)
+                    g.upload_note = "duplicate chunk, already stored"
+                    return jsonify({"received": manifest["bytes"], "duplicate": True})
+                g.upload_note = f"repeat of chunk {seq} with different bytes"
+                return jsonify({"error": "Chunk arrived out of order.", "expected": expected}), 409
             if seq != expected:
+                g.upload_note = f"out of order: got {seq}, expected {expected}"
                 return jsonify({"error": "Chunk arrived out of order.", "expected": expected}), 409
             if manifest["bytes"] + len(data) > manifest.get("declared_bytes", 0):
                 shutil.rmtree(stage, ignore_errors=True)
@@ -356,9 +499,12 @@ def register(app, jobs_dir):
                 if entry:
                     entry["chunks"] += 1
                     entry["bytes"] += len(data)
+                    entry.setdefault("sizes", []).append(len(data))
+                    entry.setdefault("hashes", []).append(sidik)
                 else:
                     manifest["files"].append({"index": index, "original": original,
-                                              "stored": stored, "chunks": 1, "bytes": len(data)})
+                                              "stored": stored, "chunks": 1, "bytes": len(data),
+                                              "sizes": [len(data)], "hashes": [sidik]})
                 manifest["files"].sort(key=lambda e: e["index"])
                 manifest["bytes"] += len(data)
                 manifest["last_chunk"] = time.time()
