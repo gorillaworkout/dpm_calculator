@@ -339,6 +339,17 @@
       }
       return null;
     }
+    // The browser could not read the chosen file (moved, locked by another program,
+    // or an online-only cloud placeholder). That is not a network problem: retrying
+    // the upload cannot fix it, so it stops with the file name.
+    function fileReadError(name, cause) {
+      var e = new Error('File "' + name + '" tidak bisa dibaca browser — copy ulang file ke folder ' +
+        'lokal lalu pilih lagi. (The browser could not read this file: it may have been moved or ' +
+        'renamed, be open/locked in another program, or be an online-only OneDrive/Google Drive file.)');
+      e.name = 'FileReadError (' + ((cause && cause.name) || 'Error') + ')';
+      e.fileRead = true; e.noRetry = true; e.cause = cause;
+      return e;
+    }
     function isJson(r) {
       var ct = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
       return ct.indexOf('json') >= 0;
@@ -375,9 +386,18 @@
               return attempt();
             });
         }
+        var data = null;                      // the chunk's bytes, read once from the file
+        function readOnce(tries) {
+          return Promise.resolve().then(function () { return req.read(); }).then(function (d) { data = d; },
+            function (err) {
+              diag.readError = err;
+              if (tries <= 1) return fail(fileReadError(req.fileName || 'file', err));
+              return env.sleep(2000, function () {}).then(function () { return readOnce(tries - 1); });
+            });
+        }
         function attempt() {
           diag.attempts++;
-          return env.fetch('/upload/chunk', {method: 'POST', body: req.makeBody(), redirect: 'manual',
+          return env.fetch('/upload/chunk', {method: 'POST', body: req.makeBody(data), redirect: 'manual',
                                              credentials: 'same-origin', timeoutMs: RETRY.timeoutMs})
             .then(function (r) {
               diag.lastResponse = describeResponse(r);
@@ -411,7 +431,9 @@
               return retry(err);
             });
         }
-        return attempt();
+        // Read first, then send from memory: a file the browser cannot read fails
+        // here with its own message instead of looking like a dropped connection.
+        return (req.read ? readOnce(2) : Promise.resolve()).then(attempt);
       };
     }
     function fmtDuration(ms) {
@@ -431,6 +453,7 @@
       if (d.lastError && d.lastError !== err) {
         parts.push('last network error=' + (d.lastError.name || 'Error') + ': ' + d.lastError.message);
       }
+      if (d.readError) parts.push('file read error=' + (d.readError.name || 'Error') + ': ' + (d.readError.message || ''));
       if (d.uploadId) parts.push('upload=' + String(d.uploadId).slice(0, 8));
       return parts.join(' · ');
     }
@@ -439,6 +462,11 @@
     function uploadError(err, context) {
       var when = new Date().toTimeString().slice(0, 8);
       var details = ' Details: ' + diagText(err, Date.now(), navigator.onLine) + ' · at ' + when + '.';
+      if (err && err.fileRead) {
+        return (context && context.file ? 'Upload stopped at file ' + context.fileIndex + ' of ' +
+          context.fileCount + ', chunk ' + context.chunk + ' of ' + context.chunks + '. ' : '') +
+          err.message + ' Nothing more was sent; the files already uploaded in this run were discarded.' + details;
+      }
       if (err && err.sessionExpired) {
         return 'Session expired — please sign in again. ' + err.message +
           ' Open this site in a new tab, sign in, then come back and press Run again. ' +
@@ -500,6 +528,16 @@
         .then(function (r) { return r.ok && isJson(r) ? r.json() : null; });
     }
     var activeContext = null;
+    // The staged upload this tab owns until the processing route takes it over.
+    // Closing or leaving the tab discards it at once (best effort), so it neither
+    // holds disk nor waits for the idle cleanup. A page kept in the back/forward
+    // cache (persisted) can come back and resume, so it is left alone.
+    var pageUpload = null;
+    window.addEventListener('pagehide', function (ev) {
+      if (!pageUpload || ev.persisted) return;
+      var fd = new FormData(); fd.append('id', pageUpload); fd.append('reason', 'pagehide');
+      if (navigator.sendBeacon) navigator.sendBeacon('/upload/discard', fd);
+    });
     var sendChunk = makeChunkSender({
       fetch: fetchWithTimeout, sleep: sleepTicking, waitOnline: waitOnline,
       online: function () { return navigator.onLine !== false; },
@@ -557,6 +595,12 @@
             updateProgress('Queued — waiting for the server',
               q.message + ' Position ' + q.position + ' in the queue · waiting ' +
               elapsed(since).replace(' elapsed', '') + '. Keep this tab open.', 0, 'retrying');
+            if (q.job_url) {                       // your own run is still processing
+              var a = document.createElement('a');
+              a.href = q.job_url; a.target = '_blank'; a.rel = 'noopener';
+              a.textContent = ' Open your running job';
+              progressDetail.appendChild(a);
+            }
             cancelButton(true);
             return new Promise(function (resolve) {
               queue.wake = resolve;
@@ -626,7 +670,7 @@
       updateProgress('Starting upload…', files.length + ' file(s), ' + mb(total) + ' MB total · ' + elapsed(started), 0, 'uploading');
       beginUpload(1, total)
         .then(function (start) {
-          var id = activeId = start.id;
+          var id = activeId = pageUpload = start.id;
 
           // Sequential on purpose: parallel chunks would race on the append and
           // the server rejects anything out of order.
@@ -646,7 +690,12 @@
                   var piece = file.slice(offset, offset + CHUNK);
                   activeContext = currentContext;
                   return sendChunk({id: id, index: fileIndex, seq: mySeq, size: piece.size,
-                    makeBody: function () {
+                    fileName: file.name,
+                    read: function () {
+                      // Into memory once (10 MB); every retry re-sends these bytes.
+                      return piece.arrayBuffer ? piece.arrayBuffer() : new Response(piece).arrayBuffer();
+                    },
+                    makeBody: function (data) {
                       // A fresh FormData per attempt: a body is consumed once sent.
                       var fd = new FormData();
                       fd.append('id', id);
@@ -654,7 +703,7 @@
                       fd.append('index', fileIndex);
                       fd.append('seq', mySeq);
                       fd.append('size', piece.size);
-                      fd.append('chunk', piece);
+                      fd.append('chunk', new Blob([data]), 'blob');
                       return fd;
                     }})
                     .then(function () {
@@ -681,7 +730,7 @@
             hidden.name = 'upload_id';
             hidden.value = id;
             form.appendChild(hidden);
-            activeId = null; // processing route now owns and removes the staged files
+            activeId = pageUpload = null; // processing route now owns and removes the staged files
             form.submit();
           });
         })
@@ -693,8 +742,10 @@
             form.b.textContent = 'Run & download result';
             return;
           }
+          pageUpload = null;
           if (activeId) {
             var cleanup = new FormData(); cleanup.append('id', activeId);
+            cleanup.append('reason', err && err.fileRead ? 'file-read-error' : 'upload-failed');
             fetch('/upload/discard', { method: 'POST', body: cleanup, keepalive: true });
           }
           updateProgress('Upload failed', uploadError(err, currentContext), currentContext ? currentContext.percent : 0, 'failed');

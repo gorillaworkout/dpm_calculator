@@ -71,7 +71,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.24 · 2026-10-21' (no date part when build is empty)."""
+    """'DW Calculator v1.25 · 2026-10-21' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -772,6 +772,9 @@ def run(slug, company="dpm"):
     staged = chunked.staged_files(JOBS, upload_id) if upload_id else None
     if upload_id and not staged:
         return _gagal("The upload did not finish, or it expired. Please choose the files again.")
+    pemilik = cleanup.upload_owner(JOBS, upload_id) if staged else None
+    if pemilik and pemilik != request.user["username"]:
+        return _gagal("This upload belongs to another account. Please choose the files again.")
 
     if slug == "segregate":
         if not uploads and not staged:
@@ -927,7 +930,7 @@ def run(slug, company="dpm"):
             sources.append(target)
             nama_asli.append(original)
     except OSError as exc:
-        if exc.errno != errno.EXDEV:
+        if exc.errno not in (errno.EXDEV, errno.ENOENT):
             raise
         for tujuan, asal in reversed(pindah):
             try:
@@ -935,6 +938,10 @@ def run(slug, company="dpm"):
             except OSError:
                 pass
         shutil.rmtree(job, ignore_errors=True)
+        if exc.errno == errno.ENOENT:
+            # The same account started a newer upload a moment ago, which replaced this one.
+            return _gagal("This upload was replaced by a newer upload from your account "
+                          "(another tab or a new attempt). Nothing was started here.")
         return _gagal("The upload could not be moved into the job folder without "
                       "copying it. Nothing was started. The upload was not deleted.")
     if staged:
@@ -970,6 +977,7 @@ def run(slug, company="dpm"):
     _write_state(job_id, state="running", name=download_name,
                  started=time.time(), error=None, log=None, path=None, slug=slug,
                  company=company, version=VERSI_LABEL,
+                 user=request.user["username"],      # names the account in queue notices
                  owner_pid=os.getpid(),
                  periode=periode, saldo_jw=saldo_jw or None,
                  saldo_ch_baris=(len([x for x in saldo_ch.splitlines() if x.strip()])

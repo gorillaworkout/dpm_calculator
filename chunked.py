@@ -300,6 +300,82 @@ def _catat(status, catatan=None):
     log.info(" ".join(bagian))
 
 
+def _username():
+    user = getattr(request, "user", None)
+    try:
+        return (user["username"] if user else None) or None
+    except (KeyError, TypeError, IndexError):
+        return None
+
+
+def _jam(ts):
+    try:
+        return datetime.datetime.fromtimestamp(float(ts)).strftime("%H:%M")
+    except (TypeError, ValueError, OSError):
+        return None
+
+
+_NAMA_TOOL = {"segregate": "Deal Segregator", "dw": "Generate D&W", "pl-desk": "PL by Desk"}
+
+
+def _apa(b):
+    """Short description of what a blocker is doing. No file names of other users."""
+    if b["kind"] == "job":
+        tool = _NAMA_TOOL.get(b.get("slug") or "", "a run")
+        jam = _jam(b.get("started"))
+        return f"{tool} run, processing" + (f" since {jam}" if jam else "")
+    gb = (b.get("bytes") or 0) / _GIB
+    return f"uploading {gb:.1f} GB" if gb >= 0.1 else "uploading"
+
+
+def pesan_antrean(blockers, user, ahead=()):
+    """(message, blocked_by, job_url) for a 202 queued answer.
+
+    Names the account the server is busy with. Legacy entries without an owner
+    get the generic text. The requester's own running job gets its own text
+    and a link: it is not cancelled (see upload_begin).
+    """
+    milik = [b for b in blockers if user and b.get("user") == user]
+    sendiri = [b for b in milik if b["kind"] == "job" and b.get("state") in ("running", None)]
+    lain = [b for b in blockers if not (user and b.get("user") == user)]
+    if milik and not sendiri and not lain:
+        return ("Your earlier result is still being downloaded. This upload starts "
+                "automatically when that finishes.",
+                [{"kind": b["kind"], "user": b.get("user"), "own": True} for b in milik], None)
+    blocked_by = [{"kind": b["kind"], "user": b.get("user"), "own": bool(user and b.get("user") == user)}
+                  for b in blockers]
+    job_url = None
+    if sendiri:
+        b = sendiri[0]
+        job_url = (f"/kvb/job/{b['id']}" if b.get("company") == "kvb" else f"/job/{b['id']}")
+        nama = f" ({b['name']})" if b.get("name") else ""
+        jam = _jam(b.get("started"))
+        pesan = (f"Your previous run{nama} is still processing"
+                 + (f" (started {jam})" if jam else "") + ". "
+                 "A running job cannot be stopped safely, so this upload waits and starts "
+                 "automatically when it finishes. You can follow it at " + job_url + ".")
+        if lain:
+            pesan += " " + pesan_antrean(lain, user)[0]
+        return pesan, blocked_by, job_url
+    if lain:
+        nama = sorted({b["user"] for b in lain if b.get("user")})
+        apa = "; ".join(sorted({(f"{b['user']}: " if b.get('user') else "") + _apa(b) for b in lain}))
+        if nama:
+            pesan = (f"Server sedang dipakai oleh {', '.join(nama)}. The server is currently "
+                     f"processing another user's file ({apa}). Your run is queued and will start "
+                     "automatically when it finishes.")
+        else:
+            pesan = ("The server is currently processing another user's file. Your run is "
+                     "queued and will start automatically when it finishes.")
+        return pesan, blocked_by, job_url
+    depan = sorted({u for u in ahead if u and u != user})
+    if depan:
+        return (f"Server sedang dipakai oleh {', '.join(depan)}. Waiting behind their queued "
+                "upload; yours starts automatically after it.", blocked_by, job_url)
+    return ("The server is currently processing another user's file. Your run is queued and "
+            "will start automatically when it finishes.", blocked_by, job_url)
+
+
 def _hash(data):
     return hashlib.sha256(data).hexdigest()[:16]
 
@@ -375,25 +451,44 @@ def register(app, jobs_dir):
         if requested < 0 or requested > MAX_TOTAL:
             return jsonify({"error": f"The selected files exceed the {teks_batas()} limit."}), 413
         ticket = (request.form.get("ticket") or "").strip()
+        user = _username()
+        if cleanup.ticket_superseded(jobs_dir, ticket):
+            # This tab waited in the queue, then the same account started a newer upload.
+            return jsonify({"error": "This upload was replaced by a newer upload from your "
+                                     "account (another tab or a new attempt). Nothing was "
+                                     "uploaded here.", "superseded": True}), 409
         if not cleanup._valid_ticket(ticket):
             ticket = uuid.uuid4().hex
         # One worker at a time: clean, measure, then reserve. Without this two
         # workers could both see the same free space and both start.
         with cleanup.admission(jobs_dir):
-            freed = cleanup.clean(jobs_dir)
+            # The requester's own older upload (stalled, abandoned, or another tab)
+            # and their older queue slot never make them wait: the newest begin wins.
+            # Before this, those counted as "another user's" heavy upload for up to
+            # 15 minutes, so a user queued behind themselves.
+            diganti, bebas_lama = cleanup.supersede_user_uploads(jobs_dir, user)
+            tiket_lama = cleanup.queue_drop_user(jobs_dir, user, keep=ticket)
+            if diganti or tiket_lama:
+                g.upload_note = (f"superseded own uploads {len(diganti)}, "
+                                 f"own queue tickets {len(tiket_lama)}")
+            freed = cleanup.clean(jobs_dir) + bebas_lama
             salah = cek_ruang(_stage_root(jobs_dir), requested, sudah_tersimpan=False,
                               freed=freed)
-            lain = cleanup.any_activity(jobs_dir)
             berat = requested >= cleanup.HEAVY_BYTES
-            sibuk = (berat and cleanup.heavy_activity(jobs_dir)) or (salah and lain)
+            blockers = cleanup.heavy_blockers(jobs_dir) if berat else []
+            if salah and not blockers:
+                blockers = cleanup.all_blockers(jobs_dir)
+            sibuk = bool(blockers) if (berat or salah) else False
             posisi = cleanup.queue_position(jobs_dir, ticket)
             if sibuk or (berat and posisi > 1):
-                posisi = cleanup.queue_touch(jobs_dir, ticket)
+                posisi = cleanup.queue_touch(jobs_dir, ticket, user)
+                pesan, blocked_by, job_url = pesan_antrean(
+                    blockers, user, cleanup.queue_ahead(jobs_dir, ticket))
+                g.upload_note = "queued behind " + (", ".join(
+                    sorted({(b["user"] or "?") + ":" + b["kind"] for b in blocked_by})) or "queue")
                 return jsonify({
                     "queued": True, "ticket": ticket, "position": posisi,
-                    "message": "The server is currently processing another user's file. "
-                               "Your run is queued and will start automatically when it "
-                               "finishes.",
+                    "message": pesan, "blocked_by": blocked_by, "job_url": job_url,
                 }), 202
             cleanup.queue_leave(jobs_dir, ticket)
             if salah:
@@ -403,7 +498,7 @@ def register(app, jobs_dir):
             try:
                 sekarang = time.time()
                 stage.mkdir()
-                _write_manifest(stage, {"files": [], "bytes": 0,
+                _write_manifest(stage, {"files": [], "bytes": 0, "user": user,
                                         "declared_bytes": requested,
                                         "started": sekarang,
                                         "last_chunk": sekarang})
@@ -419,7 +514,17 @@ def register(app, jobs_dir):
 
     @app.post("/upload/discard")
     def upload_discard():
-        discard(jobs_dir, request.form.get("id"))
+        """Discard the caller's own staged upload (retries exhausted, cancel, tab closed).
+        Another account's upload is never removed; legacy uploads without an owner are."""
+        upload_id = request.form.get("id")
+        stage = _stage_dir(jobs_dir, upload_id)
+        manifest = _read_manifest(stage) if stage and stage.is_dir() else None
+        owner = (manifest or {}).get("user")
+        if manifest is not None and owner and owner != _username():
+            g.upload_note = "discard refused: upload belongs to another account"
+            return jsonify({"discarded": False}), 403
+        g.upload_note = f"discard ({request.form.get('reason') or 'client'})"
+        discard(jobs_dir, upload_id)
         return jsonify({"discarded": True})
 
     @app.post("/upload/chunk")
@@ -434,6 +539,11 @@ def register(app, jobs_dir):
             return _tidak_lengkap(f"incomplete body: Content-Length {request.content_length}, "
                                   f"fields {sorted(form.keys())}, chunk {'yes' if blob else 'no'}")
         stage = _stage_dir(jobs_dir, request.form.get("id"))
+        if stage and not stage.is_dir() and cleanup.superseded(stage):
+            g.upload_note = "chunk for an upload superseded by a newer one"
+            return jsonify({"error": "This upload was replaced by a newer upload from your "
+                                     "account (another tab or a new attempt).",
+                            "superseded": True}), 410
         if not stage or not stage.is_dir():
             return jsonify({"error": "This upload has expired. Please pick the files again."}), 404
         original = (request.form.get("name") or "").strip()

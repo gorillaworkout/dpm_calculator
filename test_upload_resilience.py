@@ -40,8 +40,20 @@ cap = Capture()
 chunked.log.addHandler(cap)
 
 
+_n = [0]
+
+
 def begin(total):
-    r = c.post("/upload/begin", data={"bytes": str(total)})
+    # One account per upload: a second begin by the same account supersedes its
+    # older upload (PR #25), and these checks keep several uploads alive at once.
+    _n[0] += 1
+    name = f"res{_n[0]}"
+    assert c.post("/admin/users", data={"username": name, "password": "res-password-1",
+                                        "can_dpm": "1", "can_kvb": "1"}).status_code == 302
+    u = app.test_client()
+    u.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(
+        f"{name}:res-password-1".encode()).decode()
+    r = u.post("/upload/begin", data={"bytes": str(total)})
     assert r.status_code == 200, r.data
     return r.get_json()["id"]
 

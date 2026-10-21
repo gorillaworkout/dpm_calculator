@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.24 · 2026-10-21`.
+required) show the running version, for example `DW Calculator v1.25 · 2026-10-21`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -636,3 +636,20 @@ Kalau nama sheet-nya bukan `D`/`W` (mis. `Withdrawal`), pakai:
 ```bash
 python3 hitung_dw.py file.xlsx --sheet D Withdrawal
 ```
+
+## Upload queue (PR #25)
+
+- Each staged upload records its owner (`user` in `staging/<id>/manifest.json`).
+- A new upload by the same account replaces that account's older staged or abandoned
+  upload and its queue slot. The old tab gets "replaced by a newer upload" and stops.
+  Other accounts' staged data is never touched.
+- Your own running job is never cancelled: a run is a subprocess inside one gunicorn worker
+  and has no stored PID, so it cannot be stopped safely. The new upload waits, with a link
+  to the job, and starts automatically when the job finishes.
+- When another account is busy, the notice names it: "Server sedang dipakai oleh <username>".
+  Uploads staged before this change have no owner, so they get the generic notice.
+- An upload that has sent no chunk for 5 minutes (`DW_UPLOAD_BLOCK_SECONDS`) stops blocking
+  others. It is still deleted only after 15 minutes idle, so a retrying or offline browser can
+  resume. Queue tickets expire 30 s after the last poll.
+- The browser discards its upload when retries run out, when a file cannot be read, and on
+  tab close (`pagehide` via `sendBeacon`, skipped for pages kept in the back/forward cache).

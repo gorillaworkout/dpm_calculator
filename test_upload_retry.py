@@ -163,6 +163,35 @@ test('a failing status check does not block the retry', function () {
   return makeChunkSender(e)(REQ).then(function (r) { assert.strictEqual(r.diag.attempts, 2); });
 });
 
+test('file the browser cannot read: named, no network retries', function () {
+  var e = env([resp(200, {received: 1})]);
+  var req = Object.assign({}, REQ, {fileName: 'Deals History 05092026.csv',
+    read: function () { var x = new Error('The requested file could not be read'); x.name = 'NotReadableError'; return Promise.reject(x); }});
+  return makeChunkSender(e)(req).then(function () { assert.fail(); }, function (err) {
+    assert.ok(err.fileRead && err.noRetry);
+    assert.strictEqual(e.calls.length, 0, 'nothing sent');
+    assert.ok(err.message.indexOf('Deals History 05092026.csv') >= 0);
+    assert.ok(err.message.indexOf('tidak bisa dibaca browser') >= 0);
+    assert.strictEqual(err.name, 'FileReadError (NotReadableError)');
+    var t = diagText(err, 0, true);
+    assert.ok(t.indexOf('file read error=NotReadableError') >= 0, t);
+    assert.ok(t.indexOf('error=FileReadError (NotReadableError)') >= 0, t);
+  });
+});
+
+test('one failed read is retried once; the bytes read are what gets sent', function () {
+  var n = 0, bodies = [];
+  var e = env([netErr(), resp(200, {received: 4})]);
+  var req = Object.assign({}, REQ, {fileName: 'a.csv',
+    read: function () { n++; return n === 1 ? Promise.reject(new Error('busy')) : Promise.resolve('BYTES'); },
+    makeBody: function (d) { bodies.push(d); return d; }});
+  return makeChunkSender(e)(req).then(function (r) {
+    assert.strictEqual(n, 2, 'read once more, not on every network retry');
+    assert.deepStrictEqual(bodies, ['BYTES', 'BYTES']);
+    assert.strictEqual(r.diag.attempts, 2);
+  });
+});
+
 (function run(i) {
   if (i >= tests.length) { console.log('node retry OK ' + tests.length); return; }
   Promise.resolve().then(tests[i][1]).then(function () { run(i + 1); }, function (err) {

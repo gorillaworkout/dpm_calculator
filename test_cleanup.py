@@ -24,6 +24,14 @@ c = app.test_client()
 c.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(
     b"tester:tester-password-1").decode()
 OLD = time.time() - 3 * 3600
+# A second account: a user's own older upload is superseded by their next begin
+# (PR #25), so "another upload is active" checks use a different user.
+_r = c.post("/admin/users", data={"username": "other", "password": "other-password-1",
+                                  "can_dpm": "1", "can_kvb": "1"})
+assert _r.status_code == 302, _r.status_code
+o = app.test_client()
+o.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(
+    b"other:other-password-1").decode()
 _GIB = 1024 ** 3
 
 
@@ -80,8 +88,10 @@ assert (JOBS / running / "input.csv").is_file(), "an active job was deleted"
 assert (JOBS / running / "deals.sqlite").is_file()
 assert web._read_state(done)["state"] == "cleared"
 active_stage = JOBS / "staging" / r.get_json()["id"]
-# a second init must not touch the upload that is still receiving chunks
-assert c.post("/upload/begin", data={"bytes": "10"}).status_code == 200
+# another user's init must not touch the upload that is still receiving chunks
+_ro = o.post("/upload/begin", data={"bytes": "10"})
+assert _ro.status_code == 200
+chunked.discard(JOBS, _ro.get_json()["id"])
 assert active_stage.is_dir(), "an active upload was deleted"
 # once the lock is released (job ended / worker died) it is cleanable
 cleanup.release_job_lock(lock)
@@ -115,7 +125,10 @@ assert r.status_code == 410 and "cleared to free space" in r.get_data(as_text=Tr
 Usage = namedtuple("Usage", "total used free")
 real = chunked.shutil.disk_usage
 for st in (JOBS / "staging").iterdir():   # nothing else active in this section
-    chunked.shutil.rmtree(st)
+    if st.is_dir():
+        chunked.shutil.rmtree(st)
+    else:
+        st.unlink()
 big = fake_job("done", size=100 * 1024 * 1024)
 
 
@@ -149,14 +162,14 @@ assert r.status_code == 202, r.status_code
 q = r.get_json()
 assert q["queued"] and q["position"] == 1
 assert "processing another user's file" in q["message"]
-r2 = c.post("/upload/begin", data={"bytes": str(3 * _GIB)})
+r2 = o.post("/upload/begin", data={"bytes": str(3 * _GIB)})
 assert r2.status_code == 202 and r2.get_json()["position"] == 2
 # poll keeps position
 assert c.post("/upload/begin", data={"bytes": str(2 * _GIB), "ticket": q["ticket"]}).get_json()["position"] == 1
 # not enough disk for both + other activity -> small upload also queues
 chunked.shutil.disk_usage = lambda p: Usage(100 * _GIB, 0, 1024)
 try:
-    small = c.post("/upload/begin", data={"bytes": "1000"})
+    small = o.post("/upload/begin", data={"bytes": "1000"})
     assert small.status_code == 202
     cleanup.queue_leave(JOBS, small.get_json()["ticket"])
 finally:
@@ -172,16 +185,17 @@ try:
     assert r.status_code == 200, r.get_data(as_text=True)
     assert not (JOBS / heavy).exists(), "finished job not cleaned before start"
     heavy_uid = r.get_json()["id"]
-    # the heavy upload itself is now the active heavy work: next heavy one waits
-    r = c.post("/upload/begin", data={"bytes": str(2 * _GIB)})
+    # the heavy upload itself is now the active heavy work: another user's heavy one waits
+    r = o.post("/upload/begin", data={"bytes": str(2 * _GIB)})
     assert r.status_code == 202
+    assert "Server sedang dipakai oleh tester" in r.get_json()["message"], r.get_json()
     cleanup.queue_leave(JOBS, r.get_json()["ticket"])
     # 5. stale heartbeat: an upload whose chunks stopped no longer blocks anyone
     st = JOBS / "staging" / heavy_uid
     m = json.loads((st / "manifest.json").read_text())
     m["last_chunk"] = time.time() - cleanup.UPLOAD_IDLE_SECONDS - 5
     (st / "manifest.json").write_text(json.dumps(m))
-    r = c.post("/upload/begin", data={"bytes": str(2 * _GIB)})
+    r = o.post("/upload/begin", data={"bytes": str(2 * _GIB)})
     assert r.status_code == 200, "stale upload heartbeat still blocked the queue"
     assert not st.exists(), "stale upload not cleaned"
     chunked.discard(JOBS, r.get_json()["id"])

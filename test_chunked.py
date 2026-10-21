@@ -124,6 +124,11 @@ r = send(retry_uid, "x.csv", 0, 0, b"aaa")
 assert r.status_code == 200, (r.status_code, r.get_json())
 assert chunked.staged_files(JOBS, retry_uid)[0][0].read_bytes() == b"aaa"
 
+# --- genuinely out-of-order chunks are refused, not silently corrupted ------
+r = send(retry_uid, "x.csv", 0, 5, b"bbb")
+assert r.status_code == 409, r.status_code
+assert chunked.staged_files(JOBS, retry_uid)[0][0].read_bytes() == b"aaa"
+
 # --- retry at the exact total ceiling preserves the completed upload --------
 old_max = chunked.MAX_TOTAL
 chunked.MAX_TOTAL = 6
@@ -137,10 +142,6 @@ try:
 finally:
     chunked.MAX_TOTAL = old_max
 
-# --- genuinely out-of-order chunks are refused, not silently corrupted ------
-r = send(retry_uid, "x.csv", 0, 5, b"bbb")
-assert r.status_code == 409, r.status_code
-assert chunked.staged_files(JOBS, retry_uid)[0][0].read_bytes() == b"aaa"
 
 # Declared bytes are a storage contract, not a hint. A client cannot reserve
 # one byte and then stream more data.
