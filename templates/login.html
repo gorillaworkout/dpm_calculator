@@ -137,7 +137,7 @@ button[disabled]{opacity:.6; cursor:progress}
 
     {% if error %}
     <div class="err" role="alert">
-      {{ error }}
+      {{ error }} <span style="font-size:11.5px; opacity:.75; white-space:nowrap">· {{ app_version_label }}</span>
       {% if switch_account %}
       <div style="margin-top:8px"><a href="{{ url_for('logout', next=next) if next else url_for('logout') }}">Sign in with a different account</a></div>
       {% endif %}
@@ -168,6 +168,7 @@ button[disabled]{opacity:.6; cursor:progress}
 
     <p class="foot">Forgotten your password? Ask your administrator to set a new one —
       passwords are stored hashed and cannot be read back.</p>
+    <p class="foot" id="app-version" style="margin-top:10px; font-size:11.5px; color:#7a86a3">{{ app_version_label }}</p>
   </div>
 </section>
 

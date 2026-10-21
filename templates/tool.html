@@ -295,12 +295,14 @@
       return seconds < 60 ? seconds + 's elapsed' : Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's elapsed';
     }
 
+    var APP_VERSION = {{ app_version_label|tojson }};
     function updateProgress(title, detail, percent, state) {
       percent = Math.max(0, Math.min(100, Math.round(percent || 0)));
       progress.hidden = false;
       progress.className = 'upload-progress' + (state ? ' ' + state : '');
       progressTitle.textContent = title;
-      progressDetail.textContent = detail;
+      // A failed upload is what gets screenshotted: say which version is running.
+      progressDetail.textContent = state === 'failed' ? detail + ' [' + APP_VERSION + ']' : detail;
       progressPercent.textContent = percent + '%';
       progressBar.style.width = percent + '%';
       progressTrack.setAttribute('aria-valuenow', String(percent));
@@ -536,10 +538,12 @@
     })();
   </script>{% endif %}
 
-  {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+  {% if error %}<div class="note bad">{{ error }} <span class="vertag">· {{ app_version_label }}</span></div>{% endif %}
   {% if log %}
-    <div class="note bad">{% if error %}{{ error }}{% else %}Failed — see the log below.{% endif %}</div>
-    <pre>{{ log }}</pre>
+    <div class="note bad">{% if error %}{{ error }}{% else %}Failed — see the log below.{% endif %} <span class="vertag">· {{ app_version_label }}</span></div>
+    <pre>{{ app_version_label }}{% if job_version and job_version != app_version_label %} (job ran on {{ job_version }}){% endif %}
+
+{{ log }}</pre>
   {% endif %}
 </div>
 

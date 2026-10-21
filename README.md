@@ -61,6 +61,17 @@ python3 -m pip install -r requirements.txt
 `poppler-utils` (`pdftotext -layout`) is only a fallback, used when pdfplumber
 is not installed.
 
+### Version (`VERSION`)
+
+The footer of every page, error/STOP messages, and `GET /version` (login
+required) show the running version, for example `DW Calculator v1.23 · 2026-10-19`.
+It comes from the `VERSION` file at the repo root, read once when the app starts.
+The server has no `.git`, so the version cannot come from git.
+
+**Bump `VERSION` in every PR:** `version=1.<PR number>`, `build=<YYYY-MM-DD>`.
+Do not put a commit SHA in it. Copy `VERSION` with the other files on every
+deploy and restart the app. A missing file shows `version unknown`.
+
 ---
 
 ## Lewat Terminal / Command Prompt
