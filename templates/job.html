@@ -28,7 +28,7 @@ Check your Downloads folder for <strong>{{ info.name }}</strong>.</p>
 <h1>Your file is ready</h1>
 <p class="lede">The download starts automatically. Keep this tab open until your browser
 shows the file in its download list.</p>
-{% if info.slug == 'segregate' %}
+{% if info.slug in ('segregate', 'segregated') %}
 <p class="lede">The uploaded file was deleted from the server when this result was ready.
 The file on your computer was not changed.</p>
 {% endif %}
@@ -69,6 +69,11 @@ The file on your computer was not changed.</p>
 {% if info.slug == 'pl-desk' %}
 <p class="lede">The FinanceOS settlement and the Metabase workbook are being reconciled.
 This page refreshes itself. A problem in either file stops the run and no workbook is produced.</p>
+{% elif info.slug == 'segregated' %}
+<p class="lede">The month's daily files are being read, added up per account, and converted
+to USD with the Client Equity FX file. A full month usually takes a few minutes. This page
+refreshes itself, and you can return to this same job URL later. When the run succeeds, the
+uploaded files are deleted from the server. The files on your computer are not changed.</p>
 {% elif info.slug == 'segregate' %}
 {% if company == 'kvb' %}
 <p class="lede">Your MT5 Deals History files are being classified. MT4 Raw Report is optional.

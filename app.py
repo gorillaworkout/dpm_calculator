@@ -72,7 +72,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.26 · 2026-10-23' (no date part when build is empty)."""
+    """'DW Calculator v1.27 · 2026-10-23' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -139,6 +139,12 @@ TOOLS = {
     "pl-desk": ("PL by Desk", "Monthly P&L by sales desk. Upload the FinanceOS "
                 "settlement PDF and the Metabase desk-rebate workbook.",
                 ("pl_desk.py",), True),
+    # DPM only. A month of daily segregated files + Client Equity FX -> one .xlsx.
+    "segregated": ("Segregated", "Monthly roll-up of the daily segregated files: upload "
+                   "the whole month plus the month's Client Equity FX file. One workbook "
+                   "with the monthly sum per account (Balance and Equity from the last day), "
+                   "every daily row, and USD columns.",
+                   ("dpm_segregated.py",), True),
 }
 
 # Separate registry: KVB never changes or extends the existing DPM pipeline.
@@ -368,6 +374,9 @@ HINT = {
     "pl-desk": "Upload the FinanceOS settlement (PDF, or the converted Excel) and the "
                "Metabase workbook. The workbook must contain the desk-rebate export, "
                "the Desks sheet and the Target sheet. File types are detected by content.",
+    "segregated": "Select every daily segregated file of the month (.csv/.xlsx/.xlsm, one per "
+                  "day) and the month's Client Equity FX file (columns date/currency/rate). "
+                  "The FX file is required.",
 }
 
 
@@ -502,6 +511,54 @@ DOC = {
         "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.",
                     "After a successful run the uploaded file is deleted from the server. "
                     "The file on your computer is not changed. Verifikasi records this.",
+                    CATATAN_ASLI],
+    },
+    "segregated": {
+        "judul": "Segregated — the month's daily files in one workbook",
+        "ringkas": "Upload all daily segregated files of one month at once, together with "
+                   "that month's Client Equity FX file. You get one <code>.xlsx</code>: the "
+                   "monthly total per account and every daily row underneath it.",
+        "siapkan": [
+            "The <strong>daily segregated files</strong> of the month, one per day, in "
+            "<code>.csv</code>, <code>.xlsx</code> or <code>.xlsm</code>. Select the whole "
+            "month (30 or 31 files) in one go.",
+            "Columns are found by their header name (not case-sensitive), so the column "
+            "order does not matter and new columns are picked up automatically. Required: an "
+            "account column (<code>Login</code> or <code>Account</code>). Expected: "
+            "<code>Currency</code>, <code>Balance</code>, <code>Equity</code> and the amount "
+            "columns.",
+            "The day of each file comes from its <code>Date</code> column; without one, from "
+            "the file name (for example <code>2026-09-01</code> or <code>20260901</code>).",
+            "<strong>Required:</strong> the month's <strong>Client Equity FX</strong> file "
+            "(<code>date</code>, <code>currency</code>, <code>rate</code>), the same file "
+            "Deal Segregator uses. The run stops without it.",
+            f"There is a <strong>{chunked.teks_batas()} total upload limit</strong> and a "
+            f"<strong>{chunked.MAX_FILES}-file maximum</strong> per run. Files are sent in "
+            "pieces automatically; leave the tab open until it says <em>Processing</em>.",
+        ],
+        "langkah": [
+            "Every numeric column is <strong>summed over the month</strong> per account, "
+            "except <code>Balance</code> and <code>Equity</code>: those take the "
+            "<strong>last day's</strong> value. Prices, rates and levels (for example "
+            "<code>Margin Level %</code>) are not summed and appear only in Daily.",
+            "USD: each day's amount is divided by that day's Client Equity FX rate for the "
+            "account's currency, then summed. Balance and Equity use the last day's value "
+            "at the last day's rate. A missing rate leaves the USD cell blank and yellow.",
+            "Accounts missing from the last day's file, and Balance or Equity blank or 0 "
+            "on the last day, are highlighted yellow and explained in the "
+            "<code>Check</code> column.",
+        ],
+        "hasil": "One <code>.xlsx</code> file with three sheets:",
+        "sheets": [("Monthly Summary", "One row per account: the monthly sums, Balance and "
+                    "Equity from the last day, the USD columns and a Check column."),
+                   ("Daily", "Every daily row stacked, with a Date column and the USD columns. "
+                    "Continues on Daily 2, ... past Excel's row limit."),
+                   ("Verifikasi", "Files read, how each column was treated, and every check: "
+                    "missing FX rates, duplicate dates, missing days, accounts missing on the "
+                    "last day, Balance/Equity blank or 0.")],
+        "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.",
+                    "After a successful run the uploaded files are deleted from the server. "
+                    "The files on your computer are not changed.",
                     CATATAN_ASLI],
     },
     "pl-desk": {
@@ -779,7 +836,7 @@ def run(slug, company="dpm"):
     if pemilik and pemilik != request.user["username"]:
         return _gagal("This upload belongs to another account. Please choose the files again.")
 
-    if slug == "segregate":
+    if slug in ("segregate", "segregated"):
         if not uploads and not staged:
             return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
         # One count for every upload field: "file" (MT5 + MT4 Deals and the FX
@@ -805,7 +862,12 @@ def run(slug, company="dpm"):
         if invalid:
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
                           f"{', '.join(invalid)}")
-        if company == "kvb":
+        if slug == "segregated" and len(names) < 2:
+            # The engine detects the FX file by its header and stops without it;
+            # one file can never be both, so say so before anything is moved.
+            return _gagal("Select the daily segregated files and the month's Client Equity "
+                          "FX file. The Client Equity FX file is required.")
+        if company == "kvb" and slug == "segregate":
             _akun_upload = request.files.get("mt4_accounts")
             if _akun_upload and _akun_upload.filename:
                 if not _akun_upload.filename.lower().endswith((".csv", ".xlsx", ".xlsm")):
@@ -966,6 +1028,8 @@ def run(slug, company="dpm"):
         dst = src.with_name(f"{src.stem}-hasil.xlsx")
     elif slug == "pl-desk":
         dst = job / "PL by Desk.xlsx"
+    elif slug == "segregated":
+        dst = job / "Segregated.xlsx"
     else:
         dst = job / "hasil.zip"
 
@@ -980,6 +1044,8 @@ def run(slug, company="dpm"):
         download_name = f"{Path(nama_asli[0]).stem} - {_label_periode(periode)}-hasil.xlsx"
     elif slug == "pl-desk":
         download_name = "PL by Desk.xlsx"
+    elif slug == "segregated":
+        download_name = "Segregated.xlsx"       # the month is added when the run ends
     else:
         stems = [Path(n).stem for n in nama_asli]
         label = " - ".join(stems) if len(stems) <= 3 else f"{len(stems)} files"
@@ -1006,7 +1072,7 @@ def run(slug, company="dpm"):
     lock_fh = g.pop("job_lock", None)          # the thread owns the lock now
     threading.Thread(target=_process_job,
                      args=(job_id, company, slug, job,
-                           sources if slug in ("segregate", "pl-desk") else src,
+                           sources if slug in ("segregate", "pl-desk", "segregated") else src,
                            dst, periode, saldo_jw, saldo_ch, mt4_accounts_path,
                            lock_fh),
                      daemon=True).start()
@@ -1134,7 +1200,7 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
             if company == "kvb" and KVB_ARG.get(script):
                 tambahan = KVB_ARG[script]
                 perintah.extend(tambahan if isinstance(tambahan, (list, tuple)) else [tambahan])
-            if script == "deal_segregator.py":
+            if script in ("deal_segregator.py", "dpm_segregated.py"):
                 # The workbook says so on Verifikasi. The CLI does not pass this,
                 # so a command-line run leaves the source files where they are.
                 perintah.append("--delete-input")
@@ -1166,6 +1232,10 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
             matched = re.search(r"(?m)^PERIOD:\s*(\d{4}-\d{2})\s*$", done["log"])
             if matched:
                 done["name"] = f"PL by Desk - {_label_periode(matched.group(1))}.xlsx"
+        if slug == "segregated":
+            matched = re.search(r"(?m)^PERIOD:\s*(\d{4}-\d{2})\s*$", done["log"])
+            if matched:
+                done["name"] = f"Segregated - {_label_periode(matched.group(1))}.xlsx"
         _write_state(job_id, **done)
     except Exception as exc:                       # keep the worker from dying silently
         traceback.print_exc(file=sys.stderr)
@@ -1355,6 +1425,14 @@ def _kirim_template_segregator(nama):
 @app.get("/tool/segregate/template/<nama>")
 def template_segregator_dpm(nama):
     if nama not in ("mt5", "fx"):
+        abort(404)
+    return _kirim_template_segregator(nama)
+
+
+@app.get("/tool/segregated/template/<nama>")
+def template_segregated_dpm(nama):
+    """DPM Segregated: the daily layout, and the same Client Equity FX template."""
+    if nama not in ("segregated", "fx"):
         abort(404)
     return _kirim_template_segregator(nama)
 

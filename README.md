@@ -1,6 +1,6 @@
 # Dupoin DPM Tools
 
-D&W Calculator plus Deal Segregator for the DPM Malaysia team.
+D&W Calculator plus Deal Segregator, PL by Desk and Segregated for the DPM Malaysia team.
 
 GitHub: https://github.com/gorillaworkout/dpm_calculator
 
@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.26 · 2026-10-23`.
+required) show the running version, for example `DW Calculator v1.27 · 2026-10-23`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -610,6 +610,59 @@ Rules for `.` and `,`:
 
 Anything else (`12abc`, `1.2.3`, `5%` in an amount field) is refused with the value
 and the running version in the message.
+
+## Segregated — monthly roll-up of the daily files (`dpm_segregated.py`, PR #27)
+
+DPM menu **Segregated** (`/tool/segregated`, not on KVB). Upload the whole month
+of daily segregated files (one per day, `.csv`/`.xlsx`/`.xlsm`, same layout every
+day) plus the month's **Client Equity FX** file (required). Always uploaded in
+chunks; 70 files / 12 GiB per run like Deal Segregator.
+
+```
+python3 dpm_segregated.py day01.csv ... day30.csv "Client Equity - FX.xlsx" -o Segregated.xlsx
+```
+
+Output: one `.xlsx` (download name `Segregated - Sep 2026.xlsx`):
+
+| Sheet | Content |
+|---|---|
+| `Monthly Summary` | one row per account (+ currency): text columns (latest value), Days, First/Last date, every numeric column summed, `Balance`/`Equity` from the **last day**, `X (USD)` columns, `Check` |
+| `Daily` | every daily row stacked with `Date` and the `X (USD)` columns (continues on `Daily 2`, ... past 1,048,575 rows) |
+| `Verifikasi` | files, column mapping, checks (yellow = needs a look) |
+
+Columns are matched by header (case / spaces / punctuation ignored):
+
+- account: `Login`, `Account`, `Account ID`, `Account No`, `Login ID`, ... (required);
+- currency: `Currency`, `CCY`, `Account Currency` (missing = all USD, flagged);
+- day: `Date`, `Report Date`, `Data Date`, `Time`, ... in the rows, else the file
+  name (`2026-09-01`, `20260901`, `01-09-2026`, `1 Sep 2026`; year-less `1 Sept`
+  takes the FX file's year); neither = STOP;
+- a header with `BALANCE` or `EQUITY`: last day's value (with `PREV`/`OPENING`/
+  `START`: first day's value), never summed;
+- price / rate / leverage / level / `%`: Daily only, not summed;
+- volume / lots / deals / trades / count: summed, not converted;
+- every other numeric column (any new one too): summed and converted;
+- an existing `X (USD)` column next to `X`: recalculated from `X`;
+- id and text columns (`Name`, `Group`, `Deal`, `...ID`): kept as text.
+
+A column is numeric when every non-empty cell parses with `angka.parse_number`
+(`-` counts as empty). A column with numbers and some non-numbers is not summed
+and is flagged.
+
+USD: `amount / rate` with the same lookup as Deal Segregator
+(`deal_segregator.pembagi_usd`: exact date + currency, blank USD rate = 1). Each
+daily row uses its own day's rate; Balance/Equity use the last day's value at the
+last day's rate. A missing rate leaves the USD cell blank and yellow; an account
+with any missing day has its monthly USD sums blank.
+
+Flagged on Verifikasi / the `Check` column: missing FX rates (date, currency,
+rows), the same date in two files (rows are added together), byte-identical files
+(the second one is skipped), days of the month with no file, more than one month,
+accounts missing on the last day, Balance/Equity blank or 0 on the last day,
+file-name date different from the Date column.
+
+Memory grows with the number of accounts, not rows: rows are aggregated as they
+are read and spooled to a temp file next to the output for the Daily sheet.
 
 ## Kalau ada gateway atau rate baru
 

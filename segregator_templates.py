@@ -36,7 +36,15 @@ NAMA_BERKAS = {
     "mt4": "MT4 Raw Report template.xlsx",
     "accounts": "MT4 account types template.xlsx",
     "fx": "Client Equity FX template.xlsx",
+    "segregated": "Segregated daily template.xlsx",
 }
+
+# DPM Segregated (dpm_segregated.py). Columns are read by header name, so this is
+# the minimum layout, not a fixed one: extra numeric columns are summed too.
+HEADER_SEGREGATED = [
+    "Date", "Login", "Name", "Currency", "Deposit", "Withdrawal", "Closed P/L",
+    "Commission", "Swap", "Volume", "Balance", "Equity",
+]
 
 CATATAN = (
     "Upload the original MT5 or MT4 export (CSV) directly, or fill this template. "
@@ -197,6 +205,32 @@ def buku_fx():
     return _tulis(FX_SHEET, HEADER_FX, contoh, panduan, ("date",))
 
 
+def buku_segregated():
+    contoh = [
+        ["2026-09-01", "100001", "Example Client", "USD", 100, 0, 12.5, -1.5, -0.2, 0.3,
+         1110.8, 1125],
+        ["2026-09-01", "100002", "Example Client 2", "JPY", 15000, -2000, 800, -150, 0, 1,
+         250000, 248500],
+    ]
+    panduan = _panduan(HEADER_SEGREGATED, ("Login",), {
+        "Date": "YYYY-MM-DD. Optional when the file name carries the date "
+                "(for example 2026-09-01.csv or 20260901.xlsx).",
+        "Login": "Text. The account. 'Account' or 'Account ID' also work.",
+        "Name": "Text columns are kept with the latest value.",
+        "Currency": "The account currency, matched to the Client Equity FX file. "
+                    "Without this column every amount is treated as USD.",
+        "Deposit": "Every numeric column is summed over the month and converted to USD "
+                   "at that day's rate.",
+        "Volume": "Volume, lots, deals and counts are summed but not converted to USD.",
+        "Balance": "Not summed: the month takes the last day's value, converted at the "
+                   "last day's rate. Blank or 0 on the last day is flagged.",
+        "Equity": "Same as Balance.",
+    })
+    panduan[1] = ["Format", "", "One file per day, every day in the same layout. Upload the "
+                  "whole month together with the month's Client Equity FX file (required)."]
+    return _tulis("Segregated", HEADER_SEGREGATED, contoh, panduan, ("Date", "Login"))
+
+
 def bangun(nama: str) -> Workbook:
     if nama == "mt5":
         return buku_mt5()
@@ -206,6 +240,8 @@ def bangun(nama: str) -> Workbook:
         return buku_akun()
     if nama == "fx":
         return buku_fx()
+    if nama == "segregated":
+        return buku_segregated()
     raise KeyError(nama)
 
 
