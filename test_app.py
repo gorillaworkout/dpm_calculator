@@ -273,6 +273,8 @@ assert b"function sendChunk" in halaman.data and b"attempt < 3" in halaman.data,
 r = c.post("/tool/dw", data={"file": (src.open("rb"), src.name),
                              "saldo_jw": "bukan angka!!", **BULAN})
 assert r.status_code == 400 and b"must be a number" in r.data, "saldo ngawur harus ditolak"
+assert b"bukan angka!!" in r.data and A.VERSI_LABEL.encode() in r.data, \
+    "the refused value and the version must be shown"
 
 job_id, state, info = kirim(src.name, src.open("rb"), saldo_jw="377.233,36", **BULAN)
 assert state == "done", (state, info.get("error"), (info.get("log") or "")[-500:])

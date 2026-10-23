@@ -43,6 +43,13 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
+# angka.py (pembaca angka bersama) ada di folder yang sama. isi_template memuat
+# file ini lewat importlib, jadi folder skrip belum tentu ada di sys.path.
+_FOLDER_SKRIP = str(Path(__file__).resolve().parent)
+if _FOLDER_SKRIP not in sys.path:
+    sys.path.insert(0, _FOLDER_SKRIP)
+from angka import DOT_DECIMAL, THOUSANDS, NumberError, parse_number, version_label  # noqa: E402
+
 # Console Windows default-nya cp1252/cp437 yang tidak punya karakter seperti '（'
 # (dipakai di nama gateway 'PA-PHP（Manual）'), jadi print() bisa crash.
 # Paksa UTF-8; kalau tetap tidak bisa, karakter aneh diganti '?' daripada error.
@@ -190,35 +197,17 @@ def set_periode(teks):
 SALDO_AWAL_JW = None
 
 
-def baca_angka_saldo(teks):
-    """'377233.36' / '377.233,36' / '377,233.36' -> 377233.36. None kalau kosong.
+def baca_angka_saldo(teks, label="--jwallet-opening"):
+    """'377233.36' / '377.233,36' / '377,233.36' / '3.5E+09' / 'Rp 3.500.000,50'
+    -> angka. None kalau kosong. Aturan lengkap ada di angka.py.
 
-    Pemisah ribuan vs desimal ditebak: kalau ada DUA jenis pemisah, yang PALING
-    KANAN itu desimal. Kalau cuma satu jenis, dianggap desimal hanya bila diikuti
-    1-2 digit ('377,23' -> 377.23); selain itu pemisah ribuan ('377.233' -> 377233).
+    Angka saldo DIKETIK orang, jadi satu pemisah yang diikuti tepat 3 digit dibaca
+    sebagai ribuan ('377.233' dan '377,233' -> 377233), sama seperti sebelumnya.
     """
-    if teks is None:
-        return None
-    t = str(teks).strip().replace(" ", "").replace("_", "")
-    if not t:
-        return None
-    neg = t.startswith("-")
-    t = t.lstrip("+-")
-    if not t or not all(c.isdigit() or c in ".," for c in t):
-        sys.exit(f"--jwallet-opening bukan angka yang bisa dibaca: {teks!r}")
-    if "." in t and "," in t:
-        des = "." if t.rfind(".") > t.rfind(",") else ","
-        t = t.replace("," if des == "." else ".", "").replace(des, ".")
-    elif "." in t or "," in t:
-        sep = "." if "." in t else ","
-        ekor = t.rsplit(sep, 1)[1]
-        t = t.replace(sep, ".") if (t.count(sep) == 1 and 1 <= len(ekor) <= 2) \
-            else t.replace(sep, "")
     try:
-        v = float(t)
-    except ValueError:
-        sys.exit(f"--jwallet-opening bukan angka yang bisa dibaca: {teks!r}")
-    return -v if neg else v
+        return parse_number(teks, ambiguous=THOUSANDS)
+    except NumberError:
+        sys.exit(f"{label} bukan angka yang bisa dibaca: {teks!r} ({version_label()})")
 
 
 # Saldo pembuka Payment Channel Balance per (currency, channel), ditempel orang di
@@ -381,7 +370,7 @@ def baca_tabel_saldo_channel(teks):
         if not channel:
             continue
         v = 0.0 if saldo.strip() in ("-", "--", "") else baca_angka_saldo(
-            saldo.replace("(", "-").replace(")", ""))
+            saldo, label=f"Saldo channel {channel} {cur}".strip())
         if v is None:
             continue
         cur_key = currency_shadow_key(cur) or norm(cur)
@@ -914,15 +903,22 @@ def satukan_nama_gateway(report, fee_table):
 
 
 def to_float(v):
+    """Angka dari sel/teks file -> float, None kalau kosong atau tidak terbaca.
+    Teks dibaca angka.parse_number (DOT_DECIMAL: '1.234' = 1.234, '1,234' = 1234,
+    '1.234,5' = 1234.5, '3.5E+09', '(1,234)' = -1234, 'Rp 1.000' = 1000)."""
     if v is None or v == "":
         return None
     if isinstance(v, (int, float)):
         return float(v)
-    s = str(v).strip().replace(",", "")
-    try:
-        return float(s)
-    except ValueError:
+    return parse_number(v, ambiguous=DOT_DECIMAL, default=None)
+
+
+def angka_sel(v):
+    """Sel saldo: angka Excel apa adanya, teks angka ('3.5E+09', '1.234.567,89')
+    ikut dibaca. Bool / teks bukan angka -> None (sel dilewati seperti dulu)."""
+    if isinstance(v, bool):
         return None
+    return to_float(v)
 
 
 def as_date(v):
@@ -1001,7 +997,7 @@ def baca_rate(v):
     if m:
         minimum = to_float(m.group(1))
         t = t[:m.start()] + t[m.end():]
-    m = re.search(r"([\d.]+)\s*%", t)
+    m = re.search(r"(\d[\d.,]*)\s*%", t)
     if m:
         pct = to_float(m.group(1))
         pct = pct / 100 if pct is not None else None
@@ -2024,17 +2020,18 @@ def baca_opening_balance(wb):
 
     out, tgl, jw, tgl_jw = {}, None, None, None
     for row in ws.iter_rows(min_row=baris_awal, values_only=True):
-        if c_bal >= len(row) or not isinstance(row[c_bal], (int, float)):
+        bal = angka_sel(row[c_bal]) if c_bal < len(row) else None
+        if bal is None:
             continue
         cur = norm(row[c_cur]) if c_cur < len(row) else ""
         ch = str(row[c_ch] or "").strip() if c_ch < len(row) else ""
         d = as_date(row[c_tgl]) if c_tgl is not None and c_tgl < len(row) else None
         if norm(ch) == OB_JWALLET_CHANNEL:
-            jw, tgl_jw = float(row[c_bal]), d
+            jw, tgl_jw = bal, d
             continue
         if not cur or not ch:
             continue
-        out[(cur, kunci_channel(cur, ch))] = float(row[c_bal])
+        out[(cur, kunci_channel(cur, ch))] = bal
         tgl = d or tgl
     return out, tgl, jw, tgl_jw
 
@@ -2080,8 +2077,9 @@ def saldo_awal_jwallet(wb, tgl_awal):
         d = as_date(row[0]) if row else None
         if not d or d >= tgl_awal or c_bal >= len(row):
             continue
-        if isinstance(row[c_bal], (int, float)):
-            hasil = (float(row[c_bal]), d)
+        bal = angka_sel(row[c_bal])
+        if bal is not None:
+            hasil = (bal, d)
     # Sheet 'J Wallet' ada tapi tidak memuat baris SEBELUM tanggal awal -- itu yang
     # terjadi kalau yang diupload adalah FILE HASIL kita sendiri (sheet 'J Wallet'
     # di situ mulai dari tanggal data, bukan sebelumnya). Jatuh ke 'Opening Balance'.
@@ -2139,8 +2137,9 @@ def saldo_awal_channel(wb, tgl_awal):
             continue
         tgl = d
         for k, j in kol.items():
-            if j < len(row) and isinstance(row[j], (int, float)):
-                out[k] = float(row[j])
+            bal = angka_sel(row[j]) if j < len(row) else None
+            if bal is not None:
+                out[k] = bal
     if not out:                      # layout tidak dikenali / tidak ada baris sebelumnya
         return _dari_ob()            # (mis. yang diupload file HASIL kita sendiri)
     _ASAL_SALDO["channel"] = nama
@@ -2434,8 +2433,8 @@ def _angka_persen_polos(raw):
         return None
     if isinstance(raw, (int, float)):
         return float(raw)
-    if isinstance(raw, str) and re.fullmatch(r"\d+(?:\.\d+)?", raw.strip()):
-        return float(raw.strip())
+    if isinstance(raw, str) and not re.search(r"[%+\-()a-zA-Z]", raw):
+        return parse_number(raw, default=None)
     return None
 
 

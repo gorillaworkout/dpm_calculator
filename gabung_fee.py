@@ -28,6 +28,15 @@ import re
 import sys
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from angka import DOT_DECIMAL, parse_number  # noqa: E402
+
+
+def _f(teks):
+    """Angka rate/fee lewat angka.parse_number (DOT_DECIMAL). None kalau rusak."""
+    return parse_number(teks, ambiguous=DOT_DECIMAL, default=None)
+
 try:
     import openpyxl
     from openpyxl.styles import Alignment, Font, PatternFill
@@ -73,23 +82,22 @@ def baca_rate(v):
 
     m = re.search(r"MIN\s*([\d.,]+)", t, re.I)
     if m:
-        minimum = float(m.group(1).replace(",", ""))
+        minimum = _f(m.group(1))
         t = t[:m.start()] + t[m.end():]
 
-    m = re.search(r"([\d.]+)\s*%", t)
+    m = re.search(r"(\d[\d.,]*)\s*%", t)
     if m:
-        pers = float(m.group(1)) / 100
+        pers = _f(m.group(1))
+        pers = pers / 100 if pers is not None else None
         t = t[:m.start()] + t[m.end():]
 
     m = re.search(r"\+\s*([\d.,]+)", t)
     if m:
-        tetap = float(m.group(1).replace(",", ""))
+        tetap = _f(m.group(1))
 
     if pers is None and tetap is None and minimum is None:
-        try:
-            return float(t.replace(",", "")), 0.0, None, None
-        except ValueError:
-            return None, 0.0, None, asli
+        f = _f(t)
+        return (None, 0.0, None, asli) if f is None else (f, 0.0, None, None)
     return (pers or 0.0), (tetap or 0.0), minimum, asli
 
 
