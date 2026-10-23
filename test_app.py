@@ -60,7 +60,7 @@ def kirim(nama_file, fh, **tambahan):
 
 landing = c.get("/")
 assert landing.status_code == 200
-assert set(TOOLS) == {"dw", "segregate", "pl-desk"}
+assert set(TOOLS) == {"dw", "segregate", "pl-desk", "segregated"}
 assert b"Dupoin DPM Tools" in landing.data
 assert b"Generate D&amp;W" in landing.data
 assert b"Deal Segregator" in landing.data

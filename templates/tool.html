@@ -55,6 +55,19 @@
       <input id="equity-file" type="file" name="file" accept=".xlsx,.xlsm">
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    {% elif slug == "segregated" %}
+    <label for="deals-file">Daily segregated files <span class="opt">— the whole month, one file per day, {{ max_files }} files maximum</span></label>
+    <div id="deals-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop the month's daily files here</strong><br><span>or click to choose them (.csv, .xlsx, .xlsm)</span>
+      <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
+    <label for="equity-file">Client Equity FX <span class="opt">— required, the same month</span></label>
+    <div id="equity-drop" class="dropzone" tabindex="0" role="button">
+      <strong>Drop Client Equity FX here</strong><br><span>or click to choose one file (columns date, currency, rate)</span>
+      <input id="equity-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" required>
+      <ul class="drop-files" aria-live="polite"></ul>
+    </div>
     {% else %}
     <label for="f">{{ 'KVB Plus workbook' if company == 'kvb' else 'D&W workbook' }} (.xlsx)</label>
     <input id="f" type="file" name="file" accept=".xlsx,.xlsm" required>
@@ -143,9 +156,9 @@
   // Small uploads take the plain path.
   (function () {
     var CHUNK = 10 * 1024 * 1024;        // smaller requests survive unstable VPN/WARP links
-    var DIRECT = {{ '0' if slug == 'segregate' else '80 * 1024 * 1024' }};
+    var DIRECT = {{ '0' if slug in ('segregate', 'segregated') else '80 * 1024 * 1024' }};
     var MAX_FILES = {{ max_files }};
-    // Deal Segregator always uses chunks, even for small files, so progress and
+    // Deal Segregator and Segregated always use chunks, even for small files, so progress and
     // retry/error details are accurate from the first byte.
     var form = document.getElementById('uploadform'),
         inputs = Array.prototype.slice.call(form.querySelectorAll('input[type="file"][name="file"]')),
@@ -802,6 +815,23 @@
     <li>Deal and Login must be full numbers, not 1.41E+08.</li>
     <li>MT4 and account-type files are optional for KVB.</li>
     <li>DPM is MT5 only.</li>
+  </ul>
+</div>
+{% endif %}
+
+{% if slug == "segregated" %}
+<div class="card" style="margin-top:16px">
+  <h2 style="margin:0 0 8px; font-size:18px">Templates &amp; format guide</h2>
+  <p class="hint" style="margin-top:0">Download a blank file when the export is not already in this layout. The Guide sheet in each file marks required and optional columns.</p>
+  <ul style="margin:0 0 12px; padding-left:18px; line-height:1.8">
+    <li><a href="/tool/segregated/template/segregated">Segregated daily template</a></li>
+    <li><a href="/tool/segregated/template/fx">Client Equity FX template</a></li>
+  </ul>
+  <ul style="margin:0; padding-left:18px; color:var(--mute); font-size:13.5px; line-height:1.7">
+    <li>Columns are matched by header name; extra numeric columns are summed too.</li>
+    <li>The day comes from a Date column, or from the file name (2026-09-01, 20260901).</li>
+    <li>Balance and Equity are never summed: the last day's value is used.</li>
+    <li>Don't open and re-save a CSV in Excel. Login must be a full number, not 1.41E+08.</li>
   </ul>
 </div>
 {% endif %}

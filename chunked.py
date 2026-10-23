@@ -315,7 +315,8 @@ def _jam(ts):
         return None
 
 
-_NAMA_TOOL = {"segregate": "Deal Segregator", "dw": "Generate D&W", "pl-desk": "PL by Desk"}
+_NAMA_TOOL = {"segregate": "Deal Segregator", "dw": "Generate D&W", "pl-desk": "PL by Desk",
+              "segregated": "Segregated"}
 
 
 def _apa(b):

@@ -244,7 +244,8 @@ def heavy_blockers(jobs_dir, keep_upload=None):
     out = []
     for job_id in active_jobs(jobs_dir):
         info = _read_json(Path(jobs_dir) / f"{job_id}.json") or {}
-        if info.get("slug", "segregate") == "segregate" and info.get("state") in ("running", None):
+        if (info.get("slug", "segregate") in ("segregate", "segregated")
+                and info.get("state") in ("running", None)):
             out.append(describe_activity(jobs_dir, "job", job_id))
     for u, b in active_uploads(jobs_dir, idle=UPLOAD_BLOCK_SECONDS):
         if u != keep_upload and b >= HEAVY_BYTES:

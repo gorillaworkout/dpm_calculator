@@ -774,6 +774,23 @@ def _baris_fx(path: Path):
         wb.close()
 
 
+_TANPA_KURS = object()
+
+
+def pembagi_usd(fx, tanggal, mata_uang):
+    """Divisor that turns an amount into USD (USD = amount / divisor).
+
+    fx is what baca_fx returns. None means the Client Equity FX file has no
+    usable rate for this date and currency (missing, or a blank non-USD rate),
+    so the USD cell must stay blank and be flagged. A blank USD rate is 1.
+    Shared by Deal Segregator and the DPM Segregated monthly roll-up.
+    """
+    rate = fx.get((tanggal, _norm(mata_uang)), _TANPA_KURS)
+    if rate is _TANPA_KURS or rate == 0:
+        return None
+    return 1.0 if rate is None else rate
+
+
 def _tanggal_fx(v, path: Path, nomor: int):
     """FX dates: real date cells, MT5 text, or ISO / dd-mm text from CSV files."""
     if isinstance(v, str):
@@ -1780,17 +1797,15 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
                     b[target] = b[source]
         elif pakai_fx:
-            marker = object()
             key = (b["Date"], _norm(b["Currency"]))
-            rate = fx.get(key, marker)
-            if rate is marker or rate == 0:
+            pembagi = pembagi_usd(fx, b["Date"], b["Currency"])
+            if pembagi is None:
                 b["_kurs_kurang"] = True
                 kurs_kurang[key] += 1
                 for name in KOLOM_USD:
                     b[name] = None
             else:
                 b["_kurs_kurang"] = False
-                pembagi = 1.0 if rate is None else rate
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
                     b[target] = b[source] / pembagi
         _tambah_agregat(harian[e], b, "hari", pakai_fx)
