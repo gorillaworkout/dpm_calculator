@@ -27,6 +27,7 @@ from markupsafe import escape
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+import angka
 import auth
 import chunked
 import cleanup
@@ -71,7 +72,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.25 · 2026-10-21' (no date part when build is empty)."""
+    """'DW Calculator v1.26 · 2026-10-23' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -301,7 +302,9 @@ KVB_ARG = {
         "--cny-rate-check",
     ),
 }
-SALDO_POLA = re.compile(r"^-?[\d.,\s]{1,24}$")
+# The typed balance is read by angka.parse_number in THOUSANDS mode, exactly as
+# hitung_dw.baca_angka_saldo reads it ('3.5E+09', 'Rp 3.500.000,50', '(1,234)').
+SALDO_MAKS_PANJANG = 40
 PERIODE_POLA = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 NAMA_BULAN = ["January", "February", "March", "April", "May", "June",
               "July", "August", "September", "October", "November", "December"]
@@ -845,9 +848,16 @@ def run(slug, company="dpm"):
             return _gagal(salah)
         saldo_jw = (request.form.get("saldo_jw") or "").strip()
         pilihan["saldo_default"] = saldo_jw
-        if saldo_jw and not SALDO_POLA.match(saldo_jw):
-            return _gagal("The opening balance must be a number, for example 377233.36 "
-                          "or 377,233.36. Leave it empty to start from zero.")
+        if saldo_jw:
+            try:
+                ok = (len(saldo_jw) <= SALDO_MAKS_PANJANG and angka.parse_number(
+                    saldo_jw, ambiguous=angka.THOUSANDS) is not None)
+            except angka.NumberError:
+                ok = False
+            if not ok:
+                return _gagal(f"The opening balance must be a number, for example 377233.36, "
+                              f"377,233.36, 377.233,36 or 3.5E+09. Got {saldo_jw[:60]!r} "
+                              f"({VERSI_LABEL}). Leave it empty to start from zero.")
         saldo_ch = (request.form.get("saldo_channel") or "").strip()
         pilihan["saldo_ch_default"] = saldo_ch
         if saldo_ch and not any(c.isdigit() for c in saldo_ch):
@@ -1118,7 +1128,9 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
                 perintah += [flag, periode]
             flag_saldo = SALDO_ARG.get(script)
             if saldo_jw and flag_saldo:
-                perintah += [flag_saldo, saldo_jw]
+                # '--flag=value' so a value starting with '-' ('-Rp 1.000')
+                # is never mistaken for another option.
+                perintah += [f"{flag_saldo}={saldo_jw}"]
             if company == "kvb" and KVB_ARG.get(script):
                 tambahan = KVB_ARG[script]
                 perintah.extend(tambahan if isinstance(tambahan, (list, tuple)) else [tambahan])

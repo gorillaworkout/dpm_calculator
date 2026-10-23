@@ -14,12 +14,22 @@ from pathlib import Path
 
 import openpyxl
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from angka import DOT_DECIMAL, parse_number, version_label  # noqa: E402
+
 FEE_SHEET, HEADER_ROW = "D&W FEE", 3
 
 
 def pct(v):
-    v = str(v).strip()
-    return float(v.rstrip("%")) / 100 if v.endswith("%") else float(v)
+    """'1.6%' / '1,6%' -> 0.016; '0.016' / '0' -> as is. Numbers via angka.parse_number."""
+    teks = str(v).strip()
+    persen = teks.endswith("%")
+    angka = parse_number(teks.rstrip("%").strip() if persen else teks,
+                         ambiguous=DOT_DECIMAL, default=None)
+    if angka is None:
+        sys.exit(f"Rate bukan angka yang bisa dibaca: {v!r} ({version_label()})")
+    return angka / 100 if persen else angka
 
 
 def main():

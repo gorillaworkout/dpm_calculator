@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.25 · 2026-10-21`.
+required) show the running version, for example `DW Calculator v1.26 · 2026-10-23`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -578,7 +578,38 @@ python3 hitung_dw.py export-juli.xlsx --fee-from DPM-D&W.xlsx --xero-from DPM-D&
 | `--fee-from FILE` | ambil tabel fee dari workbook lain |
 | `--xero-from FILE` | ambil kurs dari workbook lain |
 | `--period YYYY-MM` | **bulan laporan** — baris di luar bulan itu dibuang |
-| `--jwallet-opening ANGKA` | saldo penutup J Wallet bulan sebelumnya (titik mulai saldo) |
+| `--jwallet-opening ANGKA` | saldo penutup J Wallet bulan sebelumnya (titik mulai saldo); boleh `3.5E+09`, `Rp 3.500.000,50`, `(1,234)` — lihat *Number parsing* |
+
+## Number parsing (`angka.py`, PR #26)
+
+Every number a person types (upload form, CLI arguments) and every number cell
+stored as text in an uploaded file is read by one function,
+`angka.parse_number()`. Accepted:
+
+| Kind | Examples |
+|---|---|
+| plain / decimal | `1234`, `1234.5`, `1234,5`, `.5` |
+| scientific (Excel shortens long numbers) | `3.5E+09`, `3.5e9`, `3,5E+09` |
+| Indonesian thousands | `3.500.000.000`, `3.500.000,50` |
+| English thousands | `3,500,000,000`, `3,500,000.50` |
+| negative | `-1234`, `(1,234)`, `1234-` |
+| spaces / NBSP / currency | ` Rp 3.500.000 `, `IDR 3,5E+09`, `USD 12.50`, `12.50 USDT`, `$1,234` |
+
+Rules for `.` and `,`:
+
+1. Both appear: the **last** one is the decimal point (`1.234,5` and `1,234.5` = 1234.5).
+2. One kind repeated: thousands (`3.500.000` = 3500000). Groups must be 3 digits.
+3. One separator followed by 1–2 or 4+ digits, or after `0`, or in the mantissa of
+   `E` notation: decimal (`377,23`, `0,500`, `1.2345`, `3,5E+09`).
+4. One separator followed by **exactly 3 digits** (`1.234`) is ambiguous:
+   - balances typed on the upload page and `--jwallet-opening` / the pasted channel
+     table: **thousands** (`377.233` = 377233), as before;
+   - file cells and rates: `.` is the decimal point and `,` is thousands
+     (`1.234` = 1.234, `1,234` = 1234), as before;
+   - a value marked `Rp` / `IDR` always uses thousands (`Rp 1.000` = 1000).
+
+Anything else (`12abc`, `1.2.3`, `5%` in an amount field) is refused with the value
+and the running version in the message.
 
 ## Kalau ada gateway atau rate baru
 

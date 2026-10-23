@@ -67,7 +67,6 @@ import argparse
 import codecs
 import csv
 import datetime
-import math
 import re
 import shutil
 import sqlite3
@@ -84,6 +83,7 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from angka import DOT_DECIMAL, parse_number, version_label
 from upload_limits import MAX_FILES
 
 KOLOM_WAJIB = ["Deal", "Login", "Time", "Type", "Entry",
@@ -824,13 +824,14 @@ def baca_fx(path: Path):
 
 
 def _angka(v, path: Path, nomor: int, kolom: str):
+    """Angka sel MT5 lewat angka.parse_number (DOT_DECIMAL: '1.5' = 1.5,
+    '1,234.50' = 1234.5, '1.234,50' = 1234.5, '3.5E+09', '(12.30)' = -12.3).
+    Semua yang dulu dibaca float() hasilnya sama."""
     teks = _teks(v)
-    try:
-        angka = float(teks)
-    except ValueError:
-        angka = math.nan
-    if not teks or not math.isfinite(angka):
-        sys.exit(f"STOP: invalid {kolom} value in '{path.name}', row {nomor}: {teks!r}")
+    angka = parse_number(teks, ambiguous=DOT_DECIMAL, default=None) if teks else None
+    if angka is None:
+        sys.exit(f"STOP: invalid {kolom} value in '{path.name}', row {nomor}: {teks!r} "
+                 f"({version_label()})")
     return angka
 
 
@@ -1406,11 +1407,7 @@ def _angka_longgar(v) -> float:
     teks = _teks(v)
     if not teks:
         return 0.0
-    try:
-        angka = float(teks)
-    except ValueError:
-        return 0.0
-    return angka if math.isfinite(angka) else 0.0
+    return parse_number(teks, ambiguous=DOT_DECIMAL, default=0.0) or 0.0
 
 
 def _iter_mt4(path: Path, info: dict):

@@ -20,6 +20,10 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from angka import DOT_DECIMAL, NumberError, parse_number, version_label  # noqa: E402
+
 from openpyxl import Workbook, load_workbook
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
@@ -146,15 +150,15 @@ class PlDeskError(Exception):
 
 
 def money(value):
-    """Parse a FinanceOS amount. Brackets are negative. Result is a cent-rounded float."""
-    text = str(value).strip()
-    negative = text.startswith("(") and text.endswith(")")
-    if negative:
-        text = text[1:-1]
-    quant = Decimal(text.replace(",", "")).quantize(CENT, rounding=ROUND_HALF_UP)
-    if negative:
-        quant = -quant
-    return float(quant)
+    """Parse a FinanceOS amount. Brackets are negative. Result is a cent-rounded float.
+
+    Text goes through angka.parse_number (dot-decimal convention: '1,234.50',
+    '1.234,50', '(1,234.50)', '-1234.5', 'USD 1,234.50', '1.2E+06').
+    Raises angka.NumberError (a ValueError) for unreadable text."""
+    quant = parse_number(value, ambiguous=DOT_DECIMAL, as_decimal=True)
+    if quant is None:
+        raise NumberError(value, "empty")
+    return float(quant.quantize(CENT, rounding=ROUND_HALF_UP))
 
 
 def q2(value):
@@ -407,7 +411,8 @@ def _excel_amount(value, label):
     try:
         return money(value) if isinstance(value, str) else q2(value)
     except Exception as exc:
-        raise PlDeskError(f"Amount for {label!r} is not a number.") from exc
+        raise PlDeskError(f"Amount for {label!r} is not a number: {value!r} "
+                          f"({version_label()}).") from exc
 
 
 def parse_finance_excel(path, company="dpm"):
@@ -818,7 +823,8 @@ def _parse_metric(value, field, where):
         try:
             return money(value)
         except Exception as exc:
-            raise PlDeskError(f"{field} for {where} is not a number.") from exc
+            raise PlDeskError(f"{field} for {where} is not a number: {value!r} "
+                              f"({version_label()}).") from exc
     raise PlDeskError(f"{field} for {where} is not a number.")
 
 
