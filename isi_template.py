@@ -23,6 +23,14 @@ try:
 except ImportError:
     sys.exit("openpyxl belum terpasang:  python3 -m pip install --user openpyxl")
 
+# tanggal_util.py (penentuan tanggal per baris, dipakai bersama hitung_dw.py) ada di
+# folder yang sama. Folder skrip belum tentu ada di sys.path kalau file ini dimuat
+# lewat importlib (test, app), jadi ditambahkan dulu.
+_FOLDER_SKRIP = str(Path(__file__).resolve().parent)
+if _FOLDER_SKRIP not in sys.path:
+    sys.path.insert(0, _FOLDER_SKRIP)
+import tanggal_util as tgl  # noqa: E402
+
 KOLOM_TGL = ("PAID DATE", "COMPLETED DATE", "SETTLEMENT DATE", "APPLY DATE")
 
 # Fund Transfer Table: dua sisi bersebelahan dengan nama kolom yang SAMA
@@ -124,6 +132,62 @@ FTT_KOLOM_TGL = ("汇款日期", "DATE")
 # Baris yang tanggalnya di luar TAHUN_MIN..TAHUN_MAX: (sheet, baris, nilai, info)
 TANGGAL_TIDAK_SAH = []
 SHEET_TGL_TIDAK_SAH = "Verifikasi Tanggal"
+
+# Satu tanggal_util.Ringkasan per sheet (D, W) yang diproses -- diisi main().
+RINGKASAN = []
+
+
+def laporkan_ringkasan(ring, utama, saring, bulan_arg):
+    """Cetak ke log (= log job web) apa yang dilewati / diselamatkan di satu sheet.
+    Tidak ada baris yang boleh hilang tanpa jejak: semuanya juga masuk sheet
+    'Date Check' di file hasil."""
+    if ring.total == 0:
+        return
+    t = ring.sheet
+    if ring.luar_bulan:
+        rinci = ", ".join(f"{b}: {v:,}" for b, v in sorted(ring.luar_bulan.items()))
+        print(f"             dilewati karena di luar {bulan_arg}: "
+              f"{sum(ring.luar_bulan.values()):,} baris ({rinci})")
+    if ring.cadangan:
+        rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
+        print(f"             tanggal '{(utama or '').title()}' kosong/tidak sah -> tanggal diambil "
+              f"dari kolom cadangan: {rinci}")
+    if ring.konflik:
+        n_k = sum(ring.konflik.values())
+        print(f"             {n_k:,} baris: 'Completed Date' sah tapi bulannya BEDA dari "
+              f"Completed Time + Settlement Date -- "
+              + ("Completed Time dipakai" if tgl.UTAMAKAN_WAKTU else
+                 "'Completed Date' tetap dipakai (lihat sheet 'Date Check')"))
+    if ring.n_tanpa:
+        rinci = ", ".join(f"{tgl.NAMA_ALASAN.get(k, k)}: {v:,}"
+                          for k, v in sorted(ring.tanpa_tanggal.items()))
+        print(f"             TANPA tanggal yang bisa dipakai: {ring.n_tanpa:,} baris ({rinci})"
+              + (" -- dilewati" if saring else ""))
+    if ring.lewat_ambang():
+        pct = ring.n_tanpa / ring.total * 100
+        print(f"  !! PERINGATAN: sheet {t}: {ring.n_tanpa:,} dari {ring.total:,} baris "
+              f"({pct:.1f}%) TIDAK punya tanggal yang bisa dipakai (batas "
+              f"{tgl.AMBANG_TANPA_TANGGAL * 100:.0f}%). Baris itu tidak masuk bulan mana "
+              f"pun -- cek ekspornya.")
+    if ring.status_geser:
+        print(f"  !! PERINGATAN: sheet {t}: {ring.status_geser:,} baris punya kata status "
+              f"(success/finish/...) di kolom 'Pay Channel' -- kolom bergeser di ekspor "
+              f"sumber. Status tetap dibaca dari kolom 'Status'.")
+
+
+def tulis_sheet_ringkasan(wb_out):
+    """Sheet 'Date Check': hitungan baris per sheet, untuk hitung_dw (Missing Data)
+    dan untuk orang yang memeriksa file hasil."""
+    if tgl.SHEET_RINGKASAN in wb_out.sheetnames:
+        del wb_out[tgl.SHEET_RINGKASAN]
+    ws = wb_out.create_sheet(tgl.SHEET_RINGKASAN)
+    ws.append(["Date Check: rows read, used and skipped while filling the template"])
+    ws.append(["Sheet", "Category", "Detail", "Rows"])
+    for ring in RINGKASAN:
+        for baris in ring.baris_ringkasan():
+            ws.append(list(baris))
+    ws.column_dimensions["B"].width = 58
+    ws.column_dimensions["C"].width = 70
 
 
 def isi_fund_transfer(wb_src, wb_out, saring=None):
@@ -343,6 +407,7 @@ def main():
         print(f"  !! PERINGATAN: sheet 'Xero' di template cuma {n_kurs} tanggal. "
               f"Transaksi di luar rentang itu tidak akan dapat kurs.")
 
+    RINGKASAN.clear()
     total = 0
     tgl_awal = [None]        # tanggal paling awal di data -> basis saldo pembuka
     # Bulan apa saja yang benar-benar ada di file. Dipakai kalau saringan bulan
@@ -387,6 +452,13 @@ def main():
 
         c_cur = hdr_s.get("CURRENCY")
         c_tgl = next((hdr_s[k] for k in KOLOM_TGL if k in hdr_s), None)
+        utama = next((k for k in KOLOM_TGL if k in hdr_s), None)
+        # Kolom yang ikut menentukan tanggal: kolom utama + cadangannya (tanggal_util).
+        kol_tanggal = {k: hdr_s[k] for k in (utama, *tgl.RANTAI_CADANGAN.get(utama, ()))
+                       if k and k in hdr_s}
+        c_pay = hdr_s.get("PAY CHANNEL")
+        ring = tgl.Ringkasan(target)
+        RINGKASAN.append(ring)
         if c_cur is None:
             print(f"  sheet {target}: kolom 'Currency' tidak ketemu di {nama!r} "
                   f"(header terbaca: {', '.join(list(hdr_s)[:8])}) -- dilewati")
@@ -398,8 +470,15 @@ def main():
         for nomor_baris, row in enumerate(baris[1:], start=2):
             if c_cur is None or c_cur >= len(row) or row[c_cur] in (None, ""):
                 continue
-            mentah = row[c_tgl] if c_tgl is not None and c_tgl < len(row) else None
-            if tanggal_tidak_sah(mentah):
+            nilai = {k: (row[j] if j < len(row) else None) for k, j in kol_tanggal.items()}
+            hasil = (tgl.tentukan_tanggal(nilai, utama) if utama else
+                     tgl.HasilTanggal(None, None, "kosong", None, None))
+            mentah = nilai.get(utama)
+            d = hasil.tanggal
+            if c_pay is not None and c_pay < len(row) and \
+                    norm(row[c_pay]) in tgl.KATA_STATUS:
+                ring.status_geser += 1
+            if d is None and hasil.alasan_utama == "tidak_sah":
                 info = []
                 for k in ("REFERENCE", "TICKET", "PAYMENT GATEWAY", "TRANSACTION",
                           "APPLY DATE", "SETTLEMENT DATE"):
@@ -411,20 +490,24 @@ def main():
                         info.append(f"{k.title()}={x}")
                 TANGGAL_TIDAK_SAH.append((target, nomor_baris, mentah, ", ".join(info)))
             if saring:
-                d = tanggal(mentah)
-                if tanggal_tidak_sah(mentah):
+                if d is None and hasil.alasan_utama == "tidak_sah":
                     kunci = "(tanggal tidak sah)"
                 else:
                     kunci = f"{d:%Y-%m}" if d else "(tanpa tanggal)"
                 bulan_ada[kunci] = bulan_ada.get(kunci, 0) + 1
-                if not d or (d.year, d.month) != saring:
+                masuk = bool(d) and (d.year, d.month) == saring
+                ring.catat(hasil, utama, masuk)
+                if not masuk:
                     dilewati += 1
                     continue
+            else:
+                ring.catat(hasil, utama, None)
+                ring.dipakai += 1
             n += 1
             # Basis saldo pembuka = tanggal TRANSAKSI paling awal (Paid / Completed
-            # Date), bukan Settlement Date. Settlement bisa jatuh di bulan
-            # sebelumnya, dan itu akan menggeser saldo pembuka sehari terlalu jauh.
-            d = tanggal(row[c_tgl]) if c_tgl is not None and c_tgl < len(row) else None
+            # Date, atau cadangannya), bukan Settlement Date kalau Completed Date ada.
+            # Settlement bisa jatuh di bulan sebelumnya, dan itu akan menggeser
+            # saldo pembuka sehari terlalu jauh.
             if d and (tgl_awal[0] is None or d < tgl_awal[0]):
                 tgl_awal[0] = d
             for j, h in enumerate(hdr_d, start=1):
@@ -435,6 +518,7 @@ def main():
                     ws_d.cell(n + 1, j, row[i])
         print(f"  sheet {target}: {n:,} baris dari {nama!r}"
               + (f", {dilewati:,} di luar {args.bulan} dilewati" if dilewati else ""))
+        laporkan_ringkasan(ring, utama, saring, args.bulan)
         if tak_ada:
             print(f"             kolom template yang tidak ada di sumber (dibiarkan kosong): "
                   f"{', '.join(tak_ada)}")
@@ -498,6 +582,9 @@ def main():
     elif OB_SHEET in wb_out.sheetnames:
         print(f"  sheet {OB_SHEET!r}: sumber tidak punya sheet 'J Wallet' / "
               f"'Payment Channel Balance' -> saldo mulai dari nol")
+
+    if RINGKASAN:
+        tulis_sheet_ringkasan(wb_out)
 
     if TANGGAL_TIDAK_SAH:
         print(f"\n  !! PERINGATAN: {len(TANGGAL_TIDAK_SAH)} baris bertanggal di luar "

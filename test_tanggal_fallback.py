@@ -1,0 +1,337 @@
+"""Withdrawal rows whose 'Completed Date' is blank / text / 1970 are no longer dropped.
+
+Real incident (Sep 2026): ~101,000 Rebate Withdrawal rows in tab W had a blank, text
+('success') or 1970 Completed Date but a real datetime in 'Completed Time'. The month
+filter in isi_template.py and hitung_dw.py looked at ONE column, so they vanished and the
+Missing Data sheet said "None".
+
+python3 test_tanggal_fallback.py
+"""
+import datetime
+import importlib.util
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from openpyxl import Workbook, load_workbook
+
+HERE = Path(__file__).resolve().parent
+PY = sys.executable
+sys.path.insert(0, str(HERE))
+import tanggal_util as tu  # noqa: E402
+
+D = datetime.date
+DT = datetime.datetime
+SEP = 46266                     # 1 Sep 2026 (Excel serial)
+AUG = 46235                     # 1 Aug 2026
+
+
+def hasil(nilai, utama="COMPLETED DATE"):
+    return tu.tentukan_tanggal({k.upper(): v for k, v in nilai.items()}, utama)
+
+
+# ------------------------------------------------------------------ unit: the helper
+# blank Completed Date + datetime Completed Time  -> Completed Time
+h = hasil({"Completed Date": None, "Completed Time": SEP + 17.4, "Settlement Date": SEP + 16})
+assert h.tanggal == D(2026, 9, 18) and h.sumber == "COMPLETED TIME", h
+h = hasil({"Completed Date": None, "Completed Time": DT(2026, 9, 18, 9, 49, 55)})
+assert h.tanggal == D(2026, 9, 18) and h.sumber == "COMPLETED TIME", h
+# text 'success' in Completed Date (shifted export) -> Completed Time
+h = hasil({"Completed Date": "success", "Completed Time": SEP + 3.5, "Settlement Date": SEP + 2})
+assert h.tanggal == D(2026, 9, 4) and h.sumber == "COMPLETED TIME", h
+# a bare time-of-day in Completed Time is NOT a date
+h = hasil({"Completed Date": None, "Completed Time": 0.4097, "Settlement Date": SEP + 2})
+assert h.tanggal == D(2026, 9, 3) and h.sumber == "SETTLEMENT DATE", h
+h = hasil({"Completed Date": None, "Completed Time": datetime.time(9, 0), "Settlement Date": None})
+assert h.tanggal is None and h.alasan_utama == "kosong", h
+# Settlement-only
+h = hasil({"Completed Date": None, "Completed Time": None, "Settlement Date": DT(2026, 9, 9)})
+assert h.tanggal == D(2026, 9, 9) and h.sumber == "SETTLEMENT DATE", h
+# 1970: never rescued through Settlement (it means "not paid yet"), only via Completed Time
+h = hasil({"Completed Date": DT(1970, 1, 1), "Completed Time": None, "Settlement Date": SEP})
+assert h.tanggal is None and h.alasan_utama == "tidak_sah", h
+h = hasil({"Completed Date": 25569, "Completed Time": SEP + 5.5, "Settlement Date": SEP + 4})
+assert h.tanggal == D(2026, 9, 6) and h.sumber == "COMPLETED TIME", h
+# Apply Date is never a fallback
+h = hasil({"Completed Date": None, "Completed Time": None, "Settlement Date": None,
+           "Apply Date": SEP})
+assert h.tanggal is None, h
+# explicit valid Completed Date wins; disagreement is FLAGGED, not silently overridden
+backfill = {"Completed Date": SEP + 5, "Completed Time": DT(2025, 3, 3, 10, 0),
+            "Settlement Date": DT(2025, 3, 3)}
+assert tu.UTAMAKAN_WAKTU is False
+h = hasil(backfill)
+assert h.tanggal == D(2026, 9, 6) and h.sumber == "COMPLETED DATE" and h.konflik, h
+tu.UTAMAKAN_WAKTU = True                      # the switch Bayu can flip
+try:
+    h = hasil(backfill)
+    assert h.tanggal == D(2025, 3, 3) and h.konflik, h
+finally:
+    tu.UTAMAKAN_WAKTU = False
+# no conflict when Settlement agrees with Completed Date (Completed Time alone is not enough)
+h = hasil({"Completed Date": SEP + 5, "Completed Time": DT(2026, 8, 31, 23, 59),
+           "Settlement Date": SEP + 4})
+assert h.tanggal == D(2026, 9, 6) and not h.konflik, h
+# other primary columns (Paid Date, deposits) are untouched: no fallback chain
+h = tu.tentukan_tanggal({"PAID DATE": None, "SETTLEMENT DATE": SEP}, "PAID DATE")
+assert h.tanggal is None, h
+
+# ------------------------------------------------------------------ unit: summary / warning
+ring = tu.Ringkasan("W")
+for _ in range(98):
+    ring.catat(hasil({"Completed Date": SEP + 1}), "COMPLETED DATE", True)
+assert not ring.lewat_ambang()
+for _ in range(2):
+    ring.catat(hasil({"Completed Date": None}), "COMPLETED DATE", False)
+assert ring.total == 100 and ring.n_tanpa == 2 and ring.lewat_ambang()          # 2% > 1%
+baris = ring.baris_ringkasan()
+assert any(b[1] == "WARNING" for b in baris), baris
+ring2 = tu.Ringkasan("W")
+for _ in range(199):
+    ring2.catat(hasil({"Completed Date": SEP + 1}), "COMPLETED DATE", True)
+ring2.catat(hasil({"Completed Date": None}), "COMPLETED DATE", False)
+assert not ring2.lewat_ambang()                                                   # 0.5%
+
+# ------------------------------------------------------------------ end to end (plain path)
+W_HEAD = ["Source Name", "Sales UID", "Sales Name", "Sales Dept", "Sales Area", "User ID",
+          "Account", "Apply Date", "Apply Time", "Currency", "Payment Gateway", "Reference",
+          "USD", "Rate", "Charges", "Transaction", "Trading Charges", "Pay Channel",
+          "Completed Date", "Completed Time", "Settlement Date", "Status", "Remark"]
+D_HEAD = ["Source Name", "Sales UID", "User ID", "Account", "Paid Date", "Currency",
+          "Payment Gateway", "Reference", "USD", "Rate", "Transaction", "Settlement Date",
+          "Status"]
+ref = [1000]
+
+
+def w_row(src, uid, apply, cdate, ctime, settle, status="finish", pay="USDT-TRC20",
+          cur="USDT", amount=100.0):
+    ref[0] += 1
+    return [src, uid, "S", "S", "S", ref[0], "A", apply, 0.5, cur, "USDT-TRC20", ref[0],
+            amount, 1, 0, amount, 0, pay, cdate, ctime, settle, status, None]
+
+
+def buat_sumber(rows_w, rows_d=None):
+    wb = Workbook()
+    wb.remove(wb.active)
+    d = wb.create_sheet("D")
+    d.append(D_HEAD)
+    for r in rows_d or [["Deposit", 1, 1, "A", DT(2026, 9, 3), "USDT", "USDT-TRC20", 1, 50, 1, 50,
+                         DT(2026, 9, 3), "finish"]]:
+        d.append(r)
+    w = wb.create_sheet("W")
+    w.append(W_HEAD)
+    for r in rows_w:
+        w.append(r)
+    x = wb.create_sheet("Xero")
+    x.append(["Date", "USDT", "USD"])
+    for day in range(1, 31):
+        x.append([DT(2026, 9, day), 1, 1])
+    f = wb.create_sheet("D&W TD FEE")
+    f.append(["Dupoin Markets"])
+    f.append([" Handling Fee Rate"])
+    f.append(["Currency", "Payment Gateway", "Deposit", "Withdrawal"])
+    f.append(["USDT", "USDT-TRC20", 0.01, 0.02])
+    return wb
+
+
+def jalan(*args):
+    r = subprocess.run([PY, *map(str, args)], cwd=HERE, capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+    return r.stdout
+
+
+def pipeline(tmp, wb, bulan="2026-09", lewat_kvb=False):
+    wb.save(tmp / "src.xlsx")
+    sumber = tmp / "src.xlsx"
+    if lewat_kvb:
+        jalan("siapkan_kvb.py", sumber, "-o", tmp / "t.xlsx")
+        sumber = tmp / "t.xlsx"
+    jalan("buat_template.py", sumber, "-o", tmp / "tpl0.xlsx")
+    o1 = jalan("isi_template.py", sumber, "-t", tmp / "tpl0.xlsx", "--bulan", bulan,
+               "--tanpa-extra-fees", "-o", tmp / "tpl.xlsx")
+    o2 = jalan("hitung_dw.py", tmp / "tpl.xlsx", "--period", bulan, "-o", tmp / "hasil.xlsx",
+               "--tanpa-extra-fees")
+    return o1, o2
+
+
+def baca(path, sheet):
+    wb = load_workbook(path, read_only=True, data_only=True)
+    rows = [list(r) for r in wb[sheet].iter_rows(values_only=True)]
+    wb.close()
+    return rows
+
+
+def detail_wd(path):
+    rows = baca(path, "D&W Detail")
+    h = rows[0]
+    out = [dict(zip(h, r)) for r in rows[1:] if r[h.index("Type")] == "withdrawal"]
+    return out
+
+
+def teks_sheet(path, sheet):
+    return "\n".join(" | ".join(str(c) for c in r if c is not None)
+                     for r in baca(path, sheet))
+
+
+def isi_w():
+    return [
+        # 1 regular row (valid Completed Date in Sep)
+        w_row("Withdrawal", 100001, SEP + 1, DT(2026, 9, 2), DT(2026, 9, 2, 8, 0), SEP + 1),
+        # 2 blank Completed Date + datetime Completed Time (Sep) -> rescued
+        w_row("Rebate Withdrawal", 100007, SEP + 2, None, SEP + 4.4, SEP + 3, pay="success"),
+        # 3 text 'success' Completed Date (shifted export), Status filled -> rescued
+        w_row("Rebate Withdrawal", 100007, SEP + 3, "success", SEP + 5.6, SEP + 4,
+              status="success", pay="success"),
+        # 4 Settlement-only -> rescued
+        w_row("Rebate Withdrawal", 100058, SEP + 4, None, None, SEP + 6),
+        # 5 1970 Completed Date, no Completed Time -> stays excluded + reported
+        w_row("Withdrawal", 100001, SEP + 5, DT(1970, 1, 1), None, SEP + 7),
+        # 6 blank everything -> reported as 'no usable date'
+        w_row("Rebate Withdrawal", 100016, SEP + 6, None, None, None),
+        # 7 blank Completed Date, Completed Time in AUGUST -> counted as outside month (Aug)
+        w_row("Rebate Withdrawal", 100007, AUG + 3, None, AUG + 4.5, AUG + 4),
+        # 8 backfilled row: explicit Sep Completed Date but Completed Time in Mar 2025
+        w_row("Rebate Withdrawal", 100007, SEP + 7, DT(2026, 9, 8), DT(2025, 3, 3, 10, 0),
+              DT(2025, 3, 3)),
+        # 9 explicit Aug Completed Date -> outside month
+        w_row("Withdrawal", 100001, AUG + 1, DT(2026, 8, 2), DT(2026, 8, 2, 8, 0), AUG + 1),
+        # 10 shifted row whose Status is blank but a status word sits under Pay Channel
+        w_row("Rebate Withdrawal", 100007, SEP + 8, None, SEP + 9.3, SEP + 8,
+              status=None, pay="success"),
+    ]
+
+
+tmp = Path(tempfile.mkdtemp())
+o1, o2 = pipeline(tmp, buat_sumber(isi_w()))
+o1, o2 = pipeline(tmp, buat_sumber(isi_w()))
+assert "sheet W: 6 baris dari 'W', 4 di luar 2026-09 dilewati" in o1, o1
+assert "dilewati karena di luar 2026-09: 2 baris (2026-08: 2)" in o1, o1
+assert "Completed Time: 4, Settlement Date: 1" in o1, o1
+assert "TANPA tanggal yang bisa dipakai: 2 baris" in o1, o1
+assert "2 dari 10 baris (20.0%)" in o1 and "PERINGATAN" in o1, o1             # > 1% warning (log)
+assert "3 baris punya kata status" in o1, o1                                   # shifted columns
+assert "(1970" in o1 or "1970" in o1, o1
+
+# the rows reach the worksheet 'W' of the template and the report
+isi = baca(tmp / "tpl.xlsx", "W")
+assert len(isi) - 1 == 6, len(isi) - 1
+dtl = detail_wd(tmp / "hasil.xlsx")
+assert len(dtl) == 6, dtl
+por = sorted((r["Sales UID"], r["Date Source"]) for r in dtl)
+assert por == sorted([(100001, "Completed Date"), (100007, "Completed Time"),
+                      (100007, "Completed Time"), (100058, "Settlement Date"),
+                      (100007, "Completed Date"), (100007, "Completed Time")]), por
+assert {r["Date"].month for r in dtl} == {9}
+# backfilled row (row 8) keeps its explicit Sep Completed Date
+assert any(r["Date Source"] == "Completed Date" and r["Date"] == DT(2026, 9, 8) for r in dtl)
+# shifted row with blank Status takes the status word from Pay Channel -> counted, not refused
+assert sum(1 for r in dtl if str(r["Status"]).lower() in ("success", "finish")) == 6
+# totals: 6 withdrawals x 100 USD
+rpt = teks_sheet(tmp / "hasil.xlsx", "D&W Report")
+assert "600" in rpt, rpt
+
+# Missing Data + Date Check sheets say what was skipped, by month and reason
+md = teks_sheet(tmp / "hasil.xlsx", "Missing Data")
+assert "4 rows were already skipped" in md, md
+assert "skipped: outside report month: 2026-08" in md, md
+assert "skipped: no usable date: blank" in md and "outside 1990-2100" in md, md
+assert "date taken from fallback column: Completed Time" in md, md
+assert "Completed Date month 2026-09 / Completed Time month 2025-03 -> Completed Date kept" in md
+assert "WARNING: 20.0% of rows have no usable date (limit 1%)" in md, md
+assert "shifted columns: status word found under 'Pay Channel'" in md, md
+assert "None - every row in the file already fell inside this month" not in md
+dc = teks_sheet(tmp / "hasil.xlsx", "Date Check")
+assert "skipped: outside report month | 2026-08 | 2" in dc, dc
+ver = baca(tmp / "hasil.xlsx", "Verifikasi Tanggal")
+assert any(r[0] == "W" and r[1] == 6 for r in ver[2:]), ver                  # 1970 row listed
+
+# a clean month: no rows lost -> no warning, Missing Data stays quiet
+bersih = [w_row("Withdrawal", 100001, SEP + i, DT(2026, 9, i + 1), None, SEP + i)
+          for i in range(5)]
+tmp2 = Path(tempfile.mkdtemp())
+o1b, o2b = pipeline(tmp2, buat_sumber(bersih))
+assert "TANPA tanggal" not in o1b and "punya kata status" not in o1b and "BEDA" not in o1b, o1b
+assert "kolom cadangan" not in o1b, o1b
+md2 = teks_sheet(tmp2 / "hasil.xlsx", "Missing Data")
+assert "WARNING" not in md2 and "skipped" not in md2, md2
+assert len(detail_wd(tmp2 / "hasil.xlsx")) == 5
+
+# exactly 1% (1 of 100) is not a warning; 2 of 100 is
+tmp3 = Path(tempfile.mkdtemp())
+cien = [w_row("Withdrawal", 100001, SEP + 1, DT(2026, 9, 2), None, SEP + 1) for _ in range(99)]
+cien.append(w_row("Rebate Withdrawal", 100016, SEP + 1, None, None, None))
+o1c, _ = pipeline(tmp3, buat_sumber(cien))
+assert "TANPA tanggal yang bisa dipakai: 1 baris" in o1c and "20" not in o1c.split("TANPA")[1][:60]
+assert "(1.0%)" not in o1c, o1c
+
+# ------------------------------------------------------------------ KVB path
+# siapkan_kvb -> isi_template -> hitung_dw is the SAME code, so the same rows come back.
+# A raw FLOAT serial in 'Completed Time' (siapkan_kvb only converts headers with DATE).
+tmp4 = Path(tempfile.mkdtemp())
+src = Workbook()
+src.remove(src.active)
+t = src.create_sheet("Transfer")
+t.append(["汇出"] + [None] * 7 + ["收款"])
+t.append(["汇款日期", "汇出部门", "支付渠道", "汇出币种", "Xero Rate", "金额", "USD (Xero)", "手续费",
+          "收款日期", "收款部门", "收款人", "收入币种", "金额", "手续费", "USD (Xero)"])
+t.append([AUG + 3, "KVB", "ChipPay", "CNY", None, 1000, None, None,
+          AUG + 3, "KVB", "J Wallet", "USDT", 140, None, None])
+d = src.create_sheet("D")
+d.append(["Source.Name", "user_id", "account", "Paid Date", "Settlement Date", "method", "ticket",
+          "USD (CRM)", "rate", "transaction", "receive_company_account"])
+d.append(["08-2026 Deposit", 1, 1, DT(2026, 8, 3), DT(2026, 8, 3), "CNY", 1, 140, 0.14, 1000,
+          "ChipPay"])
+w = src.create_sheet("W")
+w.append(["Source.Name", "User ID", "Account", "Apply Date", "Payment Currency", "Payment Gateway",
+          "Reference", "USD (CRM)", "rate", "charges", "transaction", "Completed Date",
+          "Completed Time", "Settlement Date", "status"])
+w.append(["08-2026 Withdrawal", 1, 1, AUG + 5, "CNY", "ChipPay", 201, 140, 0.14, 0, 1000,
+          AUG + 5, None, AUG + 5, "finish"])                        # normal
+w.append(["08-2026 Withdrawal", 2, 2, AUG + 6, "CNY", "ChipPay", 202, 70, 0.14, 0, 500,
+          None, AUG + 7.55, AUG + 6, "finish"])                     # blank date, float Completed Time
+w.append(["08-2026 Withdrawal", 3, 3, AUG + 7, "CNY", "ChipPay", 203, 70, 0.14, 0, 500,
+          "success", DT(2026, 8, 9, 10, 30), AUG + 8, "finish"])    # text date, datetime time
+w.append(["08-2026 Withdrawal", 4, 4, AUG + 8, "CNY", "ChipPay", 204, 14, 0.14, 0, 100,
+          None, None, AUG + 9, "finish"])                           # Settlement only
+w.append(["08-2026 Withdrawal", 5, 5, AUG + 9, "CNY", "ChipPay", 205, 14, 0.14, 0, 100,
+          None, None, None, "finish"])                              # nothing usable
+w.append(["07-2026 Withdrawal", 6, 6, AUG - 5, "CNY", "ChipPay", 206, 14, 0.14, 0, 100,
+          None, AUG - 4.5, AUG - 4, "finish"])                      # July via Completed Time
+x = src.create_sheet("Xero")
+x.append(["Date", "CNY", "USDT", "USD"])
+for day in range(1, 32):
+    x.append([DT(2026, 8, day), 7.0, 1.0, 1.0])
+f = src.create_sheet("Handing Fee")
+f.append(["Payment Channel", "Currency", "Deposit", "Withdrawal"])
+f.append(["ChipPay", "CNY", 0.004, 0.007])
+src.save(tmp4 / "kvb.xlsx")
+
+jalan("siapkan_kvb.py", tmp4 / "kvb.xlsx", "-o", tmp4 / "t.xlsx")
+jalan("buat_template.py", tmp4 / "t.xlsx", "-o", tmp4 / "tpl0.xlsx")
+ok = jalan("isi_template.py", tmp4 / "t.xlsx", "-t", tmp4 / "tpl0.xlsx", "--bulan", "2026-08",
+           "--tanpa-extra-fees", "-o", tmp4 / "tpl.xlsx")
+assert "sheet W: 4 baris dari 'W', 2 di luar 2026-08 dilewati" in ok, ok
+assert "Completed Time: 3, Settlement Date: 1" in ok, ok
+assert "TANPA tanggal yang bisa dipakai: 1 baris" in ok, ok
+jalan("hitung_dw.py", tmp4 / "tpl.xlsx", "--period", "2026-08", "-o", tmp4 / "hasil.xlsx",
+      "--tanpa-extra-fees")
+kd = detail_wd(tmp4 / "hasil.xlsx")
+assert sorted(r["Reference"] for r in kd) == [201, 202, 203, 204], kd
+assert {r["Date Source"] for r in kd} == {"Completed Date", "Completed Time", "Settlement Date"}
+assert all(r["Date"].month == 8 for r in kd)
+kmd = teks_sheet(tmp4 / "hasil.xlsx", "Missing Data")
+assert "skipped: outside report month: 2026-07" in kmd, kmd
+assert "skipped: no usable date: blank" in kmd, kmd
+assert "WARNING: 16.7% of rows have no usable date" in kmd, kmd
+
+# D (Paid Date) is unchanged: a blank Paid Date does NOT borrow Settlement Date
+tmp5 = Path(tempfile.mkdtemp())
+dd = [["Deposit", 1, 1, "A", None, "USDT", "USDT-TRC20", 1, 50, 1, 50, DT(2026, 9, 3), "finish"],
+      ["Deposit", 2, 2, "A", DT(2026, 9, 4), "USDT", "USDT-TRC20", 2, 50, 1, 50, DT(2026, 9, 4),
+       "finish"]]
+o1e, _ = pipeline(tmp5, buat_sumber([w_row("Withdrawal", 100001, SEP, DT(2026, 9, 2), None, SEP)], dd))
+assert "sheet D: 1 baris dari 'D'" in o1e, o1e
+
+print("Completed-date fallback (Completed Time -> Settlement), 1970, backfill, Missing Data, "
+      "shifted status, >1% warning, KVB path: OK")
