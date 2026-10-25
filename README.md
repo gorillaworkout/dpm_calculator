@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.27 · 2026-10-23`.
+required) show the running version, for example `DW Calculator v1.28 · 2026-10-25`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -240,6 +240,35 @@ ada lagi rate yang diam-diam dianggap 0%.
 Dicari berurutan sesuai `DATE_COLUMNS`: `Paid Date` → `Completed Date` → `Settlement Date` → `Apply Date`.
 Sheet `D` punya `Paid Date` → dipakai. Sheet `W` tidak punya → turun ke **`Completed Date`**.
 Kolom yang benar-benar dipakai selalu dicetak di laporan tiap run.
+
+### Tanggal withdrawal kosong / teks / 1970 — fallback per baris (`tanggal_util.py`, v1.28)
+Sebelumnya `isi_template.py` dan `hitung_dw.py` hanya melihat **satu** kolom
+(`Completed Date`). Baris Rebate Withdrawal yang `Completed Date`-nya kosong, teks
+(`success`) atau 1970 — padahal jamnya ada di `Completed Time` — dibuang diam-diam
+(Sep 2026: ±101.000 baris), dan sheet *Missing Data* tetap menulis "None".
+
+Sekarang kedua script memakai **satu** fungsi (`tanggal_util.tentukan_tanggal`, juga untuk
+jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
+
+1. `Completed Date` kalau tanggal sah (1990–2100). **Menang atas kolom lain**, termasuk
+   baris backfill yang `Completed Time`-nya jauh lebih lama (dicatat sebagai "disagrees",
+   bukan ditimpa). Mau sebaliknya? ganti `UTAMAKAN_WAKTU = True` di `tanggal_util.py`.
+2. Kalau kosong / teks / tahun di luar 1990–2100: bagian **tanggal** dari `Completed Time`
+   (datetime atau serial Excel > 1000; jam saja tidak dihitung).
+3. Lalu `Settlement Date` — **kecuali** `Completed Date` memang 1970 (artinya "belum dibayar"):
+   itu hanya boleh diselamatkan lewat `Completed Time`.
+4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
+
+Sheet `D` (`Paid Date`) tidak berubah. Baris yang masih tanpa tanggal tidak masuk bulan
+mana pun, tetapi **dihitung dan dilaporkan**: sheet **Date Check** dan bagian *0b* di
+**Missing Data** memuat baris dibaca / dipakai, dilewati per bulan (di luar bulan laporan),
+dilewati karena tanggal kosong / tidak sah / 1970, jumlah yang tanggalnya diambil dari
+kolom cadangan, dan konflik `Completed Date` vs `Completed Time`. Kalau > 1% baris sebuah
+sheet tidak punya tanggal, muncul baris **WARNING** (workbook + log job web).
+Ekspor Rebate yang kolomnya bergeser (kata `success` di `Pay Channel`) ditandai di log
+dan Date Check; `Status` tetap dibaca dari kolom `Status` (kalau kosong dan ada kata status di
+`Pay Channel`, kata itu yang dipakai).
+Tes: `test_tanggal_fallback.py`.
 
 ### Nama gateway yang otomatis dikenali
 - suffix currency dibuang: `PA-PHP` → `PA`, `BeckPay-VND` → `BeckPay`, `MNTX-UZS` → `MNTX`

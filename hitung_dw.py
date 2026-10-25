@@ -49,6 +49,8 @@ _FOLDER_SKRIP = str(Path(__file__).resolve().parent)
 if _FOLDER_SKRIP not in sys.path:
     sys.path.insert(0, _FOLDER_SKRIP)
 from angka import DOT_DECIMAL, THOUSANDS, NumberError, parse_number, version_label  # noqa: E402
+# Penentuan tanggal per baris DIPAKAI BERSAMA dengan isi_template.py (lihat tanggal_util.py).
+import tanggal_util as tu  # noqa: E402
 
 # Console Windows default-nya cp1252/cp437 yang tidak punya karakter seperti '（'
 # (dipakai di nama gateway 'PA-PHP（Manual）'), jadi print() bisa crash.
@@ -1365,6 +1367,11 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
     c_charges = cols.get("CHARGES")
     c_status = cols.get("STATUS")
     c_settle = cols.get("SETTLEMENT DATE")
+    # Kolom yang ikut menentukan tanggal baris: kolom utama + cadangannya (tanggal_util).
+    kol_tanggal = {k: cols[k] for k in (date_col_name, *tu.RANTAI_CADANGAN.get(date_col_name, ()))
+                   if k in cols}
+    c_pay = cols.get("PAY CHANNEL")
+    ring = report["tanggal"].setdefault(ws.title, tu.Ringkasan(ws.title))
 
     # tulis (atau timpa) header 4 kolom baru
     out = {}
@@ -1401,10 +1408,27 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
 
         tx = to_float(ws.cell(row=row, column=c_tx).value)
         usd_existing = to_float(ws.cell(row=row, column=c_usd).value)
-        paid = as_date(ws.cell(row=row, column=c_date).value)
+        # Tanggal transaksi: kolom utama; kalau kosong / teks / 1970 -> Completed Time ->
+        # Settlement Date (hanya untuk 'Completed Date'). Aturan lengkap: tanggal_util.py.
+        hasil_tgl = tu.tentukan_tanggal(
+            {k: ws.cell(row=row, column=c).value for k, c in kol_tanggal.items()},
+            date_col_name)
+        paid = hasil_tgl.tanggal
         source = ws.cell(row=row, column=c_src).value if c_src else None
         kind = kind_of(ws.title, source)
         status = ws.cell(row=row, column=c_status).value if c_status else None
+        # Kolom bergeser (ekspor Rebate): kata status ('success') nongol di 'Pay Channel'.
+        # Kolom 'Status' tetap yang utama; dia baru diganti kalau KOSONG tapi kata status
+        # ada di tempat bergeser -- kalau tidak, baris selesai terbuang sebagai "kosong".
+        status_dari_geser = False
+        if c_status and c_pay:
+            kata = norm(ws.cell(row=row, column=c_pay).value)
+            if kata in tu.KATA_STATUS:
+                ring.status_geser += 1
+                if not norm(status):
+                    status = kata.lower()
+                    status_dari_geser = True
+                    report["status_geser_dipakai"] += 1
         settle = as_date(ws.cell(row=row, column=c_settle).value) if c_settle else None
 
         # Capture sebelum saringan periode: Settlement 30 Jun + Completed 1 Jul
@@ -1431,6 +1455,7 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         # cocok 570/570 jadi 564/570, MT4出金 dari 570/570 jadi 562/570.
         # Sebabnya ekspor MEREKA juga disaring pakai tanggal transaksi, jadi
         # baris itu memang tidak ada di data mereka. Jangan diulang.
+        ring.catat(hasil_tgl, date_col_name, dalam_periode(paid))
         if PERIODE_FILTER is not None and not dalam_periode(paid):
             kosongkan_kolom_hitung(ws, row, out)
             label = f"{paid:%Y-%m}" if paid else "(no date)"
@@ -1581,7 +1606,14 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
             rec["Xero USD"] = xusd
             rec["Forex Gain/Loss"] = forex
             rec["Source Sheet"] = ws.title
-            rec["Date Source"] = date_col_name.title()
+            if hasil_tgl.sumber and hasil_tgl.sumber != date_col_name:
+                # tanggal dari kolom cadangan: 'Date' = tanggal yang DIPAKAI laporan
+                # (kolom 'Completed Date' aslinya dibiarkan kosong apa adanya).
+                rec["Date"] = paid
+            if status_dari_geser:
+                rec["Status"] = status
+            rec["Date Source"] = (hasil_tgl.sumber or date_col_name).title()
+            rec["_date_col"] = date_col_name.title()
             rec["Type"] = kind
             rec["Data Status"] = "; ".join(catatan) if catatan else "OK"
             rec["_fee_missing"] = rate is None
@@ -3477,6 +3509,100 @@ def write_detail_sheet(wb, report):
     return r - 1
 
 
+def baca_date_check(wb):
+    """Isi sheet 'Date Check' yang ditulis isi_template.py: [(sheet, kategori, rincian,
+    jumlah)] untuk SELURUH file sumber (sebelum saringan bulan), atau None."""
+    nama = next((n for n in wb.sheetnames if norm(n) == norm(tu.SHEET_RINGKASAN)), None)
+    if nama is None:
+        return None
+    hasil = []
+    for r in wb[nama].iter_rows(min_row=3, values_only=True):
+        if r and r[0] not in (None, "") and r[1] not in (None, ""):
+            hasil.append((str(r[0]), str(r[1]), "" if r[2] is None else str(r[2]), r[3]))
+    return hasil or None
+
+
+def lapor_tanggal(report):
+    """Log (= log job web): baris yang tanggalnya diambil dari kolom cadangan, yang
+    tidak punya tanggal sama sekali, dan peringatan > 1%."""
+    for nama, ring in report["tanggal"].items():
+        if ring.cadangan:
+            rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
+            print(f"Tanggal: sheet '{nama}' -- tanggal kolom utama kosong/tidak sah, "
+                  f"diambil dari kolom cadangan: {rinci}")
+        if ring.konflik:
+            print(f"Tanggal: sheet '{nama}' -- {sum(ring.konflik.values()):,} baris "
+                  f"'Completed Date'-nya sah tapi bulannya beda dari Completed Time + "
+                  f"Settlement Date ("
+                  + ("Completed Time dipakai" if tu.UTAMAKAN_WAKTU else
+                     "'Completed Date' tetap dipakai") + ")")
+        if ring.n_tanpa:
+            rinci = ", ".join(f"{tu.NAMA_ALASAN.get(k, k)}: {v:,}"
+                              for k, v in sorted(ring.tanpa_tanggal.items()))
+            print(f"Tanggal: sheet '{nama}' -- {ring.n_tanpa:,} baris TANPA tanggal yang "
+                  f"bisa dipakai ({rinci})")
+        if ring.lewat_ambang():
+            print(f"!! PERINGATAN: sheet '{nama}': {ring.n_tanpa:,} dari {ring.total:,} baris "
+                  f"({ring.n_tanpa / ring.total * 100:.1f}%) tidak punya tanggal yang bisa "
+                  f"dipakai (batas {tu.AMBANG_TANPA_TANGGAL * 100:.0f}%) -- cek ekspornya")
+        if ring.status_geser:
+            print(f"!! PERINGATAN: sheet '{nama}': {ring.status_geser:,} baris punya kata "
+                  f"status di kolom 'Pay Channel' (kolom bergeser di ekspor sumber). "
+                  f"Status dibaca dari kolom 'Status'"
+                  + (f"; {report['status_geser_dipakai']:,} baris yang 'Status'-nya kosong "
+                     f"memakai kata status dari 'Pay Channel'"
+                     if report["status_geser_dipakai"] else ""))
+
+
+def tulis_date_check_missing(ws, r, report, box, wrap):
+    """Bagian Missing Data: baris yang dilewati / diselamatkan karena tanggal."""
+    isi_t = report.get("date_check_isi")
+    if isi_t:
+        baris = list(isi_t)
+        sumber = ("Counted over the WHOLE uploaded file while the template was filled "
+                  "(before the month filter).")
+    else:
+        # hitung_dw dijalankan langsung (tanpa isi_template): bagian ini HANYA muncul kalau
+        # ada yang perlu dilaporkan (tanggal dari kolom cadangan, tanpa tanggal, konflik,
+        # kolom bergeser). Baris di luar bulan sudah ada di bagian 0.
+        baris = [x for ring in report["tanggal"].values() for x in ring.baris_ringkasan()
+                 if x[1] not in ("rows read", "rows used")
+                 and not x[1].startswith("skipped: outside report month")]
+        sumber = "Counted while calculating."
+        if not baris:
+            return r
+    r += 2
+    ws.cell(r, 2, "0b. DATE CHECK - ROWS SKIPPED OR RESCUED BECAUSE OF THE DATE").font = \
+        Font(bold=True, size=12, color="4472C4")
+    r += 1
+    ws.cell(r, 2, sumber + " Withdrawal rows with a blank / text / 1970 Completed Date "
+                  "take their date from Completed Time, then Settlement Date. Apply Date "
+                  "is never used.").font = Font(italic=True, size=9, color="808080")
+    ws.row_dimensions[r].height = 30
+    ws.cell(r, 2).alignment = wrap
+    r += 1
+    if not baris:
+        ws.cell(r, 2, "None.").font = Font(italic=True, color="008000")
+        return r
+    _header(ws, r, ["Sheet", "Rows", "", "", "", "What"], "4472C4")
+    for sh, kat, rinci, jml in baris:
+        r += 1
+        peringatan = kat in ("WARNING", "shifted columns") or kat.startswith(
+            "skipped: no usable date")
+        isi = [sh, jml, "", "", "", kat + (": " + rinci if rinci else "")]
+        for c, v in enumerate(isi, start=2):
+            cell = ws.cell(r, c, v)
+            cell.border = box
+            cell.alignment = wrap
+            if c == 3 and isinstance(v, (int, float)):
+                cell.number_format = "#,##0"
+            if peringatan and c in (2, 7):
+                cell.fill = FILL_MISSING if kat == "WARNING" else FILL_WARN
+        if len(isi[-1]) > 50:
+            ws.row_dimensions[r].height = 15 * (len(isi[-1]) // 46 + 1)
+    return r
+
+
 def write_missing_sheet(wb, report):
     """Sheet 'Missing Data': rincian tanggal kurs & rate fee yang belum ada."""
     from openpyxl.styles import Alignment, Border, Side
@@ -3539,8 +3665,16 @@ def write_missing_sheet(wb, report):
         r += 1
         buang = report.get("luar_periode") or {}
         if not buang:
-            ws.cell(r, 2, "None - every row in the file already fell inside this "
-                          "month.").font = Font(italic=True, color="008000")
+            sudah = sum(j or 0 for _s, k, _r, j in (report.get("date_check_isi") or [])
+                        if k.startswith("skipped"))
+            if sudah:
+                ws.cell(r, 2, f"None dropped at this stage - but {sudah:,} rows were already "
+                              f"skipped while the template was filled. See 0b below for "
+                              f"the month and reason of each.").font = \
+                    Font(bold=True, color="C00000")
+            else:
+                ws.cell(r, 2, "None - every row in the file already fell inside this "
+                              "month.").font = Font(italic=True, color="008000")
             r += 1
         else:
             _header(ws, r, ["Sheet", "Month of the row", "Rows dropped", "USD dropped",
@@ -3564,6 +3698,8 @@ def write_missing_sheet(wb, report):
                           f"their calculated columns in D / W are left blank and shaded "
                           f"grey.").font = Font(bold=True)
             ws.row_dimensions[r].height = 30
+
+    r = tulis_date_check_missing(ws, r, report, box, wrap)
 
     # ---- 1. tanggal kurs yang tidak ada di XERO
     r += 2
@@ -4434,10 +4570,12 @@ def main():
               "ditolak": Counter(), "input_kurang": [],
               "dibuang": Counter(), "dibuang_usd": defaultdict(float),
               "luar_periode": Counter(), "luar_periode_usd": defaultdict(float),
-              "refuse_mtoatd": [],
+              "refuse_mtoatd": [], "tanggal": {}, "status_geser_dipakai": 0,
+              "date_check_isi": None,
               "usd_shadow_gap": [], "usd_shadow_ft": [],
               "rate_tinggi": [], "cny_check": None}
 
+    report["date_check_isi"] = baca_date_check(wb)
     total_rows = 0
     date_cols_used = {}
     for name in targets:
@@ -4449,6 +4587,7 @@ def main():
         if date_col:
             date_cols_used[real] = date_col.title()
 
+    lapor_tanggal(report)
     satukan_nama_gateway(report, fee_table)
     for (c_, g_), varian in sorted(report.get("gateway_digabung", {}).items()):
         print(f"Gabung : gateway {c_} {' / '.join(repr(x) for x in varian)} -> {g_!r} "
@@ -4513,7 +4652,7 @@ def main():
         # label kolom tanggal per jenis (deposit biasanya 'Paid Date')
         lbl = defaultdict(Counter)
         for rec in report["records"]:
-            lbl[rec["Type"]][rec["Date Source"]] += 1
+            lbl[rec["Type"]][rec.get("_date_col") or rec["Date Source"]] += 1
         report["date_col_label"] = {
             k: v.most_common(1)[0][0] for k, v in lbl.items()}
 
