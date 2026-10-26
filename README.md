@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.28 · 2026-10-25`.
+required) show the running version, for example `DW Calculator v1.29 · 2026-10-26`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -241,7 +241,7 @@ Dicari berurutan sesuai `DATE_COLUMNS`: `Paid Date` → `Completed Date` → `Se
 Sheet `D` punya `Paid Date` → dipakai. Sheet `W` tidak punya → turun ke **`Completed Date`**.
 Kolom yang benar-benar dipakai selalu dicetak di laporan tiap run.
 
-### Tanggal withdrawal kosong / teks / 1970 — fallback per baris (`tanggal_util.py`, v1.28)
+### Tanggal withdrawal kosong / teks / 1970 — fallback per baris (`tanggal_util.py`, v1.28; Rebate v1.29)
 Sebelumnya `isi_template.py` dan `hitung_dw.py` hanya melihat **satu** kolom
 (`Completed Date`). Baris Rebate Withdrawal yang `Completed Date`-nya kosong, teks
 (`success`) atau 1970 — padahal jamnya ada di `Completed Time` — dibuang diam-diam
@@ -258,6 +258,28 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
 3. Lalu `Settlement Date` — **kecuali** `Completed Date` memang 1970 (artinya "belum dibayar"):
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
+
+#### Rebate Withdrawal — `Completed Date` diabaikan (v1.29)
+Untuk baris yang `Source Name`-nya **`Rebate Withdrawal`** (huruf besar/kecil dan spasi tepi
+diabaikan), `Completed Date` **bukan** tanggal selesai yang asli: hanya 3.593 baris yang
+mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu–1 Sep 2026 pada baris yang diajukan
+2024–2026 (median 308 hari sesudah `Apply Date`, bahkan sebelum `Apply Date` di 190 baris).
+`Completed Time` bisa dipercaya (dalam 1 hari dari `Apply Date` di 104.159 dari 104.815 baris).
+Maka untuk Rebate urutannya jadi:
+
+1. **`Completed Time`** (datetime / serial Excel > 1000).
+2. **`Settlement Date`**.
+3. `Completed Date` **tidak dipakai**; `Apply Date` tetap **tidak pernah** dipakai.
+
+`Withdrawal` biasa dan sumber lain **tidak berubah** (aturan v1.28 di atas, termasuk
+`UTAMAKAN_WAKTU`). `Source Name` kosong / bukan persis `Rebate Withdrawal` (mis. `Rebate`,
+`Rebate Withdrawals`) → aturan v1.28. Satu fungsi yang sama dipakai `isi_template.py`,
+`hitung_dw.py` (saringan ulang) dan MTOATD, jadi ketiganya selalu sepakat. Baris yang
+Completed Time-nya jatuh lewat tengah malam (apply 30 Sep, selesai 00:00:20 1 Okt) masuk
+**Oktober** — memang begitu. Sheet **Date Check** menambah baris
+`Rebate Withdrawal: Completed Date ignored, date taken from` (per kolom) dan
+`Completed Date ignored for Rebate` (jumlah baris yang `Completed Date`-nya beda > 3 hari dari
+`Completed Time`; hanya informasi).
 
 Sheet `D` (`Paid Date`) tidak berubah. Baris yang masih tanpa tanggal tidak masuk bulan
 mana pun, tetapi **dihitung dan dilaporkan**: sheet **Date Check** dan bagian *0b* di

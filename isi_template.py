@@ -152,6 +152,12 @@ def laporkan_ringkasan(ring, utama, saring, bulan_arg):
         rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
         print(f"             tanggal '{(utama or '').title()}' kosong/tidak sah -> tanggal diambil "
               f"dari kolom cadangan: {rinci}")
+    if ring.rebate_sumber:
+        rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
+        print(f"             Rebate Withdrawal: 'Completed Date' DIABAIKAN, tanggal dari {rinci}"
+              + (f" ({ring.rebate_selisih:,} baris 'Completed Date'-nya beda > "
+                 f"{tgl.AMBANG_SELISIH_REBATE_HARI} hari dari Completed Time)"
+                 if ring.rebate_selisih else ""))
     if ring.konflik:
         n_k = sum(ring.konflik.values())
         print(f"             {n_k:,} baris: 'Completed Date' sah tapi bulannya BEDA dari "
@@ -454,8 +460,7 @@ def main():
         c_tgl = next((hdr_s[k] for k in KOLOM_TGL if k in hdr_s), None)
         utama = next((k for k in KOLOM_TGL if k in hdr_s), None)
         # Kolom yang ikut menentukan tanggal: kolom utama + cadangannya (tanggal_util).
-        kol_tanggal = {k: hdr_s[k] for k in (utama, *tgl.RANTAI_CADANGAN.get(utama, ()))
-                       if k and k in hdr_s}
+        kol_tanggal = {k: hdr_s[k] for k in tgl.kolom_penentu(utama) if k in hdr_s}
         c_pay = hdr_s.get("PAY CHANNEL")
         ring = tgl.Ringkasan(target)
         RINGKASAN.append(ring)
