@@ -22,10 +22,21 @@ URUTAN (hanya kalau kolom tanggal utamanya 'Completed Date'):
   tanggal itu -- memakainya menarik baris bulan lalu masuk bulan laporan.
 Kolom utama lain (mis. 'Paid Date' untuk D) TIDAK berubah: tanpa cadangan.
 
-'Completed Date' yang SAH selalu menang. Baris Rebate yang 'Completed Date'-nya
+'Completed Date' yang SAH selalu menang (kecuali Rebate, lihat bawah). Baris yang 'Completed Date'-nya
 sah tapi bulannya beda dari 'Completed Time' + 'Settlement Date' (yang sama-sama
 sepakat) dihitung dan dilaporkan sebagai KONFLIK; kalau tim memutuskan waktu yang
 harus menang, balik saja UTAMAKAN_WAKTU.
+
+REBATE WITHDRAWAL (v1.29, 26 Okt 2026)
+--------------------------------------
+Untuk baris yang 'Source Name'-nya "Rebate Withdrawal" atau BERAKHIR dengan itu (mis.
+"08-2026 Rebate Withdrawal" dari KVB; huruf besar/kecil dan spasi diabaikan), 'Completed Date' BUKAN tanggal selesai yang asli: hanya 3.593 baris yang
+mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu-1 Sep 2026 pada baris yang diajukan
+2024-2026 (median 308 hari SESUDAH Apply Date, bahkan SEBELUM Apply Date di 190 baris).
+'Completed Time' bisa dipercaya (dalam 1 hari dari Apply Date di 104.159 dari 104.815
+baris). Maka untuk Rebate: 'Completed Date' DIABAIKAN -> 'Completed Time' -> 'Settlement
+Date'; 'Apply Date' tetap tidak pernah. Withdrawal biasa dan sumber lain memakai aturan
+di atas (v1.28). 'Source Name' kosong / tidak dikenal -> aturan v1.28.
 """
 import datetime
 import re
@@ -39,12 +50,40 @@ SERIAL_WAKTU_MIN = 1000     # di bawah ini = jam saja (0.68) atau angka biasa, b
 KOLOM_WAKTU = "COMPLETED TIME"
 KOLOM_COMPLETED = "COMPLETED DATE"
 KOLOM_SETTLE = "SETTLEMENT DATE"
+KOLOM_SOURCE = "SOURCE NAME"
+SUMBER_REBATE = "REBATE WITHDRAWAL"
+# Rebate: 'Completed Date' yang beda > ini (hari) dari 'Completed Time' dihitung sebagai
+# informasi di Date Check ("Completed Date ignored for Rebate").
+AMBANG_SELISIH_REBATE_HARI = 3
 # kolom utama -> kolom cadangan, urut. Kolom utama lain: tanpa cadangan.
 RANTAI_CADANGAN = {KOLOM_COMPLETED: (KOLOM_WAKTU, KOLOM_SETTLE)}
 
 # False = 'Completed Date' yang sah menang atas Completed Time / Settlement Date.
 # True  = kalau keduanya sepakat dan bulannya beda, pakai itu (BELUM dipilih).
 UTAMAKAN_WAKTU = False
+
+def kolom_penentu(utama):
+    """Kolom sheet yang harus dibaca penelepon untuk menentukan tanggal satu baris:
+    kolom utama + cadangannya (+ 'Source Name' untuk aturan Rebate)."""
+    if not utama:
+        return ()
+    kol = (utama, *RANTAI_CADANGAN.get(utama, ()))
+    return kol + (KOLOM_SOURCE,) if utama == KOLOM_COMPLETED else kol
+
+
+_RE_REBATE = re.compile(r"(?:^|[^A-Z0-9])" + re.escape(SUMBER_REBATE) + r"$")
+
+
+def adalah_rebate(sumber):
+    """True kalau 'Source Name' (trim, spasi dirapikan, tanpa beda huruf besar/kecil)
+    BERAKHIR dengan 'rebate withdrawal' sebagai kata utuh -- jadi 'Rebate Withdrawal' dan
+    'prefix bulan' ala KVB ('08-2026 Rebate Withdrawal') sama-sama cocok.
+    TIDAK cocok: 'Withdrawal', '08-2026 Withdrawal', 'Wallet withdrawal' (diubah
+    siapkan_kvb.py jadi 'Rebate Withdrawal' sebelum sampai sini), 'Rebate Withdrawals',
+    'Rebate Withdrawal (Manual)', 'Unrebate Withdrawal', 'Rebate', kosong / bukan teks."""
+    return (isinstance(sumber, str)
+            and _RE_REBATE.search(" ".join(sumber.split()).upper()) is not None)
+
 
 AMBANG_TANPA_TANGGAL = 0.01     # peringatan kalau > 1% baris sheet tanpa tanggal sah
 
@@ -169,13 +208,17 @@ def waktu_ke_tanggal(v):
 
 HasilTanggal = namedtuple(
     "HasilTanggal",
-    "tanggal sumber alasan_utama konflik konflik_sumber")
+    "tanggal sumber alasan_utama konflik konflik_sumber aturan selisih_abaikan",
+    defaults=(None, False))
 # tanggal         : date sah, atau None (= tidak ada tanggal yang bisa dipakai)
 # sumber          : nama kolom (HURUF BESAR) asal tanggal, atau None
 # alasan_utama    : 'sah' | 'kosong' | 'tidak_sah' | 'bukan_tanggal' -- keadaan kolom UTAMA
 # konflik         : date dari Completed Time / Settlement kalau berbeda BULAN dari
 #                   'Completed Date' yang sah (lihat UTAMAKAN_WAKTU), selain itu None
 # konflik_sumber  : kolom asal 'konflik'
+# aturan          : 'rebate' kalau baris Rebate Withdrawal (Completed Date diabaikan), else None
+# selisih_abaikan : True kalau (Rebate) 'Completed Date' yang sah beda > 3 hari dari
+#                   'Completed Time' -- hanya untuk hitungan informasi
 
 
 def tentukan_tanggal(nilai, utama):
@@ -187,6 +230,20 @@ def tentukan_tanggal(nilai, utama):
     mentah = nilai.get(utama)
     kelas = kelas_nilai(mentah)
     cadangan = RANTAI_CADANGAN.get(utama, ())
+
+    if utama == KOLOM_COMPLETED and adalah_rebate(nilai.get(KOLOM_SOURCE)):
+        # Rebate Withdrawal: 'Completed Date' diabaikan (lihat docstring modul).
+        d_waktu = waktu_ke_tanggal(nilai.get(KOLOM_WAKTU))
+        d_settle = ke_tanggal(nilai.get(KOLOM_SETTLE))
+        d_cd = ke_tanggal(mentah) if kelas == "sah" else None
+        selisih = bool(d_cd is not None and d_waktu is not None
+                       and abs((d_cd - d_waktu).days) > AMBANG_SELISIH_REBATE_HARI)
+        if d_waktu is not None:
+            return HasilTanggal(d_waktu, KOLOM_WAKTU, "sah", None, None, "rebate", selisih)
+        alasan = "kosong" if kosong(nilai.get(KOLOM_WAKTU)) else "bukan_tanggal"
+        if d_settle is not None:
+            return HasilTanggal(d_settle, KOLOM_SETTLE, alasan, None, None, "rebate", selisih)
+        return HasilTanggal(None, None, alasan, None, None, "rebate", selisih)
     d_utama = ke_tanggal(mentah) if kelas == "sah" else None
 
     # Pembanding (hanya relevan untuk 'Completed Date'): tanggal dari Completed Time
@@ -237,14 +294,20 @@ class Ringkasan:
         self.konflik = Counter()         # (bulan Completed Date, bulan Completed Time) -> baris
         self.konflik_dipakai = 0
         self.status_geser = 0            # baris dengan kata status di 'Pay Channel'
+        self.rebate_sumber = Counter()   # kolom asal tanggal baris Rebate Withdrawal
+        self.rebate_selisih = 0          # Rebate: Completed Date beda > 3 hari dari Completed Time
 
     def catat(self, hasil, utama, masuk):
         """masuk: True/False = baris dipakai / dilewati (atau None kalau tak ada saringan)."""
         self.total += 1
+        if hasil.selisih_abaikan:
+            self.rebate_selisih += 1
         if hasil.tanggal is None:
             self.tanpa_tanggal[hasil.alasan_utama] += 1
         else:
-            if hasil.sumber != utama:
+            if hasil.aturan == "rebate":
+                self.rebate_sumber[hasil.sumber] += 1
+            elif hasil.sumber != utama:
                 self.cadangan[hasil.sumber] += 1
             if hasil.konflik is not None:
                 self.konflik[(hasil.tanggal.strftime("%Y-%m") if hasil.sumber == utama
@@ -274,6 +337,14 @@ class Ringkasan:
             out.append((s, "skipped: no usable date", NAMA_ALASAN.get(alasan, alasan), n))
         for kol, n in sorted(self.cadangan.items()):
             out.append((s, "date taken from fallback column", kol.title(), n))
+        for kol, n in sorted(self.rebate_sumber.items()):
+            out.append((s, "Rebate Withdrawal: Completed Date ignored, date taken from",
+                        kol.title(), n))
+        if self.rebate_selisih:
+            out.append((s, "Completed Date ignored for Rebate",
+                        f"Completed Date differs from Completed Time by more than "
+                        f"{AMBANG_SELISIH_REBATE_HARI} days (informational)",
+                        self.rebate_selisih))
         for (b_utama, b_waktu), n in sorted(self.konflik.items()):
             out.append((s, "Completed Date disagrees with Completed Time + Settlement Date",
                         f"Completed Date month {b_utama} / Completed Time month {b_waktu}"

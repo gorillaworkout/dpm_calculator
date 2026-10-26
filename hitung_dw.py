@@ -1368,8 +1368,7 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
     c_status = cols.get("STATUS")
     c_settle = cols.get("SETTLEMENT DATE")
     # Kolom yang ikut menentukan tanggal baris: kolom utama + cadangannya (tanggal_util).
-    kol_tanggal = {k: cols[k] for k in (date_col_name, *tu.RANTAI_CADANGAN.get(date_col_name, ()))
-                   if k in cols}
+    kol_tanggal = {k: cols[k] for k in tu.kolom_penentu(date_col_name) if k in cols}
     c_pay = cols.get("PAY CHANNEL")
     ring = report["tanggal"].setdefault(ws.title, tu.Ringkasan(ws.title))
 
@@ -1614,6 +1613,7 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
                 rec["Status"] = status
             rec["Date Source"] = (hasil_tgl.sumber or date_col_name).title()
             rec["_date_col"] = date_col_name.title()
+            rec["_tgl"] = paid       # tanggal yang DIPAKAI (Rebate: bukan 'Completed Date' mentah)
             rec["Type"] = kind
             rec["Data Status"] = "; ".join(catatan) if catatan else "OK"
             rec["_fee_missing"] = rate is None
@@ -3126,7 +3126,10 @@ def write_mtoatd_sheet(wb, report):
         usd = to_float(rec.get("USD")) or 0.0
         tx = to_float(rec.get("Transaction")) or 0.0
         if rec["Type"] == "withdrawal":
-            selesai = as_date(rec.get("Completed Date")) or as_date(rec.get("Date"))
+            # rec["_tgl"] = tanggal hasil tanggal_util (Rebate Withdrawal: Completed Time,
+            # BUKAN kolom 'Completed Date' mentah) -- harus sama dengan saringan bulan.
+            selesai = (rec.get("_tgl") or as_date(rec.get("Completed Date"))
+                       or as_date(rec.get("Date")))
             if selesai is None and settle is None:
                 tanpa_tanggal += 1
                 continue
@@ -3530,6 +3533,13 @@ def lapor_tanggal(report):
             rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
             print(f"Tanggal: sheet '{nama}' -- tanggal kolom utama kosong/tidak sah, "
                   f"diambil dari kolom cadangan: {rinci}")
+        if ring.rebate_sumber:
+            rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
+            print(f"Tanggal: sheet '{nama}' -- Rebate Withdrawal: 'Completed Date' diabaikan, "
+                  f"tanggal dari {rinci}"
+                  + (f" ({ring.rebate_selisih:,} baris 'Completed Date'-nya beda > "
+                     f"{tu.AMBANG_SELISIH_REBATE_HARI} hari dari Completed Time)"
+                     if ring.rebate_selisih else ""))
         if ring.konflik:
             print(f"Tanggal: sheet '{nama}' -- {sum(ring.konflik.values()):,} baris "
                   f"'Completed Date'-nya sah tapi bulannya beda dari Completed Time + "
