@@ -161,6 +161,19 @@ assert ("W", "Completed Date ignored for Rebate",
         "Completed Date differs from Completed Time by more than 3 days (informational)", 2) in baris, baris
 assert not any(b[1] == "WARNING" for b in baris), baris
 
+# prefixed / sloppy names: the name must END with the whole words 'rebate withdrawal'
+for src in ("08-2026 Rebate Withdrawal", "8-2026 rebate withdrawal", "07-2026  REBATE   WITHDRAWAL  ",
+            "2026-08 Rebate Withdrawal", "KVB - Rebate Withdrawal", "KVB-Rebate Withdrawal"):
+    assert tu.adalah_rebate(src), src
+    h = reb(src, **{"Completed Date": DT(2026, 8, 10), "Completed Time": SEP + 3.5})
+    assert h.tanggal == D(2026, 9, 4) and h.aturan == "rebate", (src, h)
+# negatives: plain / prefixed Withdrawal, other rebate-ish names, non-text
+for src in ("Withdrawal", "08-2026 Withdrawal", "08-2026 Wallet withdrawal", "Rebate Withdrawals",
+            "08-2026 Rebate Withdrawals", "Rebate Withdrawal (Manual)", "Rebate Withdrawal 2",
+            "Unrebate Withdrawal", "NonRebate Withdrawal", "Rebate", "Rebate Deposit", "withdrawal rebate",
+            "", "   ", None, 5, 5.5):
+    assert not tu.adalah_rebate(src), src
+
 # ------------------------------------------------------------------ unit: summary / warning
 ring = tu.Ringkasan("W")
 for _ in range(98):
@@ -389,9 +402,9 @@ w.append(["08-2026 Withdrawal", 5, 5, AUG + 9, "CNY", "ChipPay", 205, 14, 0.14, 
           None, None, None, "finish"])                              # nothing usable
 w.append(["07-2026 Withdrawal", 6, 6, AUG - 5, "CNY", "ChipPay", 206, 14, 0.14, 0, 100,
           None, AUG - 4.5, AUG - 4, "finish"])                      # July via Completed Time
-w.append(["Rebate Withdrawal", 7, 7, AUG + 3, "CNY", "ChipPay", 207, 14, 0.14, 0, 100,
+w.append(["08-2026 Wallet withdrawal", 7, 7, AUG + 3, "CNY", "ChipPay", 207, 14, 0.14, 0, 100,
           AUG + 4, AUG - 3.5, AUG + 3, "finish"])                   # fake Aug Completed Date, real July
-w.append(["Rebate Withdrawal", 8, 8, AUG + 9, "CNY", "ChipPay", 208, 14, 0.14, 0, 100,
+w.append(["08-2026 Rebate Withdrawal", 8, 8, AUG + 9, "CNY", "ChipPay", 208, 14, 0.14, 0, 100,
           None, AUG + 10.3, AUG + 9, "finish"])                     # Rebate, blank date -> Completed Time
 x = src.create_sheet("Xero")
 x.append(["Date", "CNY", "USDT", "USD"])
@@ -413,6 +426,13 @@ assert "Rebate Withdrawal: 'Completed Date' DIABAIKAN, tanggal dari Completed Ti
 assert "TANPA tanggal yang bisa dipakai: 1 baris" in ok, ok
 jalan("hitung_dw.py", tmp4 / "tpl.xlsx", "--period", "2026-08", "-o", tmp4 / "hasil.xlsx",
       "--tanpa-extra-fees")
+# siapkan_kvb output: month prefix dropped, 'Wallet withdrawal' / 'Rebate Withdrawal' -> Rebate Withdrawal
+tw = baca(tmp4 / "t.xlsx", "W")
+snc = [r[tw[0].index("Source Name")] for r in tw[1:]]
+assert snc.count("Rebate Withdrawal") == 2 and "08-2026 Rebate Withdrawal" not in snc, snc
+assert snc.count("Withdrawal") == 6, snc                          # '08-2026 Withdrawal' stays plain
+tw = baca(tmp4 / "tpl.xlsx", "W")                                 # template: only the 5 rows in August
+assert sorted(r[tw[0].index("Source Name")] for r in tw[1:]) == ["Rebate Withdrawal"] + ["Withdrawal"] * 4
 kd = detail_wd(tmp4 / "hasil.xlsx")
 assert sorted(r["Reference"] for r in kd) == [201, 202, 203, 204, 208], kd
 assert {r["Date Source"] for r in kd} == {"Completed Date", "Completed Time", "Settlement Date"}
@@ -477,6 +497,20 @@ blok = [r[1].day for r in mt if r[0] == "日期：" and isinstance(r[1], datetim
 assert blok == [3, 4, 5, 6, 8], blok
 # 'Completed Date' of D is the fake one (2 Sep) but D is NOT counted -> W has no 100007 row on 3 Sep
 assert not any(r["Reference"] == regel[3][11] for r in fd)
+
+# the shared helper itself accepts a month-prefixed name (no siapkan_kvb in front)
+pref = [
+    w_row("09-2026 Rebate Withdrawal", 100007, SEP + 1, DT(2026, 8, 10), SEP + 3.5, SEP + 3),   # -> Sep
+    w_row("09-2026 Rebate Withdrawal", 100007, SEP + 1, SEP, DT(2025, 6, 3, 10, 0), None),      # -> 2025
+    w_row("09-2026 Withdrawal", 100001, SEP + 1, DT(2026, 8, 30), SEP + 1.4, SEP + 1),          # plain: Aug
+    w_row("Rebate Withdrawals", 100007, SEP + 1, DT(2026, 8, 12), SEP + 7.2, SEP + 7),          # no match: Aug
+    w_row("Withdrawal", 100001, SEP + 1, DT(2026, 9, 2), SEP + 1.4, SEP + 1),                   # plain: Sep
+]
+tmp7 = Path(tempfile.mkdtemp())
+o1g, _ = pipeline(tmp7, buat_sumber(pref))
+assert "sheet W: 2 baris dari 'W', 3 di luar 2026-09 dilewati" in o1g, o1g
+gd = detail_wd(tmp7 / "hasil.xlsx")
+assert sorted((r["Date"].day, r["Date Source"]) for r in gd) == [(2, "Completed Date"), (4, "Completed Time")], gd
 
 # D (Paid Date) is unchanged: a blank Paid Date does NOT borrow Settlement Date
 tmp5 = Path(tempfile.mkdtemp())

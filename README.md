@@ -260,8 +260,8 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
 #### Rebate Withdrawal — `Completed Date` diabaikan (v1.29)
-Untuk baris yang `Source Name`-nya **`Rebate Withdrawal`** (huruf besar/kecil dan spasi tepi
-diabaikan), `Completed Date` **bukan** tanggal selesai yang asli: hanya 3.593 baris yang
+Untuk baris yang `Source Name`-nya **`Rebate Withdrawal`** atau **berakhir dengan** itu, mis.
+`08-2026 Rebate Withdrawal` (huruf besar/kecil dan spasi diabaikan), `Completed Date` **bukan** tanggal selesai yang asli: hanya 3.593 baris yang
 mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu–1 Sep 2026 pada baris yang diajukan
 2024–2026 (median 308 hari sesudah `Apply Date`, bahkan sebelum `Apply Date` di 190 baris).
 `Completed Time` bisa dipercaya (dalam 1 hari dari `Apply Date` di 104.159 dari 104.815 baris).
@@ -272,8 +272,10 @@ Maka untuk Rebate urutannya jadi:
 3. `Completed Date` **tidak dipakai**; `Apply Date` tetap **tidak pernah** dipakai.
 
 `Withdrawal` biasa dan sumber lain **tidak berubah** (aturan v1.28 di atas, termasuk
-`UTAMAKAN_WAKTU`). `Source Name` kosong / bukan persis `Rebate Withdrawal` (mis. `Rebate`,
-`Rebate Withdrawals`) → aturan v1.28. Satu fungsi yang sama dipakai `isi_template.py`,
+`UTAMAKAN_WAKTU`). `Source Name` kosong / tidak berakhir dengan kata utuh `rebate withdrawal`
+(mis. `Withdrawal`, `08-2026 Withdrawal`, `Rebate`, `Rebate Withdrawals`, `Unrebate Withdrawal`)
+→ aturan v1.28. Untuk KVB, `siapkan_kvb.py` juga menyeragamkan `MM-YYYY Wallet withdrawal` /
+`MM-YYYY Rebate Withdrawal` → `Rebate Withdrawal` (supaya rumus MTOATD Wallet出金 ikut cocok). Satu fungsi yang sama dipakai `isi_template.py`,
 `hitung_dw.py` (saringan ulang) dan MTOATD, jadi ketiganya selalu sepakat. Baris yang
 Completed Time-nya jatuh lewat tengah malam (apply 30 Sep, selesai 00:00:20 1 Okt) masuk
 **Oktober** — memang begitu. Sheet **Date Check** menambah baris

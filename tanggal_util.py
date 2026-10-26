@@ -29,8 +29,8 @@ harus menang, balik saja UTAMAKAN_WAKTU.
 
 REBATE WITHDRAWAL (v1.29, 26 Okt 2026)
 --------------------------------------
-Untuk baris yang 'Source Name'-nya "Rebate Withdrawal" (huruf besar/kecil dan spasi
-tepi diabaikan), 'Completed Date' BUKAN tanggal selesai yang asli: hanya 3.593 baris yang
+Untuk baris yang 'Source Name'-nya "Rebate Withdrawal" atau BERAKHIR dengan itu (mis.
+"08-2026 Rebate Withdrawal" dari KVB; huruf besar/kecil dan spasi diabaikan), 'Completed Date' BUKAN tanggal selesai yang asli: hanya 3.593 baris yang
 mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu-1 Sep 2026 pada baris yang diajukan
 2024-2026 (median 308 hari SESUDAH Apply Date, bahkan SEBELUM Apply Date di 190 baris).
 'Completed Time' bisa dipercaya (dalam 1 hari dari Apply Date di 104.159 dari 104.815
@@ -71,10 +71,18 @@ def kolom_penentu(utama):
     return kol + (KOLOM_SOURCE,) if utama == KOLOM_COMPLETED else kol
 
 
+_RE_REBATE = re.compile(r"(?:^|[^A-Z0-9])" + re.escape(SUMBER_REBATE) + r"$")
+
+
 def adalah_rebate(sumber):
-    """True kalau 'Source Name' persis 'Rebate Withdrawal' (case-insensitive, spasi dirapikan)."""
+    """True kalau 'Source Name' (trim, spasi dirapikan, tanpa beda huruf besar/kecil)
+    BERAKHIR dengan 'rebate withdrawal' sebagai kata utuh -- jadi 'Rebate Withdrawal' dan
+    'prefix bulan' ala KVB ('08-2026 Rebate Withdrawal') sama-sama cocok.
+    TIDAK cocok: 'Withdrawal', '08-2026 Withdrawal', 'Wallet withdrawal' (diubah
+    siapkan_kvb.py jadi 'Rebate Withdrawal' sebelum sampai sini), 'Rebate Withdrawals',
+    'Rebate Withdrawal (Manual)', 'Unrebate Withdrawal', 'Rebate', kosong / bukan teks."""
     return (isinstance(sumber, str)
-            and " ".join(sumber.split()).upper() == SUMBER_REBATE)
+            and _RE_REBATE.search(" ".join(sumber.split()).upper()) is not None)
 
 
 AMBANG_TANPA_TANGGAL = 0.01     # peringatan kalau > 1% baris sheet tanpa tanggal sah

@@ -104,6 +104,8 @@ def normalisasi_source_name(v):
         return "Rebate Withdrawal"
     if kunci == "withdrawal":
         return "Withdrawal"
+    if kunci == "rebate withdrawal":      # KVB menulis juga 'MM-YYYY Rebate Withdrawal'
+        return "Rebate Withdrawal"
     return teks
 
 
