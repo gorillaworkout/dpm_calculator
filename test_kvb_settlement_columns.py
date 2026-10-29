@@ -270,5 +270,49 @@ assert "D&W REPORT: SETTLEMENT DATE COLUMNS" not in "\n".join(
 dc = [r for r in on["Date Check"].iter_rows(values_only=True)
       if r and r[1] == "kept for Settlement Date columns only"]
 assert sorted((r[0], r[3]) for r in dc) == [("D", 2), ("W", 2)], dc
+# ------------------------------------------------------------------ D&W Report "formulas" by header
+# Every calculated D&W Report column is written as a value (no Excel formulas). After the
+# v1.30 column shift, check (both tables, flags on AND off) that each calculated column is
+# computed from the right columns BY HEADER, Grand Totals are sums / ratios of totals, rate
+# formats + fills follow the header, and no formula anywhere points into the D&W Report.
+_spec = importlib.util.spec_from_file_location("cek_dw_report_s", HERE / "verifikasi" / "cek_dw_report.py")
+cek = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cek)
+
+for nama_wb, layout in (("on.xlsx", "settlement"), ("off.xlsx", "old")):
+    wb_f = load_workbook(tmp / nama_wb)                      # formulas kept (not data_only)
+    rumus = [(w.title, c.coordinate) for w in wb_f.worksheets for r in w.iter_rows()
+             for c in r if isinstance(c.value, str) and c.value.startswith("=")]
+    assert rumus == [], (nama_wb, rumus[:10])
+    m = cek.periksa(wb_f, layout=layout)
+    assert m == [], (nama_wb, m)
+    ws_f = wb_f["D&W Report"]
+    n_col = 14 if layout == "settlement" else 11             # withdrawal is the widest table
+    assert ws_f.max_column == n_col, (nama_wb, ws_f.max_column)
+    for c in range(1, n_col + 1):                            # every column has its width
+        huruf = ws_f.cell(1, c).column_letter
+        assert ws_f.column_dimensions[huruf].width, (nama_wb, huruf)
+    assert not ws_f.conditional_formatting and not ws_f.data_validations.dataValidation
+    assert ws_f.auto_filter.ref is None and not ws_f.merged_cells.ranges
+    assert all(not n.startswith("_xlnm.Print") for n in wb_f.defined_names)
+
+# the checker itself must catch a column mix-up and a formula pointing into the report
+wb_x = load_workbook(tmp / "on.xlsx")
+ws_x = wb_x["D&W Report"]
+hr = rp_on["deposit"][0]
+c_avg_s = rp_on["deposit"][1].index("CRM Average Rate (Settlement Date)") + 1
+c_avg = rp_on["deposit"][1].index("CRM Average Rate (Paid Date)") + 1
+ws_x.cell(hr + 1, c_avg_s).value = ws_x.cell(hr + 1, c_avg).value + 1   # wrong basis
+c_fe = rp_on["withdrawal"][1].index("Total FE Gain/-Loss (USD)") + 1
+hw = rp_on["withdrawal"][0]
+wb_x["Legend"]["Z1"] = f"='D&W Report'!{ws_x.cell(hw + 1, c_fe).coordinate}*2"
+m = cek.periksa(wb_x)
+assert any("CRM Average Rate (Settlement Date)" in x and "seharusnya" in x for x in m), m
+assert any("Legend!Z1" in x and "Total FE Gain/-Loss (USD)" in x and "withdrawal" in x
+           for x in m), m
+assert cek.semantik("CRM average (Completed Date)") == "avg"
+assert cek.semantik("TRANSACTIONS (Settlement Date)") == "tx_s"
+assert cek.semantik("Xero USD ") == "xu"
+
 print("KVB settlement columns: layout, totals, settle-only rows, status, blank, "
-      "other sheets unchanged: OK")
+      "other sheets unchanged, D&W Report formulas by header (on/off): OK")
