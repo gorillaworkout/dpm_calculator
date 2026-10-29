@@ -106,6 +106,12 @@ USD_SHADOW = {}
 FEE_CURRENCY_SUFFIX = False
 WARN_HIGH_PCT = False
 CNY_RATE_CHECK = False
+# SETTLEMENT_COLUMNS (v1.30, KVB): D&W Report juga punya kolom CRM USD / Transactions /
+# CRM average berbasis 'Settlement Date' di sebelah kolom basis Paid Date (D) /
+# Completed Date (W). Jumlahnya ditangkap SEBELUM saringan bulan dan disimpan di
+# report["pivot_settle"] -- records, pivot lama, MTOATD, Channel Balance, J Wallet,
+# D&W Detail tidak berubah satu angka pun (lihat catatan 3 Sep 2026 di process_sheet).
+SETTLEMENT_COLUMNS = False
 
 # Nama gateway di sheet data -> nama gateway di tabel fee (semua di-UPPERCASE)
 GATEWAY_ALIAS = {
@@ -901,6 +907,25 @@ def satukan_nama_gateway(report, fee_table):
             t["urut"] = min(t["urut"], v["urut"])
     report["pivot"] = baru
     report["gateway_digabung"] = {k: sorted(v) for k, v in digabung.items() if len(v) > 1}
+
+    # KVB --settlement-columns: kunci basis Settlement mengikuti nama yang sama.
+    # Ejaan gateway yang HANYA ada di basis Settlement tidak ikut menentukan nama
+    # pivot lama (supaya tab lain tidak berubah); dirapikan di antara mereka sendiri.
+    if report.get("pivot_settle"):
+        ejaan_s = Counter()
+        for (_k, _c, g), v in report["pivot_settle"].items():
+            if g and kunci_gw(" ".join(str(g).split())) not in peta:
+                ejaan_s[g] += v["n"]
+        peta_s = peta_nama_gateway(ejaan_s, fee_table)
+        baru_s = {}
+        for (k, c, g), v in report["pivot_settle"].items():
+            c2 = " ".join(str(c).split())
+            t = " ".join(str(g if g is not None else "").split())
+            g2 = (peta.get(kunci_gw(t)) or peta_s.get(kunci_gw(t), t)) if t else g
+            tujuan = baru_s.setdefault((k, c2, g2), {"crm_usd": 0.0, "tx": 0.0, "n": 0})
+            for f in ("crm_usd", "tx", "n"):
+                tujuan[f] += v[f]
+        report["pivot_settle"] = baru_s
     return peta
 
 
@@ -1320,6 +1345,58 @@ def refuse_h1_relevan(kind, status, completed, settle):
     )
 
 
+def catat_settlement(report, ws, row, cols, kind, currency, gateway, paid, settle,
+                     usd, tx):
+    """KVB --settlement-columns: tangkap satu baris (status sudah lolos) ke basis
+    Settlement Date. Dipanggil SEBELUM saringan bulan.
+
+    Return True kalau baris ini HANYA untuk kolom Settlement Date (tanggal
+    transaksinya di luar bulan, Settlement Date-nya di dalam) -- pemanggil lalu
+    membuangnya dari semua perhitungan lain."""
+    dalam_tx = dalam_periode(paid)
+    if settle is None:
+        if dalam_tx:
+            # Basis lama tetap menghitungnya; basis Settlement tidak bisa.
+            k = (ws.title, norm(currency), " ".join(str(gateway or "").split()))
+            report.setdefault("settle_kosong", Counter())[k] += 1
+            report.setdefault("settle_kosong_usd", defaultdict(float))[k] += usd or 0.0
+        return False
+    if not dalam_tx and paid is None:
+        # Tanpa tanggal transaksi: tetap diperlakukan seperti sebelumnya ('no date').
+        return False
+    if not dalam_periode(settle):
+        if dalam_tx:
+            # Dihitung di basis lama, di basis Settlement masuk bulan lain.
+            k = (ws.title, f"{settle:%Y-%m}")
+            report.setdefault("settle_lain", Counter())[k] += 1
+            report.setdefault("settle_lain_usd", defaultdict(float))[k] += usd or 0.0
+        return False
+    cur_raw = str(currency) if currency is not None else ""
+    gw_raw = str(gateway) if gateway is not None else ""
+    ps = report.setdefault("pivot_settle", {}).setdefault(
+        (kind, cur_raw, gw_raw), {"crm_usd": 0.0, "tx": 0.0, "n": 0})
+    ps["n"] += 1
+    if usd is not None:
+        ps["crm_usd"] += usd
+    if tx is not None:
+        ps["tx"] += tx
+    if dalam_tx:
+        return False
+    def ambil(*nama):
+        for k_ in nama:
+            if k_ in cols:
+                v = ws.cell(row=row, column=cols[k_]).value
+                if v not in (None, ""):
+                    return v
+        return None
+    report.setdefault("settle_saja", []).append({
+        "sheet": ws.title, "kind": kind, "currency": norm(currency),
+        "gateway": " ".join(str(gateway or "").split()),
+        "ticket": ambil("TICKET", "MT ORDER", "REFERENCE"),
+        "tgl": paid, "settle": settle, "usd": usd, "tx": tx})
+    return True
+
+
 def kosongkan_kolom_hitung(ws, row, out, catatan=None):
     """Kosongkan 4 kolom rumus di satu baris dan tandai ABU-ABU.
 
@@ -1454,7 +1531,22 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         # cocok 570/570 jadi 564/570, MT4出金 dari 570/570 jadi 562/570.
         # Sebabnya ekspor MEREKA juga disaring pakai tanggal transaksi, jadi
         # baris itu memang tidak ada di data mereka. Jangan diulang.
-        ring.catat(hasil_tgl, date_col_name, dalam_periode(paid))
+        #
+        # KVB --settlement-columns (v1.30) TIDAK mengulang percobaan itu: baris yang
+        # Settlement Date-nya di bulan ini ditangkap TERPISAH ke report["pivot_settle"]
+        # (hanya untuk kolom Settlement Date di D&W Report). Baris yang tanggal
+        # transaksinya di luar bulan tetap DIBUANG dari records/pivot/MTOATD/dst.
+        status_ok = not (HANYA_STATUS_FINISH and c_status
+                         and norm(status) not in STATUS_DIPAKAI)
+        settle_saja = False
+        if SETTLEMENT_COLUMNS and status_ok:
+            settle_saja = catat_settlement(report, ws, row, cols, kind, currency, gateway,
+                                           paid, settle, usd_existing, tx)
+        ring.catat(hasil_tgl, date_col_name, dalam_periode(paid), settle_only=settle_saja)
+        if settle_saja:
+            kosongkan_kolom_hitung(ws, row, out)
+            n -= 1
+            continue
         if PERIODE_FILTER is not None and not dalam_periode(paid):
             kosongkan_kolom_hitung(ws, row, out)
             label = f"{paid:%Y-%m}" if paid else "(no date)"
@@ -3240,6 +3332,13 @@ def write_mtoatd_sheet(wb, report):
             akum_ak.clear()
         label_cum = label_bulan(d)
         nilai = {c: spec.hitung(idx, c, d) for c in urut_cur}
+        if dalam_periode(d):
+            # Dicatat untuk rekonsiliasi KVB --settlement-columns; tidak ditulis ke sel.
+            crm_d = report.setdefault("mtoatd_crm_d", None)
+            if crm_d is None:
+                crm_d = report["mtoatd_crm_d"] = defaultdict(float)
+            for c in urut_cur:
+                crm_d[c] += nilai[c].get("crm_d") or 0.0
         for c in urut_cur:
             akum_net[c] += nilai[c]["net_hari"]
             nilai[c]["net_bulan"] = akum_net[c]
@@ -3339,6 +3438,9 @@ def write_dw_report_sheet(wb, report, periode):
         del wb[REPORT_SHEET]
     ws = wb.create_sheet(REPORT_SHEET, 0)
     ws.sheet_properties.tabColor = "2E7D32"
+
+    if SETTLEMENT_COLUMNS:
+        return _write_dw_report_settlement(ws, report, periode)
 
     KOL_D = ["Currency", "Payment Gateway", "CRM USD ", "TRANSACTIONS", "Xero USD ",
              "Total FE Gain/-Loss (USD)", "CRM Average Rate", "Xero average Rate",
@@ -3446,6 +3548,239 @@ def write_dw_report_sheet(wb, report, periode):
         ws.auto_filter.ref = None
         r += 2
     return ws
+
+
+# --- KVB --settlement-columns (v1.30): layout D&W Report dengan basis Settlement Date
+SETTLE_KOL_D = ["Currency", "Payment Gateway", "CRM USD (Paid Date)",
+                "CRM USD (Settlement Date)", "TRANSACTIONS (Paid Date)",
+                "TRANSACTIONS (Settlement Date)", "Xero USD ", "Total FE Gain/-Loss (USD)",
+                "CRM Average Rate (Paid Date)", "CRM Average Rate (Settlement Date)",
+                "Xero average Rate", "Recorded in Xero", "Rounding Adjustment"]
+SETTLE_KOL_W = ["Currency", "Payment Gateway", "CRM USD (Completed Date)",
+                "CRM USD (Settlement Date)", "Handling Charges Income",
+                "Transactions (Completed Date)", "Transactions (Settlement Date)",
+                "Xero USD ", "Total FE Gain/-Loss (USD)", "CRM average (Completed Date)",
+                "CRM average (Settlement Date)", "Xero average", "Recorded in Xero",
+                "Rounding Adjustment"]
+# kolom terakhir yang biru-kelabu (data); sesudahnya hijau (hitungan)
+SETTLE_N_DATA = {"deposit": 7, "withdrawal": 8}
+# kolom rate/average (format 5 desimal), 1-based
+SETTLE_KOL_RATE = {"deposit": (9, 10, 11), "withdrawal": (10, 11, 12)}
+
+_KET_SETTLE = ("Settlement Date basis: rows with Status finish/success whose "
+               "'Settlement Date' falls in the report month, INCLUDING rows whose "
+               "{basis} is in the next month (when they are in the file). Rows with a "
+               "blank Settlement Date are not in this column - they are listed on "
+               "'Missing Data'.")
+KOMENTAR_SETTLE = {
+    "CRM USD (Paid Date)":
+        "Sum of the USD column for rows whose Paid Date is in the report month.\n"
+        "Same number as the old 'CRM USD' column.",
+    "CRM USD (Completed Date)":
+        "Sum of the USD column for rows whose Completed Date is in the report month\n"
+        "(Rebate Withdrawal: Completed Time). Same number as the old 'CRM USD' column.",
+    "TRANSACTIONS (Paid Date)":
+        "Sum of Transaction (original currency), Paid Date basis.",
+    "Transactions (Completed Date)":
+        "Sum of Transaction (original currency), Completed Date basis.",
+    "CRM Average Rate (Paid Date)":
+        "TRANSACTIONS (Paid Date) / CRM USD (Paid Date). Blank when CRM USD is 0.\n"
+        "Grand Total = same ratio on the totals (mixes currencies: control figure).",
+    "CRM average (Completed Date)":
+        "Transactions (Completed Date) / CRM USD (Completed Date). Blank when 0.\n"
+        "Grand Total = same ratio on the totals (mixes currencies: control figure).",
+}
+
+
+def _komentar_settle(nama, jenis):
+    basis = "Paid Date" if jenis == "deposit" else "Completed Date"
+    ket = _KET_SETTLE.format(basis=basis)
+    if nama == "CRM USD (Settlement Date)":
+        return "Sum of the USD column on the Settlement Date basis.\n\n" + ket
+    if nama.lower() == "transactions (settlement date)":
+        return "Sum of Transaction (original currency) on the Settlement Date basis.\n\n" + ket
+    if nama in ("CRM Average Rate (Settlement Date)", "CRM average (Settlement Date)"):
+        return ("Transactions (Settlement Date) / CRM USD (Settlement Date), blank when "
+                "CRM USD (Settlement Date) is 0.\nGrand Total = same ratio on the totals.")
+    return KOMENTAR_SETTLE.get(nama)
+
+
+def _write_dw_report_settlement(ws, report, periode):
+    """D&W Report dengan kolom basis Settlement Date (KVB --settlement-columns).
+
+    Kolom basis lama (C, Xero USD, FE Gain/Loss, Xero average, Recorded in Xero,
+    Rounding, Handling Charges) angkanya SAMA PERSIS dengan layout lama -- hanya
+    posisinya bergeser. Gateway yang hanya ada di basis Settlement tetap dapat baris;
+    sel basis lamanya 0 (rata-ratanya kosong)."""
+    from openpyxl.styles import Alignment
+
+    lebar = (10, 16.7, 13.3, 13.3, 18, 18, 17, 14.3, 16.8, 16.8, 16.7, 15.2, 19, 19)
+    for i, w in enumerate(lebar, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
+
+    ws["A1"] = REPORT_TITLE
+    ws["A1"].font = Font(bold=True, size=16)
+    piv_s = report.get("pivot_settle") or {}
+    kosong = {"crm_usd": 0.0, "tx": 0.0, "xero_usd": 0.0, "charges": 0.0, "n": 0}
+
+    r = 3
+    for jenis in ("deposit", "withdrawal"):
+        data = [((c, g), v) for (k, c, g), v in report["pivot"].items() if k == jenis]
+        ada = {cg for cg, _v in data}
+        urut_max = max([v["urut"] for _cg, v in data] + [-1])
+        for (k, c, g), _v in piv_s.items():
+            if k == jenis and (c, g) not in ada:
+                urut_max += 1
+                data.append(((c, g), dict(kosong, urut=urut_max)))
+                ada.add((c, g))
+        r += 1
+        ws.cell(r, 1, REPORT_SECTION_TITLE[jenis]).font = Font(bold=True, size=16)
+        r += 1
+        sel = ws.cell(r, 1, periode)
+        sel.font = Font(bold=True, size=16)
+        sel.number_format = "mmm-yy"
+        if jenis == "deposit":
+            r += 2
+            ws.cell(r, 1, report["date_col_label"].get("deposit", "Date")).font = Font(size=12)
+            ws.cell(r, 2, "(Multiple Items)").font = Font(size=12)
+            r += 1
+        else:
+            r += 1
+        ws.cell(r, 1, "Payment Gateway").font = Font(bold=True, size=12)
+
+        kolom = SETTLE_KOL_D if jenis == "deposit" else SETTLE_KOL_W
+        n_data = SETTLE_N_DATA[jenis]
+        kol_rate = SETTLE_KOL_RATE[jenis]
+        r += 1
+        baris_hdr = r
+        for c, t in enumerate(kolom, start=1):
+            sel = ws.cell(r, c, t)
+            sel.font = Font(bold=True)
+            sel.fill = PatternFill("solid",
+                                   fgColor=RPT_FILL_HEAD if c <= n_data else RPT_FILL_HEAD2)
+            sel.alignment = Alignment(wrap_text=True, vertical="bottom")
+            teks = _komentar_settle(t, jenis)
+            if teks:
+                sel.comment = Comment(teks, "hitung_dw.py", height=150, width=320)
+
+        cur_terakhir = None
+        tot = {"crm": 0.0, "tx": 0.0, "xu": 0.0, "ch": 0.0, "crm_s": 0.0, "tx_s": 0.0}
+        for cur, gw, v in _rpt_urut(data):
+            r += 1
+            vs = piv_s.get((jenis, cur, gw)) or {"crm_usd": 0.0, "tx": 0.0}
+            crm, tx, xu, ch = v["crm_usd"], v["tx"], v["xero_usd"], v["charges"]
+            crm_s, tx_s = vs["crm_usd"], vs["tx"]
+            tot["crm"] += crm; tot["tx"] += tx; tot["xu"] += xu; tot["ch"] += ch
+            tot["crm_s"] += crm_s; tot["tx_s"] += tx_s
+
+            if cur != cur_terakhir:
+                sel = ws.cell(r, 1, cur)
+                sel.font = Font(bold=True)
+                sel.fill = PatternFill("solid", fgColor=RPT_FILL_CUR)
+                cur_terakhir = cur
+            ws.cell(r, 2, gw)
+
+            avg = tx / crm if crm else None
+            avg_s = tx_s / crm_s if crm_s else None
+            xavg = tx / xu if xu else None
+            if jenis == "deposit":
+                nilai = [crm, crm_s, tx, tx_s, xu, xu - crm, avg, avg_s, xavg, None, -xu]
+            else:
+                nilai = [crm, crm_s, ch, tx, tx_s, xu, crm - xu, avg, avg_s, xavg, None, xu]
+            for i, val in enumerate(nilai):
+                c = 3 + i
+                sel = ws.cell(r, c, val)
+                sel.number_format = FMT_ACC5 if c in kol_rate else FMT_ACC
+                if c > n_data:
+                    sel.fill = PatternFill("solid", fgColor=RPT_FILL_CALC)
+
+        # ---- Grand Total
+        r += 1
+        for c in range(1, len(kolom) + 1):
+            sel = ws.cell(r, c)
+            sel.font = Font(bold=True)
+            sel.fill = PatternFill("solid",
+                                   fgColor=RPT_FILL_HEAD if c <= n_data else RPT_FILL_HEAD2)
+        ws.cell(r, 1, "Grand Total")
+        crm_avg = (tot["tx"] / tot["crm"]) if tot["crm"] else None
+        crm_avg_s = (tot["tx_s"] / tot["crm_s"]) if tot["crm_s"] else None
+        xero_avg = (tot["tx"] / tot["xu"]) if tot["xu"] else None
+        c_rec = kolom.index("Recorded in Xero") + 1
+        isi_rec = [ws.cell(rr, c_rec).value for rr in range(baris_hdr + 1, r)]
+        rec_tot = sum(x for x in isi_rec if isinstance(x, (int, float))) \
+            if any(isinstance(x, (int, float)) for x in isi_rec) else None
+        if jenis == "deposit":
+            gt = [tot["crm"], tot["crm_s"], tot["tx"], tot["tx_s"], tot["xu"],
+                  tot["xu"] - tot["crm"], crm_avg, crm_avg_s, xero_avg, rec_tot, -tot["xu"]]
+        else:
+            gt = [tot["crm"], tot["crm_s"], tot["ch"], tot["tx"], tot["tx_s"], tot["xu"],
+                  tot["crm"] - tot["xu"], crm_avg, crm_avg_s, xero_avg, rec_tot, tot["xu"]]
+        for i, val in enumerate(gt):
+            c = 3 + i
+            sel = ws.cell(r, c, val)
+            sel.number_format = FMT_ACC5 if c in kol_rate else FMT_ACC
+            sel.font = Font(bold=True)
+        report.setdefault("settle_total", {})[jenis] = {
+            "crm": tot["crm"], "crm_s": tot["crm_s"], "tx": tot["tx"], "tx_s": tot["tx_s"]}
+        ws.auto_filter.ref = None
+        r += 2
+    return ws
+
+
+def rekonsiliasi_settlement(report):
+    """Informasi: deposit CRM USD (Settlement Date) per currency vs MTOATD CRM入金.
+
+    MTOATD menjumlah USD per Settlement Date dari baris yang Paid Date-nya di bulan
+    ini, hanya pada tanggal yang punya blok. Selisih yang wajar = baris yang Paid
+    Date-nya di luar bulan (kolom Settlement memuatnya, MTOATD tidak). Sisanya
+    'unexplained' -> peringatan. Return None kalau MTOATD tidak dibuat."""
+    mt = report.get("mtoatd_crm_d")
+    if mt is None:
+        return None
+    ours, saja = defaultdict(float), defaultdict(float)
+    for (k, c, _g), v in (report.get("pivot_settle") or {}).items():
+        if k == "deposit":
+            ours[norm(c)] += v["crm_usd"]
+    for x in report.get("settle_saja") or []:
+        if x["kind"] == "deposit":
+            saja[x["currency"]] += x["usd"] or 0.0
+    hasil = []
+    for cur in sorted(set(ours) | {c for c, v in mt.items() if abs(v) > 0.005}):
+        a, b, e = ours.get(cur, 0.0), mt.get(cur, 0.0), saja.get(cur, 0.0)
+        sisa = a - b - e
+        hasil.append({"currency": cur, "settle": a, "mtoatd": b, "selisih": a - b,
+                      "luar": e, "sisa": sisa, "cocok": abs(sisa) <= 0.01})
+    return hasil
+
+
+def lapor_settlement(report):
+    """Log (= log job web) untuk kolom Settlement Date."""
+    saja = report.get("settle_saja") or []
+    if saja:
+        per = Counter((x["sheet"], f"{x['tgl']:%Y-%m}" if x["tgl"] else "(no date)")
+                      for x in saja)
+        rinci = ", ".join(f"{sh} {b}: {n:,}" for (sh, b), n in sorted(per.items()))
+        usd = sum(x["usd"] or 0.0 for x in saja)
+        print(f"Settle : {len(saja):,} baris tanggal transaksinya di luar bulan tapi "
+              f"Settlement Date-nya di dalam ({rinci}; USD {usd:,.2f}) -> HANYA kolom "
+              f"Settlement Date di '{REPORT_SHEET}'")
+    if report.get("settle_lain"):
+        rinci = ", ".join(f"{sh} {b}: {n:,}"
+                          for (sh, b), n in sorted(report["settle_lain"].items()))
+        print(f"Settle : baris bulan ini yang Settlement Date-nya di bulan lain "
+              f"(tidak masuk kolom Settlement Date): {rinci}")
+    if report.get("settle_kosong"):
+        n = sum(report["settle_kosong"].values())
+        print(f"!  Settle : {n:,} baris bulan ini Settlement Date-nya KOSONG -> hanya di "
+              f"basis lama (lihat Missing Data)")
+    for x in report.get("settle_recon") or []:
+        if not x["cocok"]:
+            print(f"!! PERINGATAN Settle: deposit {x['currency']} CRM USD (Settlement Date) "
+                  f"{x['settle']:,.2f} vs MTOATD CRM入金 {x['mtoatd']:,.2f} -- selisih "
+                  f"{x['selisih']:,.2f}, baris Paid Date di luar bulan {x['luar']:,.2f}, "
+                  f"tidak terjelaskan {x['sisa']:,.2f}")
+    if report.get("settle_recon") is None and SETTLEMENT_COLUMNS:
+        print("Settle : rekonsiliasi vs MTOATD dilewati (sheet MTOATD tidak dibuat)")
 
 
 def write_detail_sheet(wb, report):
@@ -3967,6 +4302,137 @@ def _tulis_missing_kvb(ws, r, report, box, wrap):
                 ws.cell(r, 2).fill = FILL_MISSING
                 ws.row_dimensions[r].height = 32
         ws.row_dimensions[r].height = 32
+
+    if SETTLEMENT_COLUMNS:
+        r = _tulis_missing_settlement(ws, r, report, box, wrap)
+    return r
+
+
+def _tulis_missing_settlement(ws, r, report, box, wrap):
+    """Missing Data: kolom Settlement Date di D&W Report (KVB --settlement-columns)."""
+    r += 2
+    ws.cell(r, 2, "7. SETTLEMENT DATE COLUMNS (D&W REPORT)").font = \
+        Font(bold=True, size=12, color="4472C4")
+    r += 1
+    ws.cell(r, 2, "The D&W Report also shows CRM USD, Transactions and CRM average on the "
+                  "Settlement Date basis (finish/success rows whose Settlement Date is in "
+                  "the report month). Rows listed in 7a are used ONLY in those columns; "
+                  "every other number and sheet ignores them.").font = \
+        Font(italic=True, size=9, color="808080")
+    ws.cell(r, 2).alignment = wrap
+    ws.row_dimensions[r].height = 30
+    r += 1
+
+    # 7a. tanggal transaksi di luar bulan, Settlement Date di dalam
+    saja = report.get("settle_saja") or []
+    r += 1
+    ws.cell(r, 2, f"7a. Transaction date outside the report month, Settlement Date inside: "
+                  f"{len(saja):,} rows, USD {sum(x['usd'] or 0.0 for x in saja):,.2f}"
+            ).font = Font(bold=True)
+    r += 1
+    if not saja:
+        ws.cell(r, 2, "None.").font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        _header(ws, r, ["Sheet", "Ticket", "Currency", "Payment Gateway",
+                        "Transaction date", "Settlement Date", "USD / Transaction"],
+                "4472C4")
+        for x in sorted(saja, key=lambda x: (x["sheet"], x["settle"], str(x["ticket"]))):
+            r += 1
+            isi = [x["sheet"], x["ticket"], x["currency"], x["gateway"], x["tgl"],
+                   x["settle"], f"{x['usd'] or 0:,.2f} / {x['tx'] or 0:,.2f}"]
+            for c, v in enumerate(isi, start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                if isinstance(v, (datetime.date, datetime.datetime)):
+                    cell.number_format = "yyyy-mm-dd"
+        r += 1
+
+    # 7b. Settlement Date kosong
+    kosong = report.get("settle_kosong") or {}
+    kosong_usd = report.get("settle_kosong_usd") or {}
+    r += 1
+    ws.cell(r, 2, f"7b. Blank Settlement Date (counted on the Paid / Completed Date basis "
+                  f"only): {sum(kosong.values()):,} rows").font = \
+        Font(bold=True, color="9C0006" if kosong else "000000")
+    r += 1
+    if not kosong:
+        ws.cell(r, 2, "None.").font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        _header(ws, r, ["Sheet", "Currency", "Payment Gateway", "Rows", "USD"], "C00000")
+        for k in sorted(kosong):
+            r += 1
+            isi = [k[0], k[1], k[2], kosong[k], kosong_usd.get(k, 0.0)]
+            for c, v in enumerate(isi, start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                if c == 6:
+                    cell.number_format = FMT_MONEY
+            ws.cell(r, 2).fill = FILL_WARN
+        r += 1
+
+    # 7c. bulan ini, Settlement Date di bulan lain
+    lain = report.get("settle_lain") or {}
+    lain_usd = report.get("settle_lain_usd") or {}
+    r += 1
+    ws.cell(r, 2, f"7c. Transaction date in the report month, Settlement Date in another "
+                  f"month (in the Paid / Completed Date columns, not in the Settlement Date "
+                  f"columns): {sum(lain.values()):,} rows").font = Font(bold=True)
+    r += 1
+    if not lain:
+        ws.cell(r, 2, "None.").font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        _header(ws, r, ["Sheet", "Settlement month", "Rows", "USD"], "4472C4")
+        for k in sorted(lain):
+            r += 1
+            isi = [k[0], k[1], lain[k], lain_usd.get(k, 0.0)]
+            for c, v in enumerate(isi, start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                if c == 5:
+                    cell.number_format = FMT_MONEY
+        r += 1
+
+    # 7d. rekonsiliasi vs MTOATD
+    recon = report.get("settle_recon")
+    r += 1
+    ws.cell(r, 2, "7d. Check: deposit CRM USD (Settlement Date) vs MTOATD CRM入金 "
+                  "(information only)").font = Font(bold=True)
+    r += 1
+    if recon is None:
+        ws.cell(r, 2, "Skipped - the MTOATD sheet was not built in this run.").font = \
+            Font(italic=True, color="808080")
+        return r
+    ws.cell(r, 2, "MTOATD only sums rows whose Paid Date is in the month, on dates that "
+                  "have a block. 'Paid outside month' explains the expected difference; "
+                  "anything left in 'Unexplained' is a warning.").font = \
+        Font(italic=True, size=9, color="808080")
+    ws.cell(r, 2).alignment = wrap
+    ws.row_dimensions[r].height = 30
+    r += 1
+    _header(ws, r, ["Currency", "Settlement USD", "MTOATD CRM Deposit", "Diff",
+                    "of which paid outside month", "Unexplained"], "4472C4")
+    for x in recon:
+        r += 1
+        isi = [x["currency"], x["settle"], x["mtoatd"], x["selisih"], x["luar"], x["sisa"]]
+        for c, v in enumerate(isi, start=2):
+            cell = ws.cell(r, c, v)
+            cell.border = box
+            if c > 2:
+                cell.number_format = FMT_MONEY
+        if not x["cocok"]:
+            for c in (2, 7):
+                ws.cell(r, c).fill = FILL_MISSING
+    salah = [x for x in recon if not x["cocok"]]
+    r += 1
+    if salah:
+        ws.cell(r, 2, f"WARNING: {len(salah)} currency(ies) do not reconcile - check "
+                      f"settlement dates with no MTOATD block.").font = \
+            Font(bold=True, color="9C0006")
+    else:
+        ws.cell(r, 2, "All currencies reconcile.").font = Font(italic=True, color="008000")
     return r
 
 
@@ -4235,8 +4701,40 @@ def write_legend_sheet(wb, date_cols_used, report=None):
 
 def _tulis_legend_kvb(ws, r, box, wrap, report=None):
     """Catatan Legend yang hanya ditulis kalau flag KVB-nya menyala."""
-    if not (USD_SHADOW or FEE_CURRENCY_SUFFIX or WARN_HIGH_PCT or CNY_RATE_CHECK):
+    if not (USD_SHADOW or FEE_CURRENCY_SUFFIX or WARN_HIGH_PCT or CNY_RATE_CHECK
+            or SETTLEMENT_COLUMNS):
         return r
+
+    if SETTLEMENT_COLUMNS:
+        r += 2
+        ws.cell(r, 2, "D&W REPORT: SETTLEMENT DATE COLUMNS").font = \
+            Font(bold=True, size=12, color="4472C4")
+        r += 1
+        teks = (
+            "Deposit: C 'CRM USD (Paid Date)' is the old CRM USD column. D 'CRM USD "
+            "(Settlement Date)', F 'TRANSACTIONS (Settlement Date)' and J 'CRM Average Rate "
+            "(Settlement Date)' use the Settlement Date basis. "
+            "Withdrawal: C 'CRM USD (Completed Date)' is the old CRM USD column. D 'CRM USD "
+            "(Settlement Date)', G 'Transactions (Settlement Date)' and K 'CRM average "
+            "(Settlement Date)' use the Settlement Date basis. "
+            "Settlement Date basis = rows with Status finish/success whose Settlement Date "
+            "is in the report month, including rows whose Paid / Completed Date is in the "
+            "next or previous month when the file has them (Rebate Withdrawal rows use "
+            "their own Settlement Date). Average = sum of Transactions / sum of CRM USD on "
+            "that basis, blank when CRM USD is 0; the Grand Total uses the same ratio on "
+            "the totals. Xero USD, FE Gain/Loss, Xero average, Recorded in Xero, Rounding "
+            "Adjustment and Handling Charges stay on the Paid / Completed Date basis. "
+            "Rows with a blank Settlement Date are only in the Paid / Completed Date "
+            "columns. A gateway that only appears on the Settlement Date basis gets its "
+            "own line with 0 in the other columns. Rows used only for these columns "
+            "do not change any other number or sheet; they are listed on Missing Data "
+            "(section 7) and counted on Date Check."
+        )
+        sel = ws.cell(r, 2, teks)
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 170
+        r += 1
 
     if USD_SHADOW:
         r += 2
@@ -4423,9 +4921,16 @@ def main():
     ap.add_argument("--cny-rate-check", action="store_true",
                     help="Daftar baris CNY yang USD/Transaction-nya di luar plus/minus "
                          "2 persen dari median rasio CNY pada run ini.")
+    ap.add_argument("--settlement-columns", action="store_true",
+                    help="D&W Report: tambah kolom CRM USD / Transactions / CRM average "
+                         "berbasis Settlement Date di sebelah kolom basis Paid Date / "
+                         "Completed Date. Tab lain tidak berubah. Hanya dipasang untuk KVB.")
     args = ap.parse_args()
 
     global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
+    global SETTLEMENT_COLUMNS
+    if args.settlement_columns:
+        SETTLEMENT_COLUMNS = True
     if args.tanpa_extra_fees:
         PAKAI_EXTRA_FEES = False
     if args.usd_shadow:
@@ -4583,7 +5088,12 @@ def main():
               "refuse_mtoatd": [], "tanggal": {}, "status_geser_dipakai": 0,
               "date_check_isi": None,
               "usd_shadow_gap": [], "usd_shadow_ft": [],
-              "rate_tinggi": [], "cny_check": None}
+              "rate_tinggi": [], "cny_check": None,
+              # KVB --settlement-columns (v1.30)
+              "pivot_settle": {}, "settle_saja": [],
+              "settle_kosong": Counter(), "settle_kosong_usd": defaultdict(float),
+              "settle_lain": Counter(), "settle_lain_usd": defaultdict(float),
+              "mtoatd_crm_d": None, "settle_recon": None}
 
     report["date_check_isi"] = baca_date_check(wb)
     total_rows = 0
@@ -4676,6 +5186,9 @@ def main():
         with Denyut(f"menulis {len(report['records']):,} baris ke sheet '{DETAIL_SHEET}'"):
             n_rep = write_detail_sheet(wb, report)
         print(f"Sheet  : '{DETAIL_SHEET}' -> {n_rep:,} baris (gabungan semua sheet transaksi)")
+        if SETTLEMENT_COLUMNS:
+            report["settle_recon"] = rekonsiliasi_settlement(report)
+            lapor_settlement(report)
         if WARN_HIGH_PCT:
             report["rate_tinggi"] = kumpulkan_rate_tinggi(fee_table)
         if CNY_RATE_CHECK:

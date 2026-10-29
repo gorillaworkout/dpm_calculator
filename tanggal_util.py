@@ -296,9 +296,18 @@ class Ringkasan:
         self.status_geser = 0            # baris dengan kata status di 'Pay Channel'
         self.rebate_sumber = Counter()   # kolom asal tanggal baris Rebate Withdrawal
         self.rebate_selisih = 0          # Rebate: Completed Date beda > 3 hari dari Completed Time
+        # KVB --settlement-columns (v1.30): baris yang tanggal transaksinya DI LUAR bulan
+        # tapi Settlement Date-nya DI DALAM bulan -> disimpan HANYA untuk kolom
+        # 'Settlement Date' di D&W Report. 'YYYY-MM' tanggal transaksi -> baris.
+        self.settle_only = Counter()
 
-    def catat(self, hasil, utama, masuk):
-        """masuk: True/False = baris dipakai / dilewati (atau None kalau tak ada saringan)."""
+    def catat(self, hasil, utama, masuk, settle_only=False):
+        """masuk: True/False = baris dipakai / dilewati (atau None kalau tak ada saringan).
+
+        settle_only=True (hanya bersama masuk=False): baris disimpan untuk kolom
+        Settlement Date saja -- dihitung di settle_only, bukan di luar_bulan,
+        supaya Date Check tidak menyebutnya 'skipped'. Hitungan sumber tanggal
+        (Rebate / cadangan / konflik) tetap sama seperti tanpa opsi ini."""
         self.total += 1
         if hasil.selisih_abaikan:
             self.rebate_selisih += 1
@@ -314,7 +323,9 @@ class Ringkasan:
                               else "(replaced)", hasil.konflik.strftime("%Y-%m"))] += 1
                 if hasil.sumber != utama:
                     self.konflik_dipakai += 1
-            if masuk is False:
+            if masuk is False and settle_only:
+                self.settle_only[hasil.tanggal.strftime("%Y-%m")] += 1
+            elif masuk is False:
                 self.luar_bulan[hasil.tanggal.strftime("%Y-%m")] += 1
         if masuk:
             self.dipakai += 1
@@ -333,6 +344,9 @@ class Ringkasan:
         out.append((s, "rows used", "", self.dipakai))
         for bln, n in sorted(self.luar_bulan.items()):
             out.append((s, "skipped: outside report month", bln, n))
+        for bln, n in sorted(self.settle_only.items()):
+            out.append((s, "kept for Settlement Date columns only",
+                        f"transaction date {bln}, Settlement Date in the report month", n))
         for alasan, n in sorted(self.tanpa_tanggal.items()):
             out.append((s, "skipped: no usable date", NAMA_ALASAN.get(alasan, alasan), n))
         for kol, n in sorted(self.cadangan.items()):

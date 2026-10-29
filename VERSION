@@ -6,5 +6,5 @@
 #   build   = date the PR is prepared/merged, YYYY-MM-DD
 # Do not put a commit SHA here: a commit cannot contain its own SHA, and the
 # server has no .git. Deploys copy files from raw GitHub, so copy VERSION too.
-version=1.29
-build=2026-10-26
+version=1.30
+build=2026-10-29

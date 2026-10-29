@@ -70,10 +70,12 @@ try:
         "siapkan_kvb.py", "isi_template.py", "hitung_dw.py"
     ]
     assert "--bulan" not in commands[0]
-    assert commands[1][-3:] == ["--bulan", "2026-08", "--tanpa-extra-fees"]
+    assert commands[1][-4:] == ["--bulan", "2026-08", "--tanpa-extra-fees",
+                                "--settlement-rows"]
     assert commands[2][commands[2].index("--period"):] == [
         "--period", "2026-08",
         "--tanpa-extra-fees",
+        "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",
         "--warn-high-pct",
@@ -97,6 +99,8 @@ try:
     assert "--fee-currency-suffix" not in joined
     assert "--warn-high-pct" not in joined
     assert "--cny-rate-check" not in joined
+    assert "--settlement-columns" not in joined   # v1.30: KVB saja
+    assert "--settlement-rows" not in " ".join(commands[0])
 
     commands.clear()
     def fail_translate(command, **_kwargs):

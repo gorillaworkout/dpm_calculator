@@ -181,6 +181,41 @@ def laporkan_ringkasan(ring, utama, saring, bulan_arg):
               f"sumber. Status tetap dibaca dari kolom 'Status'.")
 
 
+def salin_baris(ws_d, r, hdr_d, hdr_s, row):
+    """Salin satu baris sumber ke baris r template, kolom dicocokkan lewat header."""
+    for j, h in enumerate(hdr_d, start=1):
+        if not h or norm(h) in DIHITUNG:
+            continue
+        i = hdr_s.get(kunci_hdr(h))
+        if i is not None and i < len(row):
+            ws_d.cell(r, j, row[i])
+
+
+STATUS_SELESAI = ("FINISH", "SUCCESS")     # sama dengan hitung_dw.STATUS_DIPAKAI
+
+
+def baris_settlement_saja(row, c_settle, c_status, c_pay, saring):
+    """KVB --settlement-rows: True kalau 'Settlement Date' baris ini jatuh di bulan
+    laporan dan statusnya dipakai (finish/success; sheet tanpa kolom Status = dipakai).
+
+    Baris refuse/cancel TIDAK disalin: kolom Settlement Date tidak memakainya, dan
+    kalau ikut tersalin, baris refuse bisa masuk aturan H+1 MTOATD di hitung_dw --
+    tab lain harus tetap sama persis dengan tanpa flag ini."""
+    if c_settle is None or c_settle >= len(row):
+        return False
+    d = tanggal(row[c_settle])
+    if d is None or (d.year, d.month) != tuple(saring):
+        return False
+    if c_status is not None:
+        st = norm(row[c_status]) if c_status < len(row) else ""
+        if not st and c_pay is not None and c_pay < len(row) and \
+                norm(row[c_pay]) in tgl.KATA_STATUS:
+            st = norm(row[c_pay])           # kolom bergeser (ekspor Rebate)
+        if st not in STATUS_SELESAI:
+            return False
+    return True
+
+
 def tulis_sheet_ringkasan(wb_out):
     """Sheet 'Date Check': hitungan baris per sheet, untuk hitung_dw (Missing Data)
     dan untuk orang yang memeriksa file hasil."""
@@ -352,6 +387,12 @@ def main():
     ap.add_argument("--tanpa-extra-fees", action="store_true",
                     help="Saat menggabungkan beberapa fee sheet, jangan tambahkan fallback "
                          "EXTRA_FEES milik DPM (dipakai untuk KVB).")
+    ap.add_argument("--settlement-rows", action="store_true",
+                    help="KVB (v1.30): dengan --bulan, salin JUGA baris yang tanggal "
+                         "transaksinya di luar bulan tapi 'Settlement Date'-nya di dalam "
+                         "bulan dan statusnya finish/success. Baris itu HANYA dipakai "
+                         "kolom Settlement Date di D&W Report (hitung_dw "
+                         "--settlement-columns); saldo pembuka tidak bergeser.")
     ap.add_argument("--sheet-d", help="nama sheet deposit di sumber (default: D / Deposit)")
     ap.add_argument("--sheet-w", help="nama sheet withdrawal di sumber (default: W / Withdrawal)")
     args = ap.parse_args()
@@ -471,7 +512,9 @@ def main():
 
         tak_ada = [h for h in hdr_d
                    if h and kunci_hdr(h) not in hdr_s and norm(h) not in DIHITUNG]
-        n = dilewati = 0
+        c_settle = hdr_s.get("SETTLEMENT DATE")
+        c_status = hdr_s.get("STATUS")
+        n = dilewati = n_settle = 0
         for nomor_baris, row in enumerate(baris[1:], start=2):
             if c_cur is None or c_cur >= len(row) or row[c_cur] in (None, ""):
                 continue
@@ -501,7 +544,17 @@ def main():
                     kunci = f"{d:%Y-%m}" if d else "(tanpa tanggal)"
                 bulan_ada[kunci] = bulan_ada.get(kunci, 0) + 1
                 masuk = bool(d) and (d.year, d.month) == saring
-                ring.catat(hasil, utama, masuk)
+                simpan_settle = (not masuk and d is not None and args.settlement_rows
+                                 and baris_settlement_saja(row, c_settle, c_status,
+                                                           c_pay, saring))
+                ring.catat(hasil, utama, masuk, settle_only=simpan_settle)
+                if simpan_settle:
+                    # Disalin, tapi TIDAK menggeser tgl_awal (basis saldo pembuka):
+                    # hitung_dw memakainya HANYA untuk kolom Settlement Date.
+                    n += 1
+                    n_settle += 1
+                    salin_baris(ws_d, n + 1, hdr_d, hdr_s, row)
+                    continue
                 if not masuk:
                     dilewati += 1
                     continue
@@ -515,14 +568,13 @@ def main():
             # saldo pembuka sehari terlalu jauh.
             if d and (tgl_awal[0] is None or d < tgl_awal[0]):
                 tgl_awal[0] = d
-            for j, h in enumerate(hdr_d, start=1):
-                if not h or norm(h) in DIHITUNG:
-                    continue
-                i = hdr_s.get(kunci_hdr(h))
-                if i is not None and i < len(row):
-                    ws_d.cell(n + 1, j, row[i])
+            salin_baris(ws_d, n + 1, hdr_d, hdr_s, row)
         print(f"  sheet {target}: {n:,} baris dari {nama!r}"
               + (f", {dilewati:,} di luar {args.bulan} dilewati" if dilewati else ""))
+        if n_settle:
+            print(f"             {n_settle:,} di antaranya tanggal transaksinya di luar "
+                  f"{args.bulan} tapi Settlement Date-nya di dalam -> HANYA untuk kolom "
+                  f"Settlement Date di D&W Report")
         laporkan_ringkasan(ring, utama, saring, args.bulan)
         if tak_ada:
             print(f"             kolom template yang tidak ada di sumber (dibiarkan kosong): "
