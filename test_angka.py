@@ -124,7 +124,7 @@ for teks, v in [("377233.36", 377233.36), ("377.233,36", 377233.36), ("377,233.3
     ok(teks, v, THOUSANDS)
 
 assert LABEL.startswith("DW Calculator v"), LABEL
-assert "v1.29 · 2026-10-26" in LABEL, LABEL
+assert "v1.30 · 2026-10-29" in LABEL, LABEL
 
 # ---------------------------------------------------------------- hitung_dw
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")

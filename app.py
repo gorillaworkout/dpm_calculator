@@ -72,7 +72,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.29 · 2026-10-26' (no date part when build is empty)."""
+    """'DW Calculator v1.30 · 2026-10-29' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -298,10 +298,13 @@ CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # ikut sejak isi_template.py karena tahap itu bisa menggabungkan beberapa fee sheet.
 # Setiap nilai adalah tuple argumen CLI, hanya untuk company KVB.
 # DPM tidak menerima flag ini.
+# v1.30: --settlement-rows / --settlement-columns = kolom CRM USD, Transactions dan
+# CRM average berbasis Settlement Date di D&W Report (KVB saja; tab lain tidak berubah).
 KVB_ARG = {
-    "isi_template.py": ("--tanpa-extra-fees",),
+    "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows"),
     "hitung_dw.py": (
         "--tanpa-extra-fees",
+        "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",
         "--warn-high-pct",
@@ -625,6 +628,12 @@ KVB_DOC = {
         "computed it, otherwise that gateway's same-day weighted USD/Transaction, "
         "otherwise its monthly weighted ratio, otherwise the run's CNY median ratio. "
         "Legend names the rate used for each transfer.",
+        "The D&amp;W Report shows CRM USD, Transactions and CRM average twice: on the "
+        "Paid Date (deposit) / Completed Date (withdrawal) basis, and on the Settlement "
+        "Date basis right next to it. The Settlement Date columns include finish/success "
+        "rows whose Settlement Date is in the month even when they were paid or completed "
+        "the next month. Those rows are used only in those columns and are listed on "
+        "Missing Data. Every other number and sheet stays on the Paid / Completed Date basis.",
     ],
     "hasil": "One finished <code>.xlsx</code> D&amp;W workbook.",
     "sheets": SHEET_PENUH,

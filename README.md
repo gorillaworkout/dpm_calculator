@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.29 · 2026-10-26`.
+required) show the running version, for example `DW Calculator v1.30 · 2026-10-29`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -206,6 +206,43 @@ terpisah seperti di pivot Excel).
 | `Xero average` | `Transactions ÷ Xero USD` |
 | `Recorded in Xero` | dikosongkan — diisi manual |
 | `Rounding Adjustment` | `+Xero USD` |
+
+**KVB: kolom basis Settlement Date (v1.30, `--settlement-columns`)**
+
+Hanya untuk KVB (`KVB_ARG` di `app.py`: `isi_template.py --settlement-rows` +
+`hitung_dw.py --settlement-columns`). DPM tidak berubah.
+
+Deposit: `A Currency | B Payment Gateway | C CRM USD (Paid Date) | D CRM USD (Settlement Date) |
+E TRANSACTIONS (Paid Date) | F TRANSACTIONS (Settlement Date) | G Xero USD | H Total FE Gain/-Loss (USD) |
+I CRM Average Rate (Paid Date) | J CRM Average Rate (Settlement Date) | K Xero average Rate |
+L Recorded in Xero | M Rounding Adjustment` — biru-kelabu A–G, hijau H–M.
+
+Withdrawal: `A | B | C CRM USD (Completed Date) | D CRM USD (Settlement Date) |
+E Handling Charges Income | F Transactions (Completed Date) | G Transactions (Settlement Date) |
+H Xero USD | I Total FE Gain/-Loss (USD) | J CRM average (Completed Date) |
+K CRM average (Settlement Date) | L Xero average | M Recorded in Xero | N Rounding Adjustment` —
+biru-kelabu A–H, hijau I–N.
+
+| Kolom | Rumus |
+|---|---|
+| `CRM USD (Settlement Date)` | jumlah `USD`, baris finish/success yang `Settlement Date`-nya di bulan laporan |
+| `Transactions (Settlement Date)` | jumlah `Transaction`, basis yang sama |
+| `CRM average (Settlement Date)` | `Σ Transactions (Settlement) ÷ Σ CRM USD (Settlement)`, kosong kalau 0 |
+
+- Basis Settlement **ikut memuat** baris yang Paid / Completed Date-nya di bulan
+  depan (atau bulan lalu) asal ada di file. `isi_template.py --settlement-rows`
+  menyalinnya (tanpa menggeser saldo pembuka); `hitung_dw.py` memakainya **hanya**
+  untuk kolom Settlement — records, pivot lama, MTOATD, Channel Balance, J Wallet,
+  D&W Detail tetap sama persis (lihat catatan 3 Sep 2026 di `process_sheet`).
+  Di sheet D/W baris itu tetap ada, kolom hitungannya kosong/abu-abu.
+- `Settlement Date` kosong → hanya di basis lama, dilaporkan di Missing Data 7b.
+- Rebate Withdrawal memakai `Settlement Date`-nya sendiri.
+- Xero USD, FE, Xero average, Recorded in Xero, Rounding, Handling Charges tetap basis lama.
+- Gateway yang hanya ada di basis Settlement dapat baris sendiri (kolom lain 0).
+- Missing Data bagian 7: daftar baris khusus Settlement (7a), Settlement kosong (7b),
+  Settlement di bulan lain (7c), dan cek deposit Settlement USD vs MTOATD CRM入金
+  per currency (7d, informasi; selisih yang tidak terjelaskan = peringatan).
+  Date Check menghitungnya sebagai "kept for Settlement Date columns only".
 
 Judul, label, warna header, fill, format akuntansi, dan lebar kolom disamakan
 dengan report aslinya. Periode di bawah judul bagian diambil dari bulan yang
