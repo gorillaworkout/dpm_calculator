@@ -46,11 +46,11 @@ assert not re.search(r"\b[0-9a-f]{40}\b", (ROOT / "VERSION").read_text()), "no S
 p = TMP / "V1"
 assert webapp.baca_versi(TMP / "missing") == {"version": "unknown", "build": ""}
 assert webapp.label_versi({"version": "unknown", "build": ""}) == "DW Calculator version unknown"
-p.write_text("1.30\n", encoding="utf-8")
-assert webapp.baca_versi(p) == {"version": "1.30", "build": ""}
-assert webapp.label_versi(webapp.baca_versi(p)) == "DW Calculator v1.30"
-p.write_text("# c\nversion = 1.31\nbuild= 2026-11-01\nother=x\n", encoding="utf-8")
-assert webapp.baca_versi(p) == {"version": "1.31", "build": "2026-11-01"}
+p.write_text("1.31\n", encoding="utf-8")
+assert webapp.baca_versi(p) == {"version": "1.31", "build": ""}
+assert webapp.label_versi(webapp.baca_versi(p)) == "DW Calculator v1.31"
+p.write_text("# c\nversion = 1.32\nbuild= 2026-11-01\nother=x\n", encoding="utf-8")
+assert webapp.baca_versi(p) == {"version": "1.32", "build": "2026-11-01"}
 p.write_bytes(b"\xff\xfe\x00bad")
 assert webapp.baca_versi(p)["version"] == "unknown"
 print("OK VERSION file")

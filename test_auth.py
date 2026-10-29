@@ -6,12 +6,15 @@ import tempfile
 import threading
 from pathlib import Path
 
-os.environ["DW_AUTH_DB"] = str(Path(tempfile.mkdtemp()) / "t.db")
-os.environ["DW_ADMIN_USER"] = "boss"
-os.environ["DW_ADMIN_PASS"] = "bosspassword1"
+import testkit as T
+
+# Own temp users DB, session key and jobs dir; never the real users.db/session.key.
+TEST_ROOT = T.hermetic_env("boss", "bosspassword1")
 
 from app import app  # noqa: E402  (env must be set before import)
 import auth  # noqa: E402
+
+T.assert_isolated(TEST_ROOT)
 
 app.config["TESTING"] = True
 c = app.test_client()

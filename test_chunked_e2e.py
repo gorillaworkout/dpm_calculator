@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
-"""End-to-end: a real Deals History file uploaded in pieces must produce the same
-workbook as a plain upload. Run: python3 test_chunked_e2e.py
+"""End-to-end: a Deals History file uploaded in pieces must produce a complete
+workbook. Run: python3 test_chunked_e2e.py
+
+Self-contained: the ~12.5 MB Deals History CSV is synthetic (testkit.py), so the
+test runs everywhere and forces several 5 MB pieces.
 """
 import base64
 import io
-import os
-import tempfile
 import time
-from pathlib import Path
+import zipfile
 
-TEST_ROOT = Path(tempfile.mkdtemp())
-os.environ["DW_AUTH_DB"] = str(TEST_ROOT / "t.db")
-os.environ["DW_JOB_DIR"] = str(TEST_ROOT / "jobs")
-os.environ["DW_ADMIN_USER"] = "tester"
-os.environ["DW_ADMIN_PASS"] = "tester-password-1"
+from openpyxl import load_workbook
+
+import testkit as T
+
+TEST_ROOT = T.hermetic_env("tester", "tester-password-1")
 
 from app import app  # noqa: E402
 
-FIXTURE = Path("/Users/bayudarmawan/Documents/Dupoin/zern/"
-               "31 Jul_Deals History 2026_08_07 12_07_27 (1).csv")
-if not FIXTURE.is_file():
-    print("SKIP chunked e2e — fixture not present on this machine")
-    raise SystemExit(0)
+T.assert_isolated(TEST_ROOT)
+LOGINS = tuple(range(100000, 101400))          # 1,400 accounts x 31 days x 3 deals
+FIXTURE = T.write_deals_csv(TEST_ROOT / "31 Jul_Deals History synthetic.csv", logins=LOGINS)
+EXPECTED = T.deals_expected(LOGINS)
 
 app.config["TESTING"] = True
 c = app.test_client()
@@ -60,5 +60,14 @@ else:
 
 d = c.get(f"/job/{job_id}/download")
 assert d.status_code == 200, d.status_code
-assert d.data[:2] == b"PK", "the result is not an xlsx file"
+assert d.data[:2] == b"PK", "the result is not a ZIP/xlsx file"
+assert seq >= 3, f"only {seq} chunks; the fixture must span several pieces"
+# Nothing may be lost or duplicated across piece boundaries.
+with zipfile.ZipFile(io.BytesIO(d.data)) as archive:
+    wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True)
+    try:
+        rows = sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1
+    finally:
+        wb.close()
+assert rows == EXPECTED["daily_rows"], (rows, EXPECTED)
 print(f"OK chunked e2e — {len(d.data):,} bytes result from {seq} chunks")

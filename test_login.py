@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """Session login checks. Run: python3 test_login.py"""
-import os
-import tempfile
-from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
-os.environ["DW_AUTH_DB"] = str(Path(tempfile.mkdtemp()) / "t.db")
-os.environ["DW_ADMIN_USER"] = "boss"
-os.environ["DW_ADMIN_PASS"] = "bosspassword1"
+import testkit as T
+
+# Own temp users DB, session key and jobs dir; never the real users.db/session.key.
+TEST_ROOT = T.hermetic_env("boss", "bosspassword1")
 
 from app import app  # noqa: E402
+
+T.assert_isolated(TEST_ROOT)
 
 app.config["TESTING"] = True
 HTML = {"Accept": "text/html,application/xhtml+xml"}
@@ -35,7 +36,10 @@ assert b"Dupoin DPM Tools" in r.data
 
 # where the user was heading is remembered
 r = c.get("/tool/segregate", headers=HTML)
-assert "next=/tool/segregate" in r.headers["Location"], r.headers["Location"]
+# Compare the decoded query: Werkzeug versions differ on escaping "/" (%2F).
+loc = urlsplit(r.headers["Location"])
+assert loc.path == "/login", r.headers["Location"]
+assert parse_qs(loc.query).get("next") == ["/tool/segregate"], r.headers["Location"]
 
 # --- scripts still get a plain 401, not an HTML redirect -------------------
 r = client().get("/tool/segregate")

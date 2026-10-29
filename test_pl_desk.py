@@ -3,30 +3,33 @@
 
     python3 test_pl_desk.py
 
-The August fixtures live outside the repo (private financial files). The test
-looks for them under the cloud-agent uploads directory.
+Self-contained: the August 2026 FinanceOS PDF, its Excel export and the Metabase
+workbook are synthetic and generated at test time by testkit.py (no private
+financial files, nothing outside the repo). Their made-up numbers reproduce the
+figures asserted below.
 """
 import io
-import os
 import re
 import shutil
-import tempfile
 import time
 from pathlib import Path
 
 import pypdfium2 as pdfium
 from openpyxl import Workbook, load_workbook
 
-UPLOADS = Path("/home/ubuntu/.cursor/projects/workspace/uploads")
-PDF = UPLOADS / "087abc019a138ade51dea1f103695e4671438ce6865273e326b4c993f43cd353_d196.pdf"
-META = UPLOADS / "473f6ca6e9dd2fd09f8c1f5e763368769f77f010f04ab850b5f22e7b3c58c377_ea69.xlsx"
-EXCEL = UPLOADS / "92eb037e2b8a257cabf17fadf0e8c49f435650278aa3ec45250a3be21cdff61b_1970.xlsx"
+import testkit as T
+
+ROOT = T.hermetic_env()
+TMP = ROOT / "pl-desk"
+TMP.mkdir()
+PDF = T.write_pl_finance_pdf(TMP / "FinanceOS Aug 2026.pdf")
+META = T.write_pl_metabase(TMP / "desk-rebate.xlsx")
+EXCEL = T.write_pl_finance_excel(TMP / "FinanceOS Aug 2026.xlsx")
 for fixture in (PDF, META, EXCEL):
     assert fixture.is_file(), fixture
 
-import pl_desk as P
+import pl_desk as P  # noqa: E402
 
-TMP = Path(tempfile.mkdtemp(prefix="pl-desk-test-"))
 AMT_TAIL = re.compile(r"(\(?-?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}\)?)(?!.*\d)")
 
 
@@ -394,12 +397,10 @@ inspect(P.build_report([EXCEL, META], TMP / "aug.xlsx.xlsx"), "excel fallback", 
 
 
 # ---------------------------------------------------------------- web wiring
-os.environ["DW_AUTH_DB"] = str(TMP / "users.db")
-os.environ["DW_JOB_DIR"] = str(TMP / "jobs")
-os.environ["DW_ADMIN_USER"] = "tester"
-os.environ["DW_ADMIN_PASS"] = "tester-password-1"
-
+# hermetic_env() above already pointed DW_* at ROOT (assigned, never inherited).
 import app as A  # noqa: E402
+
+T.assert_isolated(ROOT)
 
 assert "pl-desk" not in A.KVB_TOOLS
 assert A.TOOLS["pl-desk"][2] == ("pl_desk.py",)

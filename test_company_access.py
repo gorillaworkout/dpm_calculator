@@ -4,14 +4,16 @@ import base64
 import io
 import os
 import sqlite3
-import tempfile
 import time
 import zipfile
-from pathlib import Path
 
 from werkzeug.security import generate_password_hash
 
-TMP = Path(tempfile.mkdtemp())
+import testkit as T
+
+# Own temp jobs dir and no bootstrap admin; the legacy users DB is built below
+# inside the same temp root. Never the real users.db/session.key.
+TMP = T.hermetic_env(admin=False)
 DB = TMP / "legacy.db"
 admin_hash = generate_password_hash("admin-password-1")
 user_hash = generate_password_hash("user-password-1")
@@ -26,11 +28,11 @@ with sqlite3.connect(DB) as con:
                 ("legacy-user", user_hash, 0, time.time(), None))
 
 os.environ["DW_AUTH_DB"] = str(DB)
-os.environ.pop("DW_ADMIN_USER", None)
-os.environ.pop("DW_ADMIN_PASS", None)
 
 import auth  # noqa: E402
 from app import JOBS, TOOLS, KVB_TOOLS, _read_state, _write_state, app  # noqa: E402
+
+T.assert_isolated(TMP)
 
 assert KVB_TOOLS["segregate"][2] == TOOLS["segregate"][2] == ("deal_segregator.py",)
 assert "pl-desk" not in KVB_TOOLS and "pl-desk" in TOOLS
