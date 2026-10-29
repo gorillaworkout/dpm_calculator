@@ -255,12 +255,11 @@ with TemporaryDirectory() as tmp:
     assert teks.index("STOP:") < teks.index("Traceback")
 print("OK unexpected errors become STOP with file and row")
 
-import os
-import tempfile
-_akar = Path(tempfile.mkdtemp())
-os.environ.setdefault("DW_AUTH_DB", str(_akar / "auth.db"))
-os.environ.setdefault("DW_JOB_DIR", str(_akar / "jobs"))
+import testkit as T
+# Assign (not setdefault): an exported server DW_* env must never leak in.
+_akar = T.hermetic_env(admin=False)
 from app import _pesan_gagal_job, _pisah_traceback
+T.assert_isolated(_akar)
 
 jejak = (
     "STOP: RuntimeError in 'deals.csv', row 9: sensor failed\n"

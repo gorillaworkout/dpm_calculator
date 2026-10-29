@@ -231,12 +231,11 @@ def test_rendered_page_script_parses():
     if not NODE:
         print("SKIP: node not installed")
         return
-    tmp = Path(tempfile.mkdtemp())
-    os.environ.setdefault("DW_AUTH_DB", str(tmp / "t.db"))
-    os.environ.setdefault("DW_JOB_DIR", str(tmp / "jobs"))
-    os.environ.setdefault("DW_ADMIN_USER", "tester")
-    os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+    import testkit as T
+    # Assign (not setdefault): an exported server DW_* env must never leak in.
+    tmp = T.hermetic_env("tester", "tester-password-1")
     from app import app
+    T.assert_isolated(tmp)
     app.config["TESTING"] = True
     c = app.test_client()
     c.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(

@@ -1,17 +1,16 @@
 """Per-run file limit: 65 files accepted, 71 rejected; every upload field counts."""
 import io
-import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-_ROOT = Path(tempfile.mkdtemp())
-os.environ.setdefault("DW_AUTH_DB", str(_ROOT / "test-users.db"))
-os.environ.setdefault("DW_JOB_DIR", str(_ROOT / "jobs"))
-os.environ.setdefault("DW_ADMIN_USER", "tester")
-os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+import testkit as T
+
+# Assign (not setdefault): an exported server DW_* env must never leak in.
+_ROOT = T.hermetic_env("tester", "tester-password-1")
 import app as web  # noqa: E402
+T.assert_isolated(_ROOT)
 import chunked  # noqa: E402
 import deal_segregator  # noqa: E402
 from upload_limits import MAX_FILES  # noqa: E402

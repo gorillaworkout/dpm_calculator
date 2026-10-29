@@ -11,12 +11,14 @@ from pathlib import Path
 
 from openpyxl import Workbook
 
-os.environ.setdefault("DW_AUTH_DB", str(Path(tempfile.mkdtemp()) / "test-users.db"))
-os.environ.setdefault("DW_ADMIN_USER", "tester")
-os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+import testkit as T
+
+# Assign (not setdefault): an exported server DW_* env must never leak in.
+TEST_ROOT = T.hermetic_env("tester", "tester-password-1")
 AUTH = "Basic " + base64.b64encode(b"tester:tester-password-1").decode()
 
 import app as web
+T.assert_isolated(TEST_ROOT)
 import hitung_dw as h
 from mtoatd_spec import Indeks, hitung
 

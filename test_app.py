@@ -1,13 +1,17 @@
-"""Smoke test: python3 test_app.py  (butuh 'Template D&W.xlsx' + 'D&W JUN 2026.xlsx')
+"""Smoke test: python3 test_app.py
+
+Self-contained: every input is synthetic and generated at test time by testkit.py
+(D&W source, Deals History CSV, Client Equity FX, and an empty 'Template D&W.xlsx'
+built with buat_template.py). Nothing outside the repo is read, the real users.db /
+session.key are never touched, and no real client data is needed.
 
 Model app-nya ASINKRON sejak 28 Aug 2026: POST -> 303 ke /job/<id>, kerjanya di
 thread, lalu /job/<id>/download. Jadi tes ini POST, ambil job id dari header
 Location, tunggu state 'done'/'failed', baru unduh.
 """
 import io
-import os
 import shutil
-import tempfile
+import subprocess
 import time
 import zipfile
 from html.parser import HTMLParser
@@ -17,26 +21,46 @@ from openpyxl import load_workbook
 
 # Every route is behind Basic Auth. Use a throwaway user database and send the
 # credentials on every request, so this file keeps testing the tools themselves.
-TEST_ROOT = Path(tempfile.mkdtemp())
-os.environ.setdefault("DW_AUTH_DB", str(TEST_ROOT / "test-users.db"))
-os.environ.setdefault("DW_JOB_DIR", str(TEST_ROOT / "jobs"))
-os.environ.setdefault("DW_ADMIN_USER", "tester")
-os.environ.setdefault("DW_ADMIN_PASS", "tester-password-1")
+# Assigned, never setdefault: an exported server DW_* must not leak in.
+import testkit as T
 
-import app as A
-from app import JOBS, TOOLS, app
+TEST_ROOT = T.hermetic_env("tester", "tester-password-1")
+
+import app as A  # noqa: E402
+from app import JOBS, TOOLS, app  # noqa: E402
+
+T.assert_isolated(TEST_ROOT)
 
 assert app.config["MAX_CONTENT_LENGTH"] == 1024 * 1024 * 1024
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 c = app.test_client()
 c.environ_base["HTTP_AUTHORIZATION"] = "Basic " + __import__("base64").b64encode(
     b"tester:tester-password-1").decode()
-HERE = Path(__file__).parent
-DEALS_FIXTURE = Path(
-    "/Users/bayudarmawan/Documents/Dupoin/zern/"
-    "31 Jul_Deals History 2026_08_07 12_07_27 (1).csv"
-)
-EQUITY_FIXTURE = Path("/Users/bayudarmawan/Documents/Dupoin/zern/Client Equity - FX.xlsx")
+FIXTURES = TEST_ROOT / "fixtures"
+FIXTURES.mkdir()
+DEALS_FIXTURE = T.write_deals_csv(FIXTURES / "31 Jul_Deals History 2026_08_07 12_07_27.csv")
+EQUITY_FIXTURE = T.write_equity_fx(FIXTURES / "Client Equity - FX.xlsx")
+DAILY_ROWS = T.DEALS_EXPECTED["daily_rows"]
+KEPT = T.DEALS_EXPECTED["kept"]
+DW_SOURCE = T.write_dpm_dw_source(FIXTURES / "D&W JUN 2026.xlsx", 2026, 6)
+TEMPLATE = T.build_template(DW_SOURCE, FIXTURES / "Template D&W.xlsx")
+
+# The private 'Template D&W.xlsx' is not in the repo. isi_template.py defaults to
+# BASE/'Template D&W.xlsx', so hand every job the generated template instead.
+_real_run = subprocess.run
+COMMANDS = []          # every script command line the jobs ran, for argument checks
+
+
+def _run_with_template(cmd, *args, **kwargs):
+    if isinstance(cmd, list):
+        COMMANDS.append([str(part) for part in cmd])
+    if (isinstance(cmd, list) and len(cmd) > 1 and str(cmd[1]).endswith("isi_template.py")
+            and "-t" not in cmd and "--template" not in cmd):
+        cmd = [*cmd, "-t", str(TEMPLATE)]
+    return _real_run(cmd, *args, **kwargs)
+
+
+A.subprocess.run = _run_with_template
 
 # Setiap upload WAJIB menyertakan bulan laporan (28 Aug 2026 -> 31 Aug 2026).
 BULAN = {"bulan": "6", "tahun": "2026"}
@@ -184,7 +208,7 @@ finally:
         shutil.rmtree(JOBS / unicode_job_id, ignore_errors=True)
         A._state_path(unicode_job_id).unlink(missing_ok=True)
 
-assert DEALS_FIXTURE.is_file(), f"real Deals History fixture missing: {DEALS_FIXTURE}"
+assert DEALS_FIXTURE.is_file(), f"synthetic Deals History fixture missing: {DEALS_FIXTURE}"
 job_id, info = kirim_segregate([(DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name)])
 assert info["state"] == "done", info
 assert info["name"].endswith("-hasil.zip"), info["name"]
@@ -196,7 +220,7 @@ with zipfile.ZipFile(io.BytesIO(r.data)) as archive:
     wb = load_workbook(io.BytesIO(archive.read("Deals - Daily.xlsx")), read_only=True, data_only=True)
     try:
         assert wb.sheetnames == ["Daily", "Daily - In", "Verifikasi"]
-        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == 9418
+        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == DAILY_ROWS
         assert sum(1 for _ in wb["Daily - In"].iter_rows(values_only=True)) > 1
     finally:
         wb.close()
@@ -215,7 +239,7 @@ with zipfile.ZipFile(io.BytesIO(fx_response.data)) as archive:
     try:
         headers = [cell.value for cell in wb["Daily"][1]]
         assert headers[-4:] == ["Commission (USD)", "Fee (USD)", "Swap (USD)", "Profit (USD)"]
-        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == 9418
+        assert sum(1 for _ in wb["Daily"].iter_rows(values_only=True)) - 1 == DAILY_ROWS
     finally:
         wb.close()
 
@@ -224,15 +248,16 @@ job_id, info = kirim_segregate([
     (DEALS_FIXTURE.open("rb"), DEALS_FIXTURE.name),
 ])
 assert info["state"] == "done", info
-assert "kept: 209838" in (info["log"] or ""), info["log"]
+# the same file twice: duplicates are dropped, so 'kept' equals ONE file's unique 'out' rows
+assert f"kept: {KEPT}" in (info["log"] or ""), info["log"]
 assert c.get(f"/job/{job_id}/download").data[:2] == b"PK"
 
 # --- yang harus DITOLAK sebelum job dibuat ---------------------------------
 assert c.post("/tool/dw", data={"file": (io.BytesIO(b"x"), "a.txt"), **BULAN}
               ).status_code == 400, "file bukan .xlsx harus ditolak"
 
-src = HERE / "D&W JUN 2026.xlsx"
-assert src.is_file(), "butuh 'D&W JUN 2026.xlsx' berisi data untuk tes ini"
+src = DW_SOURCE
+assert src.is_file(), "synthetic 'D&W JUN 2026.xlsx' missing"
 
 r = c.post("/tool/dw", data={"file": (src.open("rb"), src.name)})
 assert r.status_code == 400 and b"report month" in r.data, \
@@ -242,17 +267,22 @@ r = c.post("/tool/dw", data={"file": (src.open("rb"), src.name),
 assert r.status_code == 400, "bulan 13 harus ditolak"
 
 # --- template KOSONG -> pesan jelas, bukan 500 mentah ----------------------
-tpl = HERE / "Template D&W.xlsx"
+tpl = TEMPLATE
 _id, state, info = kirim(tpl.name, tpl.open("rb"), **BULAN)
 assert state == "failed", state
 assert "TIDAK ADA BARIS DATA" in (info["log"] or ""), (info["log"] or "")[:400]
 
 # --- file yang ADA datanya -> jadi, dan bulannya masuk nama file -----------
+COMMANDS.clear()
 job_id, state, info = kirim(src.name, src.open("rb"), **BULAN)
 assert state == "done", (state, info.get("error"), (info.get("log") or "")[-600:])
 assert info["periode"] == "2026-06", info["periode"]
 assert "Jun 2026" in info["name"], info["name"]
-assert "--period 2026-06" in info["log"] or "2026-06" in info["log"]
+# The chosen month must reach both scripts as an argument, and hitung_dw must say so.
+ran = {Path(cmd[1]).name: cmd for cmd in COMMANDS}
+assert ran["isi_template.py"][ran["isi_template.py"].index("--bulan") + 1] == "2026-06", ran
+assert ran["hitung_dw.py"][ran["hitung_dw.py"].index("--period") + 1] == "2026-06", ran
+assert "Periode: Jun 2026" in info["log"], info["log"]
 
 r = c.get(f"/job/{job_id}/download")
 assert r.status_code == 200, r.status_code
@@ -267,7 +297,9 @@ assert b'name="saldo_jw"' in halaman.data, "field saldo pembuka hilang dari hala
 assert b'class="prevlbl"' in halaman.data, "label bulan sebelumnya hilang"
 assert b'name="saldo_channel"' in halaman.data, "textarea saldo channel hilang"
 assert b"out.innerHTML" not in halaman.data, "upload error DOM XSS"
-assert b"function sendChunk" in halaman.data and b"attempt < 3" in halaman.data, \
+# v1.24 moved chunk retries into makeChunkSender (exponential backoff, RETRY.max tries).
+assert b"var sendChunk = makeChunkSender(" in halaman.data, "chunk sender missing"
+assert b"var RETRY = {max: 8," in halaman.data and b"if (n > RETRY.max) return fail(err);" in halaman.data, \
     "chunk upload must retry transient failures"
 
 r = c.post("/tool/dw", data={"file": (src.open("rb"), src.name),
@@ -312,4 +344,5 @@ if staging.is_dir():
     tertinggal = list(staging.iterdir())
     assert not tertinggal, f"staging bocor: {tertinggal}"
 
+subprocess.run = _real_run
 print("OK", len(TOOLS), "menu,", f"{hasil_jun:,}", "bytes hasil Jun 2026")
