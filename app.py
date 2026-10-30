@@ -72,7 +72,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.30 · 2026-10-29' (no date part when build is empty)."""
+    """'DW Calculator v1.32 · 2026-10-30' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -300,6 +300,8 @@ CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # DPM tidak menerima flag ini.
 # v1.30: --settlement-rows / --settlement-columns = kolom CRM USD, Transactions dan
 # CRM average berbasis Settlement Date di D&W Report (KVB saja; tab lain tidak berubah).
+# v1.32: --cny-balance-usdt = kolom CNY Rate | Balance (USDT) | Rate source di baris
+# CNY Payment Channel Balance, rate dari sheet 'CNY RATE' di file yang diupload.
 KVB_ARG = {
     "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows"),
     "hitung_dw.py": (
@@ -309,6 +311,7 @@ KVB_ARG = {
         "--fee-currency-suffix",
         "--warn-high-pct",
         "--cny-rate-check",
+        "--cny-balance-usdt",
     ),
 }
 # The typed balance is read by angka.parse_number in THOUSANDS mode, exactly as
@@ -608,12 +611,18 @@ DOC = {
 }
 
 KVB_HINT = ("Upload one KVB Plus workbook (.xlsx/.xlsm) containing Transfer, D, W, Xero, "
-            "and Handing Fee or Handling Fee sheets.")
+            "and Handing Fee or Handling Fee sheets, plus a CNY RATE sheet "
+            "(Date | TD | Rate) for the CNY balance in USDT.")
 KVB_DOC = {
     "judul": "KVB Generate D&W — one monthly run",
     "ringkas": "Upload the KVB Plus workbook. The app translates KVB fields, prepares a clean D&W template, then calculates the finished report.",
     "siapkan": [
         "One KVB Plus workbook with <code>Transfer</code>, <code>D</code>, <code>W</code>, <code>Xero</code>, and <code>Handing Fee</code> or <code>Handling Fee</code> sheets.",
+        "A <code>CNY RATE</code> sheet in the same workbook: columns <code>Date</code> | "
+        "<code>TD</code> | <code>Rate</code>, one row per day per CNY gateway, Rate = CNY "
+        "per 1 USDT (for example <code>2026-07-01 | CHIPPAY | 6.74</code>). The "
+        "downloadable KVB template already has this sheet. Without it the report still "
+        "runs and the USDT columns stay blank.",
         "The report month. The uploaded workbook is never modified.",
     ],
     "langkah": [
@@ -634,6 +643,12 @@ KVB_DOC = {
         "rows whose Settlement Date is in the month even when they were paid or completed "
         "the next month. Those rows are used only in those columns and are listed on "
         "Missing Data. Every other number and sheet stays on the Paid / Completed Date basis.",
+        "Every CNY row on <code>Payment Channel Balance</code> (opening and daily) also "
+        "shows <code>CNY Rate</code>, <code>Balance (USDT)</code> = Balance ÷ CNY Rate, and "
+        "<code>Rate source</code>, between Balance and Status. The rate is the "
+        "<code>CNY RATE</code> row of that gateway and date. A date with no row uses the "
+        "nearest earlier date (marked carried). A gateway with no rows stays blank. "
+        "Missing Data section 8 lists every carried or blank date.",
     ],
     "hasil": "One finished <code>.xlsx</code> D&amp;W workbook.",
     "sheets": SHEET_PENUH,
