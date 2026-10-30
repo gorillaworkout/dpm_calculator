@@ -188,14 +188,18 @@ def salin_dengan_alias(ws_src, wb_out, nama_sheet, alias, kolom_sumber_sn=None,
     # isi_template.py menganggapnya "tanpa tanggal" dan membuang barisnya.
     kol_tgl = [i for i, h in enumerate(header) if "DATE" in norm(h)]
     n = 0
-    for row in rows:
+    for baris_src, row in enumerate(rows, start=2):
+        # Baris kosong total (mis. baris 2 template yang cuma berisi format
+        # tanggal) tidak disalin dan tidak dihitung.
+        if all(v is None or (isinstance(v, str) and not v.strip()) for v in row):
+            continue
         if kol_tgl:
             row = list(row)
             for i in kol_tgl:
                 if i < len(row):
                     row[i] = serial_ke_tanggal(row[i])
                     if tanggal_aneh_out is not None and tanggal_aneh(row[i]):
-                        tanggal_aneh_out.append((nama_sheet, n + 2, header[i], row[i]))
+                        tanggal_aneh_out.append((nama_sheet, baris_src, header[i], row[i]))
         if kolom_gateway is not None and peta_gw is not None and kolom_gateway < len(row):
             row = list(row)
             row[kolom_gateway] = kanon_gateway(row[kolom_gateway], peta_gw)
@@ -216,8 +220,35 @@ def salin_apa_adanya(ws_src, wb_out, nama_sheet):
     n = 0
     for row in ws_src.iter_rows(values_only=True):
         ws_out.append(row)
-        n += 1
+        if any(v is not None and not (isinstance(v, str) and not v.strip()) for v in row):
+            n += 1        # baris yang cuma berisi format (template) tidak dihitung
     return max(n - 1, 0)
+
+
+_HEADER_CNY_RATE = {"DATE", "TANGGAL", "TD", "GATEWAY", "PAYMENTGATEWAY", "PAYMENTCHANNEL",
+                    "CHANNEL", "RATE", "CNYRATE"}
+
+
+def hitung_baris_cny_rate(ws):
+    """Jumlah baris rate di sheet CNY RATE: hanya kolom Date | TD | Rate yang
+    dihitung, jadi blok contoh di kolom E-G template tidak ikut terhitung."""
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return 0
+    kol = [i for i, v in enumerate(rows[0])
+           if v is not None and norm(v).replace(" ", "") in _HEADER_CNY_RATE]
+    if not kol:
+        return max(len(rows) - 1, 0)
+    return sum(1 for r in rows[1:]
+               if any(i < len(r) and r[i] not in (None, "") for i in kol))
+
+
+def cari_sheet_cny_rate(wb):
+    """Sheet 'CNY RATE' (v1.32): huruf besar/kecil dan spasi diabaikan."""
+    for x in wb.sheetnames:
+        if norm(x).replace(" ", "") == "CNYRATE":
+            return x
+    return None
 
 
 def proses(path_in: Path, path_out: Path) -> dict:
@@ -281,12 +312,20 @@ def proses(path_in: Path, path_out: Path) -> dict:
     n_ftt = salin_apa_adanya(wb_src[nama_ftt], wb_out, "Fund Transfer Table")
     n_fee = salin_dengan_alias(wb_src[nama_fee], wb_out, "D&W FEE", FEE_ALIAS,
                                kolom_gateway=i_gw_fee, peta_gw=peta_gw)
+    # CNY RATE (opsional): disalin apa adanya; hitung_dw.py --cny-balance-usdt
+    # mencari kolom Date | TD | Rate lewat nama header-nya.
+    nama_cny = cari_sheet_cny_rate(wb_src)
+    n_cny = None
+    if nama_cny:
+        salin_apa_adanya(wb_src[nama_cny], wb_out, "CNY RATE")
+        n_cny = hitung_baris_cny_rate(wb_out["CNY RATE"])
 
     path_out.parent.mkdir(parents=True, exist_ok=True)
     wb_out.save(path_out)
     wb_src.close()
 
     ringkas = {"d": n_d, "w": n_w, "xero": n_xero, "ftt": n_ftt, "fee": n_fee,
+               "cny_rate": n_cny,
                "source_name_dinormalisasi": i_sn_w is not None,
                "gateway_digabung": digabung, "tanggal_aneh": aneh}
 
@@ -299,6 +338,11 @@ def proses(path_in: Path, path_out: Path) -> dict:
     print(f"  sheet 'Xero'                (dari '{nama_xero}')              : {n_xero:,} baris")
     print(f"  sheet 'Fund Transfer Table' (dari '{nama_ftt}')              : {n_ftt:,} baris")
     print(f"  sheet 'D&W FEE'             (dari '{nama_fee}')          : {n_fee:,} baris")
+    if nama_cny:
+        print(f"  sheet 'CNY RATE'            (dari '{nama_cny}')          : {n_cny:,} baris")
+    else:
+        print("  sheet 'CNY RATE'            : TIDAK ADA -- kolom Balance (USDT) di "
+              "Payment Channel Balance akan kosong")
     for kanon, varian in sorted(digabung.items()):
         print(f"  gateway digabung (huruf besar/kecil & spasi diabaikan): "
               f"{' / '.join(repr(x) for x in varian)} -> {kanon!r}")

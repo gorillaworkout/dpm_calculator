@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.31 · 2026-10-29`.
+required) show the running version, for example `DW Calculator v1.32 · 2026-10-30`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.31)
+### Tests (`test_*.py`, v1.32)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -272,6 +272,33 @@ biru-kelabu A–H, hijau I–N.
   Settlement di bulan lain (7c), dan cek deposit Settlement USD vs MTOATD CRM入金
   per currency (7d, informasi; selisih yang tidak terjelaskan = peringatan).
   Date Check menghitungnya sebagai "kept for Settlement Date columns only".
+
+**KVB: Balance (USDT) di Payment Channel Balance (v1.32, `--cny-balance-usdt`)**
+
+Hanya untuk KVB (`KVB_ARG` di `app.py`). DPM tidak berubah: tanpa flag, sheet
+Payment Channel Balance tetap 11 kolom.
+
+- Sumber rate: sheet **`CNY RATE`** di file upload KVB yang sama, kolom
+  `Date | TD | Rate` (Rate = CNY per 1 USDT, mis. 6.74). Nama sheet dan header
+  tidak peka huruf besar/kecil dan spasi (`cny rate`, ` DATE `). TD dicocokkan
+  ke gateway lewat `kunci_channel` (`chip pay` = `ChipPay` = `CHIPPAY`). Tanggal
+  boleh tanggal Excel atau teks (`2026-07-01`).
+- Tiga kolom disisipkan di antara `Balance` dan `Status` pada **setiap baris CNY**
+  (saldo pembuka dan harian): `CNY Rate`, `Balance (USDT)` (= Balance ÷ rate,
+  disimpan sebagai nilai), `Rate source`. Baris non-CNY dan blok USD(CNY) kosong.
+  Header: kolom data `ACB9CA`, kolom hitungan hijau (sama dengan D&W Report).
+- Tanggal tanpa rate → rate tanggal sebelumnya yang terdekat, ditandai
+  `(carried)`; kalau tidak ada → tanggal sesudahnya yang terdekat, `(carried back)`.
+  Baris pembuka memakai rate pertama di periode. Rate 0 / negatif / teks →
+  sel dikosongkan (tidak diisi diam-diam). Gateway tanpa rate → kosong + catatan.
+  Rate < 1 dipakai apa adanya tapi dicatat (curiga USDT per CNY). Tanggal dobel:
+  rate pertama dipakai, yang beda dicatat.
+- Sheet tidak ada → run tetap jalan, kolom kosong, peringatan di log dan
+  Missing Data (plus petunjuk kalau sheet lain punya header Date | TD | Rate).
+- Missing Data bagian 8: gateway tanpa rate & TD yang tidak cocok (8a), tanggal
+  yang memakai rate tanggal lain / dikosongkan (8b), baris CNY RATE yang tidak
+  dipakai apa adanya (8c). Legend punya bagian "CNY BALANCE IN USDT".
+- `siapkan_kvb.py` dan `isi_template.py` membawa sheet `CNY RATE` ke file hasil.
 
 Judul, label, warna header, fill, format akuntansi, dan lebar kolom disamakan
 dengan report aslinya. Periode di bawah judul bagian diambil dari bulan yang
@@ -543,6 +570,17 @@ Empat kolom ungu (`Handling Fee`, `Xero Rate`, `Xero USD`, `Forex Gain/Loss`) di
 Bikin ulang template dari workbook mana pun:
 ```bash
 python3 buat_template.py "workbook-sumber.xlsx" -o "Template D&W.xlsx"
+```
+
+Template upload KVB (`Template KVB Plus.xlsx`, diunduh dari `/kvb/template`) dibuat
+oleh `buat_template_kvb.py` dengan gaya yang sama (sheet Guide, header berwarna,
+komentar kolom wajib, format tanggal, header dibekukan). Sheet: Guide, Transfer,
+D, W, Xero, Handling Fee, **CNY RATE** (v1.32; kolom A–C diisi, blok contoh abu-abu
+di E–G tidak dibaca). Header D/W tetap nama export KVB Plus — `siapkan_kvb.py`
+yang menerjemahkannya. `test_kvb_template.py` mengecek file yang di-commit sama
+dengan hasil generator dan bisa diproses end-to-end.
+```bash
+python3 buat_template_kvb.py            # -> Template KVB Plus.xlsx
 ```
 
 ### Mengisi template dari workbook lain — `isi_template.py`

@@ -327,6 +327,35 @@ def salin_sheet_penuh(wb_src, wb_out, nama):
     return len(baris) - 1
 
 
+SHEET_CNY_RATE = "CNY RATE"
+
+
+def salin_cny_rate(wb_src, wb_out):
+    """v1.32: bawa sheet 'CNY RATE' dari sumber ke hasil (dibuat kalau template
+    belum punya). Tidak ada di sumber = tidak melakukan apa-apa (DPM)."""
+    asal = next((x for x in wb_src.sheetnames
+                 if norm(x).replace(" ", "") == "CNYRATE"), None)
+    if asal is None:
+        return None
+    if SHEET_CNY_RATE not in wb_out.sheetnames:
+        sisip = (wb_out.sheetnames.index(SHEET_KURS) + 1
+                 if SHEET_KURS in wb_out.sheetnames else len(wb_out.sheetnames))
+        wb_out.create_sheet(SHEET_CNY_RATE, sisip)
+    ws_d = wb_out[SHEET_CNY_RATE]
+    if ws_d.max_row > 0:
+        ws_d.delete_rows(1, ws_d.max_row)
+    baris = [list(r) for r in wb_src[asal].iter_rows(values_only=True)]
+    while baris and not any(x not in (None, "") for x in baris[-1]):
+        baris.pop()
+    for i, row in enumerate(baris, start=1):
+        for j, v in enumerate(row, start=1):
+            if v not in (None, ""):
+                sel = ws_d.cell(i, j, v)
+                if isinstance(v, (datetime.date, datetime.datetime)):
+                    sel.number_format = "yyyy-mm-dd"
+    return max(len(baris) - 1, 0)
+
+
 def muat_hitung_dw():
     """hitung_dw.py dipakai untuk logika baca saldo pembuka (jangan diduplikasi)."""
     import importlib.util
@@ -591,6 +620,11 @@ def main():
                  f"kamu upload.\n"
                  f"Tambahkan sheet '{SHEET_KURS}' (baris 1: Date + kode currency, "
                  f"baris berikutnya tanggal + kursnya), lalu coba lagi.")
+
+    # --- CNY RATE (KVB, opsional)
+    n = salin_cny_rate(wb_src, wb_out)
+    if n is not None:
+        print(f"  sheet {SHEET_CNY_RATE!r}: {n:,} baris rate disalin dari file yang diupload")
 
     # --- tabel fee: apa pun sheet fee yang ada di sumber, itu yang dipakai
     fee_src = [x for x in wb_src.sheetnames

@@ -80,6 +80,7 @@ try:
         "--fee-currency-suffix",
         "--warn-high-pct",
         "--cny-rate-check",
+        "--cny-balance-usdt",
     ]
     assert Path(commands[1][2]) == Path(commands[0][commands[0].index("-o") + 1])
     assert Path(commands[2][2]) == Path(commands[1][commands[1].index("-o") + 1])
@@ -99,6 +100,7 @@ try:
     assert "--fee-currency-suffix" not in joined
     assert "--warn-high-pct" not in joined
     assert "--cny-rate-check" not in joined
+    assert "--cny-balance-usdt" not in joined   # v1.32: KVB saja
     assert "--settlement-columns" not in joined   # v1.30: KVB saja
     assert "--settlement-rows" not in " ".join(commands[0])
 

@@ -112,6 +112,13 @@ CNY_RATE_CHECK = False
 # report["pivot_settle"] -- records, pivot lama, MTOATD, Channel Balance, J Wallet,
 # D&W Detail tidak berubah satu angka pun (lihat catatan 3 Sep 2026 di process_sheet).
 SETTLEMENT_COLUMNS = False
+# CNY_BALANCE_USDT (v1.32, KVB, --cny-balance-usdt): Payment Channel Balance dapat
+# 3 kolom tambahan di antara 'Balance' dan 'Status' -- CNY Rate | Balance (USDT) |
+# Rate source -- HANYA terisi di baris CNY. Rate dibaca dari sheet 'CNY RATE'
+# (Date | TD | Rate, satu baris per hari per gateway, CNY per 1 USDT) di file yang
+# diupload. Balance (USDT) = Balance / CNY Rate. Blok USD(CNY) tidak berubah.
+# Flag mati = kolomnya tidak ada sama sekali, jadi keluaran DPM tidak berubah.
+CNY_BALANCE_USDT = False
 
 # Nama gateway di sheet data -> nama gateway di tabel fee (semua di-UPPERCASE)
 GATEWAY_ALIAS = {
@@ -516,6 +523,26 @@ CATATAN_RATE = {
 
 # Penjelasan untuk kolom yang belum ada rumusnya -- dipasang sebagai komentar
 # di sel header supaya orang yang mengisi tahu apa yang dicari.
+# v1.32 --cny-balance-usdt: komentar di header kolom tambahan Payment Channel Balance.
+INFO_KOLOM_USDT = {
+    "CNY Rate": (
+        "CNY per 1 USDT for this gateway on this date, read from the sheet 'CNY RATE' "
+        "(Date | TD | Rate) in the uploaded file. TD is matched to the gateway "
+        "ignoring case and spaces. A date with no row uses the nearest earlier date "
+        "of the same gateway (marked 'carried'). Only CNY rows are filled; the USD "
+        "block under a CNY gateway stays blank."),
+    "Balance (USDT)": (
+        "Balance / CNY Rate. A value, not a formula. Blank when the rate is missing "
+        "or not usable - see Missing Data, section 8. This is NOT the USD block: the "
+        "USD block uses the CRM USD of each transaction (the client rate), this "
+        "column converts the CNY balance with the treasury CNY RATE."),
+    "Rate source": (
+        "Which CNY RATE row was used: 'CNY RATE 2026-07-01' = same date, "
+        "'(carried)' = nearest earlier date because this date has no row, "
+        "'(carried back ...)' = no earlier date, nearest later date used. "
+        "The opening row uses the first rate in the period."),
+}
+
 INFO_WITHDRAWAL_CHARGES = (
     "SOLVED 26 Aug 2026 - this column is the sum of the withdrawal Handling Fee, i.e. "
     "withdrawal amount x the withdrawal rate from the fee table.\n\n"
@@ -645,6 +672,9 @@ GABUNG_TAG_MANUAL = False
 PCB_KOLOM = ["Date", "Currency", "Payment Gateway", "Deposit", "Deposit charges",
              "Fund transfer", "Fund transfer charges", "Withdrawal",
              "Withdrawal charges", "Balance", "Status"]
+# v1.32 (--cny-balance-usdt): disisipkan di antara 'Balance' dan 'Status'.
+PCB_KOLOM_USDT = ["CNY Rate", "Balance (USDT)", "Rate source"]
+CNY_RATE_SHEET = "CNY RATE"
 
 MTOATD_SHEET = "MTOATD"           # rekonsiliasi harian, dihitung penuh dari D + W
 MAKE_MTOATD_SHEET = True
@@ -671,6 +701,7 @@ URUTAN_SHEET = [
     "D",
     "W",
     "Xero",
+    "CNY RATE",
     "D&W TD FEE",
     "Opening Balance",
     "Guide",
@@ -2632,6 +2663,237 @@ def pesan_fee_suffix(report):
     return jumlah
 
 
+# ------------------------------------------------- v1.32: CNY RATE -> USDT
+# Sheet 'CNY RATE' (Date | TD | Rate) di file KVB yang diupload. Nama sheet dan
+# header dicocokkan tanpa peduli huruf besar/kecil dan spasi. TD dicocokkan ke
+# channel lewat kunci_channel('CNY', TD) -- kunci yang sama dengan blok PCB, jadi
+# 'CHIPPAY', 'ChipPay' dan 'Chip Pay' adalah gateway yang sama.
+_KOLOM_CNY_RATE = {
+    "date": ("DATE", "TANGGAL"),
+    "td": ("TD", "GATEWAY", "PAYMENTGATEWAY", "PAYMENTCHANNEL", "CHANNEL"),
+    "rate": ("RATE", "CNYRATE"),
+}
+_CNY_RATE = {}
+
+
+def _rapat(v):
+    """'  cny  rate ' -> 'CNYRATE' (huruf besar, semua spasi dibuang)."""
+    return re.sub(r"\s+", "", norm(v))
+
+
+def _tanggal_cny_rate(v):
+    d = as_date(v)
+    if d is not None or v in (None, ""):
+        return d
+    teks = str(v).strip()
+    for fmt in ("%Y/%m/%d", "%d-%m-%Y", "%d.%m.%Y", "%Y.%m.%d", "%d %b %Y",
+                "%d %B %Y", "%b %d %Y", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.datetime.strptime(teks, fmt).date()
+        except ValueError:
+            pass
+    return None
+
+
+def reset_cny_rate():
+    _CNY_RATE.clear()
+    _CNY_RATE.update({
+        "dibaca": False, "sheet": None, "rates": {}, "nama_td": {}, "buruk": {},
+        "masalah": [], "kecil": [], "dobel": [], "n_baris": 0,
+        "pakai": [], "gw_cny": {}, "petunjuk": None, "t0": None,
+    })
+
+
+reset_cny_rate()
+
+
+def load_cny_rate(wb):
+    """Baca sheet 'CNY RATE' -> _CNY_RATE. Tidak pernah menghentikan run.
+
+    rates[kgw][date] = rate (float > 0). Sel rate 0 / bukan angka masuk
+    buruk[kgw][date] = teks aslinya: tanggal itu sengaja DIKOSONGKAN di PCB dan
+    dilaporkan, bukan diisi diam-diam dari tanggal lain.
+    """
+    reset_cny_rate()
+    nama = next((x for x in wb.sheetnames if _rapat(x) == _rapat(CNY_RATE_SHEET)), None)
+    if nama is None:
+        # Bantu orang yang menempel datanya di sheet lain (mis. 'Sheet1').
+        for x in wb.sheetnames:
+            try:
+                baris1 = next(wb[x].iter_rows(min_row=1, max_row=1, values_only=True), ())
+            except Exception:
+                continue
+            kunci = {_rapat(v) for v in baris1 if v not in (None, "")}
+            if {"DATE", "TD", "RATE"} <= kunci:
+                _CNY_RATE["petunjuk"] = x
+                break
+        return _CNY_RATE
+    ws = wb[nama]
+    _CNY_RATE["sheet"] = nama
+    _CNY_RATE["dibaca"] = True
+    semua = list(ws.iter_rows(values_only=True))
+    hdr_r, kol = None, {}
+    for i, row in enumerate(semua[:10]):
+        k = {}
+        for j, v in enumerate(row or ()):
+            r_ = _rapat(v)
+            for nama_k, alias in _KOLOM_CNY_RATE.items():
+                if r_ in alias and nama_k not in k:
+                    k[nama_k] = j
+        if len(k) == 3:
+            hdr_r, kol = i, k
+            break
+    if hdr_r is None:
+        _CNY_RATE["masalah"].append({
+            "row": None, "date": None, "td": None, "rate": None,
+            "why": "header row Date | TD | Rate not found in the first 10 rows - "
+                   "nothing was read from this sheet"})
+        return _CNY_RATE
+    for n, row in enumerate(semua[hdr_r + 1:], start=hdr_r + 2):
+        row = list(row or ())
+        ambil = lambda kk: row[kol[kk]] if kol[kk] < len(row) else None  # noqa: E731
+        v_d, v_td, v_r = ambil("date"), ambil("td"), ambil("rate")
+        if all(v in (None, "") or (isinstance(v, str) and not v.strip())
+               for v in (v_d, v_td, v_r)):
+            continue
+        _CNY_RATE["n_baris"] += 1
+        d = _tanggal_cny_rate(v_d)
+        td = " ".join(str(v_td).split()) if v_td not in (None, "") else ""
+        if d is None:
+            _CNY_RATE["masalah"].append({"row": n, "date": v_d, "td": td, "rate": v_r,
+                                         "why": "date not readable - row ignored"})
+            continue
+        if not td:
+            _CNY_RATE["masalah"].append({"row": n, "date": d, "td": None, "rate": v_r,
+                                         "why": "TD (gateway) is blank - row ignored"})
+            continue
+        kgw = kunci_channel("CNY", td)
+        _CNY_RATE["nama_td"].setdefault(kgw, td)
+        rate = None if isinstance(v_r, bool) else to_float(v_r)
+        if rate is None or rate <= 0:
+            why = ("rate is blank" if v_r in (None, "") else
+                   "rate is 0" if rate == 0 else
+                   "rate is negative" if rate is not None else "rate is not a number")
+            _CNY_RATE["buruk"].setdefault(kgw, {})[d] = v_r
+            _CNY_RATE["masalah"].append({"row": n, "date": d, "td": td, "rate": v_r,
+                                         "why": f"{why} - CNY Rate and Balance (USDT) "
+                                                f"are left blank for {td} on {d:%Y-%m-%d}"})
+            continue
+        lama = _CNY_RATE["rates"].setdefault(kgw, {}).get(d)
+        if lama is not None:
+            if abs(lama - rate) > 1e-12:
+                _CNY_RATE["dobel"].append({"row": n, "date": d, "td": td,
+                                           "kept": lama, "ignored": rate})
+            continue
+        _CNY_RATE["rates"][kgw][d] = rate
+        if rate < 1:
+            _CNY_RATE["kecil"].append({"row": n, "date": d, "td": td, "rate": rate})
+    return _CNY_RATE
+
+
+def kurs_cny_pcb(kgw, d, pembuka=False):
+    """-> (rate, sumber, cara). cara: exact / carried / carried-back / opening /
+    bad / none. Rate None = sel dibiarkan kosong."""
+    if not _CNY_RATE.get("dibaca"):
+        return None, "No 'CNY RATE' sheet in the uploaded file", "nosheet"
+    per = _CNY_RATE["rates"].get(kgw) or {}
+    buruk = _CNY_RATE["buruk"].get(kgw) or {}
+    if not per and not buruk:
+        return None, "No CNY RATE rows for this gateway", "none"
+    tanggal = sorted(per)
+    if pembuka:
+        t0 = _CNY_RATE.get("t0")
+        dalam = [x for x in tanggal if t0 is None or x >= t0]
+        if PERIODE_FILTER and t0 is not None:
+            t1 = _CNY_RATE.get("t1")
+            dalam = [x for x in dalam if t1 is None or x <= t1]
+        if dalam:
+            d0 = dalam[0]
+            label = "first day" if d0 == t0 else "first rate in the period"
+            return per[d0], f"Opening: CNY RATE {d0:%Y-%m-%d} ({label})", "opening"
+        if tanggal:
+            d0 = tanggal[-1] if t0 and tanggal[-1] < t0 else tanggal[0]
+            return per[d0], (f"Opening: CNY RATE {d0:%Y-%m-%d} (no rate in the period, "
+                             f"nearest date)"), "opening"
+        return None, "No usable CNY RATE for this gateway", "none"
+    if d in per:
+        return per[d], f"CNY RATE {d:%Y-%m-%d}", "exact"
+    if d in buruk:
+        mentah = buruk[d]
+        return None, (f"CNY RATE {d:%Y-%m-%d} is not a usable rate "
+                      f"({'blank' if mentah in (None, '') else repr(mentah)})"), "bad"
+    lebih_awal = [x for x in tanggal if x < d]
+    if lebih_awal:
+        d0 = lebih_awal[-1]
+        return per[d0], f"CNY RATE {d0:%Y-%m-%d} (carried)", "carried"
+    nanti = [x for x in tanggal if x > d]
+    if nanti:
+        d0 = nanti[0]
+        return per[d0], (f"CNY RATE {d0:%Y-%m-%d} (carried back: no earlier rate)"
+                         ), "carried-back"
+    return None, "No usable CNY RATE for this gateway", "none"
+
+
+def lapor_cny_rate_pcb():
+    """Ringkasan terminal untuk kolom USDT di Payment Channel Balance."""
+    if not _CNY_RATE.get("dibaca"):
+        print(f"!! PERINGATAN: sheet '{CNY_RATE_SHEET}' tidak ada di file -> kolom "
+              f"'CNY Rate' / 'Balance (USDT)' di '{PCB_SHEET}' dibiarkan KOSONG"
+              + (f" (sheet {_CNY_RATE['petunjuk']!r} punya header Date | TD | Rate -- "
+                 f"ganti namanya jadi '{CNY_RATE_SHEET}')" if _CNY_RATE.get("petunjuk") else ""))
+        return
+    tanpa = sorted(n for k, n in _CNY_RATE["gw_cny"].items()
+                   if not (_CNY_RATE["rates"].get(k) or _CNY_RATE["buruk"].get(k)))
+    bawa = Counter(x["gateway"] for x in _CNY_RATE["pakai"]
+                   if x["cara"] in ("carried", "carried-back"))
+    print(f"         '{PCB_SHEET}': kolom CNY Rate / Balance (USDT) / Rate source dari "
+          f"sheet {_CNY_RATE['sheet']!r} ({_CNY_RATE['n_baris']:,} baris rate)")
+    if tanpa:
+        print(f"!! CNY RATE: gateway CNY tanpa rate -> kolom USDT kosong: {', '.join(tanpa)}")
+    for g, n in sorted(bawa.items()):
+        print(f"!  CNY RATE: {g} {n} hari pakai rate tanggal lain (carried)")
+    if _CNY_RATE["masalah"]:
+        print(f"!! CNY RATE: {len(_CNY_RATE['masalah'])} baris tidak terpakai -- lihat "
+              f"'Missing Data' bagian 8")
+
+
+def _pcb_kolom():
+    """Header Payment Channel Balance. Tanpa --cny-balance-usdt = PCB_KOLOM apa adanya."""
+    if not CNY_BALANCE_USDT:
+        return list(PCB_KOLOM)
+    i = PCB_KOLOM.index("Status")
+    return PCB_KOLOM[:i] + PCB_KOLOM_USDT + PCB_KOLOM[i:]
+
+
+def _sisip_usdt(nilai, cur, kgw, d, nama, pembuka=False):
+    """nilai = 11 sel PCB. Dengan --cny-balance-usdt disisipkan CNY Rate |
+    Balance (USDT) | Rate source sebelum Status (hanya baris CNY yang terisi)."""
+    if not CNY_BALANCE_USDT:
+        return nilai
+    i = PCB_KOLOM.index("Status")
+    extra = [None, None, None]
+    if norm(cur) == "CNY":
+        rate, sumber, cara = kurs_cny_pcb(kgw, d, pembuka)
+        bal = nilai[PCB_KOLOM.index("Balance")]
+        usdt = (bal / rate) if (rate and bal is not None) else None
+        extra = [rate, usdt, sumber]
+        _CNY_RATE["gw_cny"].setdefault(kgw, nama)
+        if cara != "exact":
+            _CNY_RATE["pakai"].append({"kgw": kgw, "gateway": nama, "date": d,
+                                       "cara": cara, "sumber": sumber, "rate": rate})
+    return nilai[:i] + extra + nilai[i:]
+
+
+def _format_sel_usdt(sel, c):
+    """Format kolom tambahan v1.32 (posisi 11-13)."""
+    if not CNY_BALANCE_USDT:
+        return
+    if c == 11:
+        sel.number_format = "0.0000"
+    elif c == 12:
+        sel.number_format = FMT_ACC
+
+
 def _rentang_pcb(agg):
     if PERIODE_FILTER:
         t0 = datetime.date(PERIODE_FILTER[0], PERIODE_FILTER[1], 1)
@@ -2667,6 +2929,10 @@ def _isi_sel_pcb_harian(ws, r, nilai, kuning):
             n_kuning += 1
         elif c == PCB_KOLOM.index("Balance") + 1:
             sel.fill = PatternFill("solid", fgColor="E2EFDA")
+        elif CNY_BALANCE_USDT and c in (11, 12):
+            _format_sel_usdt(sel, c)
+            if c == 12 and val is not None:
+                sel.fill = PatternFill("solid", fgColor=RPT_FILL_CALC)
     return n_kuning
 
 
@@ -2686,6 +2952,8 @@ def tulis_pcb_urutan_lama(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo,
                      None, None, None, None, None, None,
                      awal_ch[(cur, kgw)],
                      f"Opening balance ({asal_ch_txt}), as of {tgl_ch}."]
+            nilai = _sisip_usdt(nilai, cur, kgw, tgl_ch, nama_bersih.get((cur, kgw), kgw),
+                                pembuka=True)
             for c, val in enumerate(nilai, start=1):
                 sel = ws.cell(r, c, val)
                 sel.font = Font(bold=True)
@@ -2694,6 +2962,8 @@ def tulis_pcb_urutan_lama(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo,
                     sel.number_format = "yyyy-mm-dd"
                 elif 4 <= c <= 10:
                     sel.number_format = FMT_ACC
+                else:
+                    _format_sel_usdt(sel, c)
         print(f"         '{PCB_SHEET}': {len(awal_ch)} saldo pembuka ditampilkan di baris "
               f"paling atas (per {tgl_ch})")
 
@@ -2730,6 +3000,7 @@ def tulis_pcb_urutan_lama(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo,
                  saldo[kunci_saldo],
                  catatan if ada_mutasi else "No movement on this day - balance carried "
                                             "forward from the previous day."]
+        nilai = _sisip_usdt(nilai, cur, kgw, d, nilai[2])
         n_kuning += _isi_sel_pcb_harian(ws, r, nilai, kuning)
     return r, n_kuning
 
@@ -2770,6 +3041,8 @@ def tulis_pcb_menurut_channel(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, sa
             nilai = [tgl_ch, cur_tampil, nama_bersih.get((cur, kgw), kgw),
                      None, None, None, None, None, None,
                      awal_ch[(cur, kgw)], catatan_ob]
+            nilai = _sisip_usdt(nilai, cur, kgw, tgl_ch, nama_bersih.get((cur, kgw), kgw),
+                                pembuka=True)
             for c, val in enumerate(nilai, start=1):
                 sel = ws.cell(r, c, val)
                 sel.font = Font(bold=True)
@@ -2778,6 +3051,8 @@ def tulis_pcb_menurut_channel(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, sa
                     sel.number_format = "yyyy-mm-dd"
                 elif 4 <= c <= 10:
                     sel.number_format = FMT_ACC
+                else:
+                    _format_sel_usdt(sel, c)
         if hari is not None:
             tanggal = hari
         else:
@@ -2823,6 +3098,7 @@ def tulis_pcb_menurut_channel(ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, sa
                           "previous day.")
             nilai = [d, cur_tampil, nama_bersih.get((cur, kgw), v.get("_nama", kgw))] + angka + [
                      saldo[kunci_saldo], status]
+            nilai = _sisip_usdt(nilai, cur, kgw, d, nilai[2])
             n_kuning += _isi_sel_pcb_harian(ws, r, nilai, kuning)
     if awal_ch:
         print(f"         '{PCB_SHEET}': saldo pembuka ikut di awal tiap blok channel "
@@ -2909,11 +3185,18 @@ def write_channel_sheets(wb, report, ftt):
         del wb[PCB_SHEET]
     ws = wb.create_sheet(PCB_SHEET)
     ws.sheet_properties.tabColor = "C55A11"
-    for c, t in enumerate(PCB_KOLOM, start=1):
+    kolom_pcb = _pcb_kolom()
+    for c, t in enumerate(kolom_pcb, start=1):
         sel = ws.cell(1, c, t)
         sel.font = Font(bold=True, color="FFFFFF", size=10)
         sel.fill = PatternFill("solid", fgColor="C55A11")
         sel.alignment = Alignment(wrap_text=True, horizontal="center")
+        if t in PCB_KOLOM_USDT and CNY_BALANCE_USDT:
+            # Sama dengan D&W Report: kolom data biru-abu, kolom hitungan hijau.
+            sel.font = Font(bold=True, color="000000", size=10)
+            sel.fill = PatternFill("solid", fgColor=RPT_FILL_HEAD2 if t == "Balance (USDT)"
+                                   else RPT_FILL_HEAD)
+            sel.comment = Comment(INFO_KOLOM_USDT[t], "hitung_dw.py", height=170, width=360)
     sel_wc = ws.cell(1, PCB_KOLOM.index("Withdrawal charges") + 1)
     sel_wc.fill = PatternFill("solid", fgColor="BF8F00")
     sel_wc.comment = Comment(INFO_WITHDRAWAL_CHARGES, "hitung_dw.py", height=300, width=460)
@@ -2960,16 +3243,26 @@ def write_channel_sheets(wb, report, ftt):
     # --usd-shadow mengelompokkan sheet per channel dan menaruh blok USD
     # langsung di bawah channel asalnya. Tanpa flag, urutan tanggal yang lama
     # dipakai apa adanya (DPM).
+    if CNY_BALANCE_USDT:
+        t0_, t1_ = _rentang_pcb(agg)
+        _CNY_RATE["t0"], _CNY_RATE["t1"] = t0_, t1_
+        _CNY_RATE["pakai"] = []
+        _CNY_RATE["gw_cny"] = {}
     if USD_SHADOW:
         r, n_kuning = tulis_pcb_menurut_channel(
             ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning)
     else:
         r, n_kuning = tulis_pcb_urutan_lama(
             ws, agg, awal_ch, tgl_ch, asal_ch, nama_bersih, saldo, kuning)
-    for kol, w in zip("ABCDEFGHIJK", (12, 10, 22, 16, 16, 16, 18, 16, 18, 18, 48)):
-        ws.column_dimensions[kol].width = w
+    lebar = [12, 10, 22, 16, 16, 16, 18, 16, 18, 18, 48]
+    if CNY_BALANCE_USDT:
+        lebar = lebar[:10] + [11, 18, 40] + lebar[10:]
+    for c, w in enumerate(lebar, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = w
     ws.freeze_panes = "D2"
-    ws.auto_filter.ref = f"A1:K{max(r, 2)}"
+    ws.auto_filter.ref = f"A1:{openpyxl.utils.get_column_letter(len(kolom_pcb))}{max(r, 2)}"
+    if CNY_BALANCE_USDT:
+        lapor_cny_rate_pcb()
     n_pcb = r - 1
 
     # ---------------- J Wallet ----------------
@@ -4305,6 +4598,132 @@ def _tulis_missing_kvb(ws, r, report, box, wrap):
 
     if SETTLEMENT_COLUMNS:
         r = _tulis_missing_settlement(ws, r, report, box, wrap)
+    if CNY_BALANCE_USDT:
+        r = _tulis_missing_cny_rate(ws, r, report, box, wrap)
+    return r
+
+
+def _tulis_missing_cny_rate(ws, r, report, box, wrap):
+    """Missing Data bagian 8: cakupan sheet CNY RATE (KVB --cny-balance-usdt)."""
+    st = report.get("cny_rate") or _CNY_RATE
+    r += 2
+    ws.cell(r, 2, "8. CNY RATE SHEET (BALANCE USDT ON PAYMENT CHANNEL BALANCE)").font = \
+        Font(bold=True, size=12, color="C00000")
+    r += 1
+    ws.cell(r, 2, "Balance (USDT) = CNY Balance / CNY RATE of that gateway and date. "
+                  "Below: what could not be filled, and every date that used the rate "
+                  "of another date.").font = Font(italic=True, size=9, color="808080")
+    r += 1
+    if not st.get("dibaca"):
+        petunjuk = st.get("petunjuk")
+        teks = (f"The uploaded file has no '{CNY_RATE_SHEET}' sheet. CNY Rate and Balance "
+                f"(USDT) are blank on every CNY row.")
+        if petunjuk:
+            teks += (f" Sheet {petunjuk!r} has the headers Date | TD | Rate - rename it to "
+                     f"'{CNY_RATE_SHEET}' and upload again.")
+        sel = ws.cell(r, 2, teks)
+        sel.font = Font(bold=True, color="9C0006")
+        sel.fill = FILL_MISSING
+        sel.alignment = wrap
+        ws.row_dimensions[r].height = 32
+        return r + 1
+
+    gw_cny = st.get("gw_cny") or {}
+    rates = st.get("rates") or {}
+    ringkas = []
+    for k, per in sorted(rates.items(), key=lambda x: st["nama_td"].get(x[0], x[0])):
+        if per:
+            ringkas.append(f"{st['nama_td'].get(k, k)} {len(per)} days "
+                           f"({min(per):%Y-%m-%d} to {max(per):%Y-%m-%d})")
+    ws.cell(r, 2, f"Read sheet {st.get('sheet')!r}: {st.get('n_baris', 0):,} rows. "
+                  + ("; ".join(ringkas) if ringkas else "No usable rate.")).font = Font(size=10)
+    ws.cell(r, 2).alignment = wrap
+    ws.row_dimensions[r].height = 32
+    r += 1
+
+    # 8a. gateway CNY tanpa satu pun rate
+    tanpa = sorted(n for k, n in gw_cny.items()
+                   if not (rates.get(k) or (st.get("buruk") or {}).get(k)))
+    r += 1
+    ws.cell(r, 2, "8a. CNY gateways with no row in CNY RATE (USDT columns left blank)"
+            ).font = Font(bold=True)
+    r += 1
+    if not tanpa:
+        ws.cell(r, 2, "None - every CNY gateway on Payment Channel Balance has a rate."
+                ).font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        for n in tanpa:
+            ws.cell(r, 2, f"CNY {n}: no CNY RATE rows. Add rows with TD = {n} to fill "
+                          f"its Balance (USDT).").font = Font(bold=True, color="9C0006")
+            ws.cell(r, 2).fill = FILL_MISSING
+            r += 1
+    asing = sorted(st["nama_td"].get(k, k) for k in rates if k not in gw_cny)
+    if asing:
+        ws.cell(r, 2, "TD names in CNY RATE that match no CNY gateway in this run (not "
+                      f"used - check the spelling): {', '.join(asing)}").font = \
+            Font(size=10, color="9C0006")
+        ws.cell(r, 2).alignment = wrap
+        r += 1
+
+    # 8b. tanggal yang memakai rate tanggal lain / dikosongkan
+    pakai = [x for x in (st.get("pakai") or []) if x["cara"] not in ("none", "nosheet")]
+    r += 1
+    ws.cell(r, 2, f"8b. Dates that used another date's rate, or were left blank: "
+                  f"{len(pakai):,}").font = Font(bold=True)
+    r += 1
+    if not pakai:
+        ws.cell(r, 2, "None - every CNY row used the rate of its own date."
+                ).font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        _header(ws, r, ["Gateway", "Date", "CNY Rate used", "Rate source"], "C00000")
+        for x in pakai:
+            r += 1
+            isi = [x["gateway"], x["date"], x["rate"], x["sumber"]]
+            for c, v in enumerate(isi, start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                cell.alignment = wrap
+                if c == 3 and isinstance(v, (datetime.date, datetime.datetime)):
+                    cell.number_format = "yyyy-mm-dd"
+                elif c == 4 and isinstance(v, (int, float)):
+                    cell.number_format = "0.0000"
+            if x["cara"] == "opening":
+                continue
+            ws.cell(r, 2).fill = FILL_MISSING if x["cara"] == "bad" else FILL_WARN
+        r += 1
+
+    # 8c. baris CNY RATE yang tidak bisa dipakai
+    masalah = list(st.get("masalah") or [])
+    masalah += [{"row": x["row"], "date": x["date"], "td": x["td"], "rate": x["ignored"],
+                 "why": f"same gateway and date already has rate {x['kept']:g} "
+                        f"(row above) - this row ignored"} for x in st.get("dobel") or []]
+    masalah += [{"row": x["row"], "date": x["date"], "td": x["td"], "rate": x["rate"],
+                 "why": "rate is below 1 - expected CNY per 1 USDT (about 6.7). Still "
+                        "used as written; check it is not USDT per CNY"}
+                for x in st.get("kecil") or []]
+    r += 1
+    ws.cell(r, 2, f"8c. CNY RATE rows that were not used as written: {len(masalah):,}"
+            ).font = Font(bold=True)
+    r += 1
+    if not masalah:
+        ws.cell(r, 2, "None - every CNY RATE row had a date, a TD and a rate above 0."
+                ).font = Font(italic=True, color="008000")
+        r += 1
+    else:
+        _header(ws, r, ["Row", "Date", "TD", "Rate", "Why"], "C00000")
+        for x in sorted(masalah, key=lambda y: (y["row"] or 0)):
+            r += 1
+            isi = [x["row"], x["date"], x["td"], x["rate"], x["why"]]
+            for c, v in enumerate(isi, start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                cell.alignment = wrap
+                if c == 3 and isinstance(v, (datetime.date, datetime.datetime)):
+                    cell.number_format = "yyyy-mm-dd"
+            ws.cell(r, 2).fill = FILL_MISSING
+        r += 1
     return r
 
 
@@ -4702,8 +5121,9 @@ def write_legend_sheet(wb, date_cols_used, report=None):
 def _tulis_legend_kvb(ws, r, box, wrap, report=None):
     """Catatan Legend yang hanya ditulis kalau flag KVB-nya menyala."""
     if not (USD_SHADOW or FEE_CURRENCY_SUFFIX or WARN_HIGH_PCT or CNY_RATE_CHECK
-            or SETTLEMENT_COLUMNS):
+            or SETTLEMENT_COLUMNS or CNY_BALANCE_USDT):
         return r
+
 
     if SETTLEMENT_COLUMNS:
         r += 2
@@ -4866,6 +5286,35 @@ def _tulis_legend_kvb(ws, r, box, wrap, report=None):
         sel.alignment = wrap
         sel.font = Font(size=10)
         ws.row_dimensions[r].height = 64
+
+    if CNY_BALANCE_USDT:
+        r += 2
+        ws.cell(r, 2, "PAYMENT CHANNEL BALANCE: CNY BALANCE IN USDT").font = \
+            Font(bold=True, size=12, color="4472C4")
+        r += 1
+        teks = (
+            "Three columns sit between 'Balance' and 'Status': 'CNY Rate', 'Balance (USDT)' "
+            "and 'Rate source'. They are filled on CNY rows only (the opening row and "
+            "every day); other currencies and the USD block under a CNY gateway leave "
+            "them blank. CNY Rate comes from the sheet 'CNY RATE' in the uploaded file: "
+            "columns Date | TD | Rate, one row per day per gateway, Rate = CNY per 1 "
+            "USDT. The sheet name and the headers are matched ignoring case and spaces, "
+            "and TD is matched to the gateway the same way (CHIPPAY = ChipPay). "
+            "Balance (USDT) = Balance / CNY Rate, written as a value. "
+            "A date with no row uses the nearest earlier date of that gateway, marked "
+            "'(carried)'; with no earlier date the nearest later date is used, marked "
+            "'(carried back)'. The opening row uses the first rate in the period. "
+            "A rate of 0, a negative rate or text is not used: that date stays blank. "
+            "A gateway with no rows stays blank. Every carried or blank date is listed "
+            "on Missing Data, section 8. This is not the USD block: the USD block adds "
+            "up the CRM USD of each transaction (the client rate); Balance (USDT) "
+            "converts the CNY balance with the CNY RATE sheet, so the two differ."
+        )
+        sel = ws.cell(r, 2, teks)
+        sel.alignment = wrap
+        sel.font = Font(size=10)
+        ws.row_dimensions[r].height = 150
+        r += 1
     return r
 
 
@@ -4925,10 +5374,16 @@ def main():
                     help="D&W Report: tambah kolom CRM USD / Transactions / CRM average "
                          "berbasis Settlement Date di sebelah kolom basis Paid Date / "
                          "Completed Date. Tab lain tidak berubah. Hanya dipasang untuk KVB.")
+    ap.add_argument("--cny-balance-usdt", action="store_true",
+                    help="Payment Channel Balance: kolom CNY Rate | Balance (USDT) | "
+                         "Rate source di baris CNY, rate dari sheet 'CNY RATE' "
+                         "(Date | TD | Rate). Hanya dipasang untuk KVB.")
     args = ap.parse_args()
 
     global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
-    global SETTLEMENT_COLUMNS
+    global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT
+    if args.cny_balance_usdt:
+        CNY_BALANCE_USDT = True
     if args.settlement_columns:
         SETTLEMENT_COLUMNS = True
     if args.tanpa_extra_fees:
@@ -5020,8 +5475,8 @@ def main():
 
     if not fee_table:
         sys.exit(f"Sheet '{FEE_SHEET}' tidak berisi satu pun rate.\n"
-                 f"Header 'Currency | Payment Gateway | Deposit | Withdrawal' harus di baris "
-                 f"{FEE_HEADER_ROW}, datanya mulai baris {FEE_HEADER_ROW + 1}.")
+                 "Header 'Currency | Payment Gateway | Deposit | Withdrawal' harus ada di "
+                 "salah satu baris atas sheet itu, datanya di baris-baris di bawahnya.")
     if not xero_dates:
         sys.exit(f"Sheet '{XERO_SHEET}' tidak berisi satu pun tanggal/kurs.\n"
                  "Baris 1 harus berisi 'Date' lalu kode currency (AED, INR, VND, ...),\n"
@@ -5096,6 +5551,25 @@ def main():
               "mtoatd_crm_d": None, "settle_recon": None}
 
     report["date_check_isi"] = baca_date_check(wb)
+    if CNY_BALANCE_USDT:
+        load_cny_rate(wb)
+        report["cny_rate"] = _CNY_RATE
+        if _CNY_RATE["dibaca"]:
+            n_gw = len(_CNY_RATE["rates"])
+            print(f"Baca   : sheet {_CNY_RATE['sheet']!r} -> {_CNY_RATE['n_baris']:,} baris, "
+                  f"{n_gw} gateway")
+        else:
+            petunjuk = _CNY_RATE.get("petunjuk")
+            sebab = (f"the uploaded file has no '{CNY_RATE_SHEET}' sheet"
+                     + (f" (sheet {petunjuk!r} has Date | TD | Rate headers - rename it "
+                        f"to '{CNY_RATE_SHEET}')" if petunjuk else ""))
+            report["input_kurang"].append((
+                CNY_RATE_SHEET, sebab,
+                f"'CNY Rate' and 'Balance (USDT)' on '{PCB_SHEET}' are blank for every "
+                f"CNY row. Everything else is calculated normally.",
+                f"Add a sheet named '{CNY_RATE_SHEET}' with the columns Date | TD | Rate "
+                f"(one row per day per CNY gateway, Rate = CNY per 1 USDT) and upload "
+                f"again. The KVB template has this sheet."))
     total_rows = 0
     date_cols_used = {}
     for name in targets:
