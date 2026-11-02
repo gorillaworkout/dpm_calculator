@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Confirm partner request (Beta) · Dupoin DPM Tools{% endblock %}
+{% block body %}
+{% include "approval/_style.html" %}
+<div class="pa-head"><h1>Please <span>confirm</span></h1><span class="beta">Beta · test only</span></div>
+<pre style="color:var(--ink);max-height:none">{{ summary }}</pre>
+<form method="post" action="{{ url_for('partner_approval.submit') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="confirmed" value="1">
+  {% for k, v in values.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+  <button type="submit">Confirm and submit</button>
+</form>
+<p class="hint"><a href="javascript:history.back()" style="color:#9db8ff">Back to edit</a></p>
+{% endblock %}

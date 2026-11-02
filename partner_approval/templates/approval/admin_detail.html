@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% from "approval/_status.html" import badge %}
+{% block title %}{{ req.ref }} (admin) · Partner Approval (Beta){% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+{% include "approval/_style.html" %}
+<div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta · admin</span></div>
+<p class="lede">{{ types[req.request_type] }} · {{ req.partner_name }} · {{ req.role }} · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
+<p><a href="{{ url_for('partner_approval.admin_list') }}" style="color:#9db8ff">← All requests</a></p>
+
+{% if req.agreement_note %}<div class="note bad" role="alert" style="margin:0 0 18px" id="agreement-note">{{ req.agreement_note }}</div>{% endif %}
+{% if req.status == 'rejected' %}<div class="note bad" style="margin:0 0 18px">Rejected: {{ req.reject_reason }}</div>{% endif %}
+
+{% if link %}
+<div class="pa-box" id="signing-link">
+  <h3>Signing link</h3>
+  {% if req.email_note %}<p class="hint" style="margin:0 0 10px" id="email-note">{{ req.email_note }}</p>{% endif %}
+  <div class="linkrow"><input id="sign-url" type="text" readonly value="{{ link.url }}">
+    <button type="button" onclick="var i=document.getElementById('sign-url');i.select();(navigator.clipboard?navigator.clipboard.writeText(i.value):Promise.reject()).then(function(){},function(){document.execCommand('copy')});this.textContent='Copied'">Copy</button></div>
+  <p class="hint">{{ 'Expired' if link.expired else 'Valid until' }} {{ link.expires }} · single use{% if link.expired %} — use “Request re-sign” to make a new link{% endif %}.</p>
+</div>
+{% endif %}
+
+<div class="pa-box">
+  <h3>Actions</h3>
+  <div class="pa-actions">
+  {% if req.status == 'pending' %}
+    <form method="post" action="{{ url_for('partner_approval.approve', rid=req.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p class="hint" style="margin:0">{% if agreement %}{% if template %}Creates the agreement from <b>{{ template }}</b> and a signing link{{ ' and e-mails it' if smtp_ready else '' }}.{% else %}Agreement template for {{ req.role }} not ready yet: approving records the approval only.{% endif %}{% else %}No agreement for this request type: approving completes it.{% endif %}</p>
+      <button type="submit">Approve</button>
+    </form>
+  {% endif %}
+  {% if req.status in ('pending', 'approved', 'signed', 'resign') %}
+    <form method="post" action="{{ url_for('partner_approval.reject', rid=req.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <textarea name="reason" rows="2" placeholder="Reason for rejecting (required)" required style="font-family:inherit"></textarea>
+      <button type="submit" class="btn-bad">Reject</button>
+    </form>
+  {% endif %}
+  {% if req.status in ('approved', 'resign') and agreement and template and not link %}
+    <form method="post" action="{{ url_for('partner_approval.retry', rid=req.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p class="hint" style="margin:0">Create the agreement and signing link again.</p>
+      <button type="submit">Retry agreement</button>
+    </form>
+  {% endif %}
+  {% if req.status == 'signed' %}
+    <form method="post" action="{{ url_for('partner_approval.complete', rid=req.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <p class="hint" style="margin:0">The signed agreement is correct.</p>
+      <button type="submit">Mark Completed</button>
+    </form>
+  {% endif %}
+  {% if agreement and template and req.status in ('approved', 'signed', 'resign') %}
+    <form method="post" action="{{ url_for('partner_approval.resign', rid=req.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <textarea name="note" rows="2" placeholder="Note to the partner, e.g. what to fix" style="font-family:inherit"></textarea>
+      <button type="submit" class="btn2">Request re-sign (new link)</button>
+    </form>
+  {% endif %}
+  {% if req.status in ('completed', 'rejected') %}<p class="hint">No actions: the request is {{ req.status_label }}.</p>{% endif %}
+  </div>
+</div>
+
+{% if files.signed_file or files.agreement_pdf %}
+<div class="pa-box">
+  <h3>Documents</h3>
+  {% if req.signed_at %}<dl class="kv" style="margin-bottom:12px">
+    <dt>Signed</dt><dd>{{ wib(req.signed_at, '%Y-%m-%d %H:%M:%S WIB') }} ({{ {'drawn':'drawn on screen','typed':'typed name','upload':'uploaded signed copy'}.get(req.signed_kind, req.signed_kind) }})</dd>
+    <dt>Signer IP</dt><dd>{{ req.signer_ip }}</dd>
+    <dt>Browser</dt><dd>{{ req.signer_ua }}</dd>
+  </dl>{% endif %}
+  <p>
+  {% if files.signed_file %}<a class="dl" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" target="_blank" rel="noopener">View signed file</a>
+     <a class="dl" style="margin-left:6px" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file') }}">Download final file</a>{% endif %}
+  {% if files.signed_docx %}<a href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_docx') }}" style="color:#9db8ff;margin-left:10px">signed .docx</a>{% endif %}
+  {% if files.agreement_pdf %}<a href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='agreement_pdf', inline=1) }}" target="_blank" rel="noopener" style="color:#9db8ff;margin-left:10px">unsigned agreement PDF</a>{% endif %}
+  {% if files.agreement_docx %}<a href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='agreement_docx') }}" style="color:#9db8ff;margin-left:10px">unsigned .docx</a>{% endif %}
+  </p>
+  {% if files.signed_file and req.signed_file.endswith('.pdf') %}
+  <iframe title="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" style="width:100%;height:560px;border:1px solid var(--line);border-radius:10px;background:#fff"></iframe>
+  {% elif files.signed_file %}
+  <img alt="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" style="max-width:100%;border-radius:10px">
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="pa-box"><h3>Request</h3><pre style="color:var(--ink);max-height:none;margin:0">{{ summary }}</pre></div>
+<div class="pa-box"><h3>Audit log</h3>{% include "approval/_audit.html" %}</div>
+{% endblock %}

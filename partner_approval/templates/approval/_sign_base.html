@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<title>{% block title %}Dupoin partnership agreement{% endblock %}</title>
+<style>
+@font-face{font-family:"Great Vibes";src:url("{{ url_for('partner_sign.static', filename='GreatVibes-Regular.ttf') }}") format("truetype");font-display:swap}
+*{box-sizing:border-box}
+body{margin:0;background:#f3f5fa;color:#1b2333;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Arial,sans-serif}
+header{background:#0f1830;color:#fff;padding:16px 22px;font-weight:700;letter-spacing:.2px}
+header small{display:block;font-weight:400;opacity:.7;font-size:12px}
+.wrap{max-width:880px;margin:0 auto;padding:26px 18px 60px}
+.card{background:#fff;border:1px solid #dfe4ee;border-radius:14px;padding:20px 22px;margin:0 0 18px;box-shadow:0 10px 30px -24px rgba(15,24,48,.5)}
+h1{font-size:24px;margin:0 0 6px} h2{font-size:17px;margin:0 0 12px}
+.muted{color:#5d6880;font-size:13.5px}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0}
+dt{color:#5d6880} dd{margin:0;overflow-wrap:anywhere}
+iframe{width:100%;height:620px;border:1px solid #dfe4ee;border-radius:10px;background:#fafafa}
+.btn{display:inline-block;padding:11px 18px;border-radius:9px;border:0;background:#2f5bea;color:#fff;font:inherit;font-weight:700;cursor:pointer;text-decoration:none}
+.btn.light{background:#e8edf8;color:#1b2333}
+.btn[disabled]{opacity:.55;cursor:not-allowed}
+.tabs{display:flex;gap:8px;margin:0 0 14px;flex-wrap:wrap}
+.tabs button{padding:9px 14px;border:1px solid #cfd6e4;border-radius:9px;background:#fff;font:inherit;font-weight:600;cursor:pointer}
+.tabs button[aria-selected=true]{border-color:#2f5bea;background:#eaf0ff;color:#2f5bea}
+.pad{width:100%;height:200px;border:1.5px dashed #9aa6bf;border-radius:10px;background:#fff;touch-action:none;cursor:crosshair;display:block}
+input[type=text],input[type=file]{width:100%;padding:11px 12px;border:1px solid #cfd6e4;border-radius:9px;font:inherit}
+.typed{font-family:"Great Vibes",cursive;font-size:46px;color:#102060;min-height:74px;border-bottom:1px solid #cfd6e4;margin:10px 0;padding:4px 8px;overflow:hidden;white-space:nowrap}
+.agree{display:flex;gap:9px;align-items:flex-start;margin:14px 0}
+.agree input{margin-top:4px;width:18px;height:18px}
+.err{background:#fff0f0;border:1px solid #f3b7b7;color:#9b1c1c;padding:12px 14px;border-radius:10px;margin:0 0 18px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+[hidden]{display:none!important}
+</style>
+</head>
+<body>
+<header>Dupoin Markets Ltd<small>Partnership agreement</small></header>
+<div class="wrap">{% block body %}{% endblock %}</div>
+</body>
+</html>

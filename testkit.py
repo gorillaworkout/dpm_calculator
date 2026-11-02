@@ -2,7 +2,7 @@
 
 Two jobs:
 
-* ``hermetic_env()`` points DW_AUTH_DB / DW_JOB_DIR / DW_ADMIN_* at a fresh
+* ``hermetic_env()`` points DW_AUTH_DB / DW_JOB_DIR / DW_APPROVAL_* / DW_ADMIN_* at a fresh
   temporary directory, by ASSIGNMENT. A test must never inherit the server's
   exported DW_* values, and must never open the real users.db or session.key.
   ``assert_isolated()`` proves it after ``app``/``auth`` are imported.
@@ -35,6 +35,13 @@ def hermetic_env(admin_user="tester", admin_pass="tester-password-1", admin=True
     atexit.register(shutil.rmtree, root, True)
     os.environ["DW_AUTH_DB"] = str(root / "users.db")
     os.environ["DW_JOB_DIR"] = str(root / "jobs")
+    # Partner Approval (Beta): own DB + files in the temp dir, never real mail.
+    os.environ["DW_APPROVAL_DB"] = str(root / "approval.db")
+    os.environ["DW_APPROVAL_DIR"] = str(root / "approval_files")
+    for name in ("DW_APPROVAL_TEMPLATES", "DW_SIGN_LINK_DAYS", "DW_PUBLIC_BASE_URL",
+                 "DW_SOFFICE", "DW_SMTP_HOST", "DW_SMTP_PORT", "DW_SMTP_USER",
+                 "DW_SMTP_PASSWORD", "DW_SMTP_FROM", "DW_SMTP_TLS"):
+        os.environ.pop(name, None)
     if admin:
         os.environ["DW_ADMIN_USER"] = admin_user
         os.environ["DW_ADMIN_PASS"] = admin_pass
@@ -57,6 +64,11 @@ def assert_isolated(root):
     app = sys.modules.get("app")
     if app is not None:
         assert root in Path(app.JOBS).resolve().parents, f"jobs dir {app.JOBS} is outside {root}"
+    pa = sys.modules.get("partner_approval")
+    if pa is not None and pa.SETTINGS is not None:
+        for path in (pa.SETTINGS.db, pa.SETTINGS.files):
+            assert root in Path(path).resolve().parents, f"approval path {path} is outside {root}"
+        assert not pa.SETTINGS.smtp_ready, "tests must not inherit a real SMTP server"
 
 
 # --------------------------------------------------------------------------

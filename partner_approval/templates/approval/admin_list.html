@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% from "approval/_status.html" import badge %}
+{% block title %}Partner requests (admin, Beta) · Dupoin DPM Tools{% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+{% include "approval/_style.html" %}
+<div class="pa-head"><h1>Partner <span>requests</span></h1><span class="beta">Beta · admin</span></div>
+<p class="lede">Pending → Approved (Awaiting Signature) → Signed – Under Review → Completed.</p>
+<div class="pa-tabs">
+  <a href="{{ url_for('partner_approval.admin_list') }}" class="{{ 'on' if not status }}">All<b>{{ counts.values()|sum }}</b></a>
+  {% for key, label in STATUS.items() %}
+  <a href="{{ url_for('partner_approval.admin_list', status=key) }}" class="{{ 'on' if status == key }}">{{ label }}<b>{{ counts.get(key, 0) }}</b></a>
+  {% endfor %}
+</div>
+{% if requests %}
+<table class="pa">
+  <thead><tr><th>Ref</th><th>Type</th><th>Partner</th><th>Role</th><th>UID</th><th>By</th><th>Updated</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for r in requests %}
+  <tr><td><a href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ r.ref }}</a></td>
+    <td>{{ types[r.request_type] }}</td><td>{{ r.partner_name }}</td><td>{{ r.role }}</td>
+    <td>{{ r.data.uid }}</td><td>{{ r.created_by }}</td><td style="white-space:nowrap">{{ wib(r.updated_at) }}</td><td>{{ badge(r) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="hint">No requests{{ ' with this status' if status }}.</p>{% endif %}
+{% endblock %}

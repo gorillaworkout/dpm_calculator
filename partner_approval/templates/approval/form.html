@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}New partner request (Beta) · Dupoin DPM Tools{% endblock %}
+{% block body %}
+{% include "approval/_style.html" %}
+<div class="pa-head"><h1>Sales Partner <span>Request</span></h1><span class="beta">Beta · test only</span></div>
+<p class="lede">The same form as Lark "Sales PartnerRequest". The fields change with the request type. Fields marked <span class="req">*</span> are required.</p>
+{% if errors %}<div class="note bad" role="alert" style="margin:0 0 18px">Please fix the {{ errors|length }} field{{ 's' if errors|length > 1 }} marked below.</div>{% endif %}
+<form id="pa-form" class="pa-form" method="post" action="{{ url_for('partner_approval.submit') }}" novalidate>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+  <input type="hidden" name="confirmed" value="0" id="confirmed">
+  <div class="field">
+    <label>Request type <span class="req">*</span></label>
+    <div class="choices" role="radiogroup">
+      {% for key, label in f.REQUEST_TYPES.items() %}
+      <label><input type="radio" name="request_type" value="{{ key }}" {{ 'checked' if values.get('request_type') == key }}> {{ label }}</label>
+      {% endfor %}
+    </div>
+    {% if errors.request_type %}<p class="err">{{ errors.request_type }}</p>{% endif %}
+  </div>
+  {% for fd in f.FIELDS %}
+  {% set val = values.get(fd.name) or '' %}
+  <div class="field" data-field="{{ fd.name }}" data-req="{{ fd.req|sort|join(' ') }}" data-opt="{{ fd.opt|sort|join(' ') }}">
+    <label for="f-{{ fd.name }}">{{ fd.label }} <span class="req" data-star>*</span><span class="opt" data-optional> (optional)</span></label>
+    {% if fd.kind == 'radio' %}
+      <div class="choices">
+      {% for v, lab in fd.options %}
+        <label><input type="radio" name="{{ fd.name }}" value="{{ v }}" {{ 'checked' if val == v }}> {{ lab }}</label>
+      {% endfor %}
+      </div>
+    {% elif fd.kind == 'select' %}
+      <select id="f-{{ fd.name }}" name="{{ fd.name }}">
+        <option value="">Choose…</option>
+        {% for v, lab in fd.options %}<option value="{{ v }}" {{ 'selected' if val == v }}>{{ lab }}</option>{% endfor %}
+      </select>
+    {% elif fd.kind == 'textarea' %}
+      <textarea id="f-{{ fd.name }}" name="{{ fd.name }}" rows="4" maxlength="5000" placeholder="{{ fd.placeholder or '' }}">{{ val }}</textarea>
+    {% elif fd.kind == 'date' %}
+      <input id="f-{{ fd.name }}" type="date" name="{{ fd.name }}" value="{{ val }}">
+    {% elif fd.kind == 'int' %}
+      <input id="f-{{ fd.name }}" type="text" inputmode="numeric" pattern="[0-9]*" name="{{ fd.name }}" value="{{ val }}" maxlength="15">
+    {% elif fd.kind == 'email' %}
+      <input id="f-{{ fd.name }}" type="email" name="{{ fd.name }}" value="{{ val }}" maxlength="254">
+    {% else %}
+      <input id="f-{{ fd.name }}" type="text" name="{{ fd.name }}" value="{{ val }}" maxlength="200" placeholder="{{ fd.placeholder or '' }}">
+    {% endif %}
+    {% if fd.help %}<p class="hint">{{ fd.help }}</p>{% endif %}
+    {% if errors[fd.name] %}<p class="err">{{ errors[fd.name] }}</p>{% endif %}
+  </div>
+  {% endfor %}
+  <button type="submit" id="pa-submit">Review and submit</button>
+  <p class="hint">You will see a summary to confirm before the request is saved.</p>
+</form>
+
+<div class="modal" id="pa-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pa-modal-title">
+  <div class="sheet">
+    <h3 id="pa-modal-title" style="margin:0">Please confirm the request</h3>
+    <pre id="pa-summary"></pre>
+    <div class="row">
+      <button type="button" class="btn2" id="pa-back">Back to edit</button>
+      <button type="button" id="pa-confirm">Confirm and submit</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var form=document.getElementById('pa-form');
+  function rtype(){var c=form.querySelector('input[name=request_type]:checked');return c?c.value:'';}
+  function apply(){
+    var t=rtype();
+    form.querySelectorAll('.field[data-field]').forEach(function(el){
+      var req=el.dataset.req.split(' '), opt=el.dataset.opt.split(' ');
+      var show=t && (req.indexOf(t)>=0 || opt.indexOf(t)>=0);
+      el.hidden=!show;
+      el.querySelectorAll('input,select,textarea').forEach(function(i){i.disabled=!show;});
+      el.querySelector('[data-star]').hidden=!(req.indexOf(t)>=0);
+      el.querySelector('[data-optional]').hidden=!(opt.indexOf(t)>=0);
+    });
+    document.getElementById('pa-submit').hidden=!t;
+  }
+  form.querySelectorAll('input[name=request_type]').forEach(function(r){r.addEventListener('change',apply);});
+  apply();
+
+  var modal=document.getElementById('pa-modal');
+  function clearErrors(){form.querySelectorAll('.err.js').forEach(function(e){e.remove();});}
+  form.addEventListener('submit',function(ev){
+    if(document.getElementById('confirmed').value==='1')return;
+    ev.preventDefault();
+    clearErrors();
+    var btn=document.getElementById('pa-submit'); btn.disabled=true;
+    fetch('{{ url_for("partner_approval.preview") }}',{method:'POST',body:new FormData(form),credentials:'same-origin'})
+      .then(function(r){return r.json();})
+      .then(function(j){
+        btn.disabled=false;
+        if(!j.ok){
+          var first=null;
+          Object.keys(j.errors||{}).forEach(function(k){
+            var host=form.querySelector('.field[data-field="'+k+'"]')||form.querySelector('.field');
+            var p=document.createElement('p'); p.className='err js'; p.textContent=j.errors[k];
+            host.appendChild(p); first=first||host;
+          });
+          if(first)first.scrollIntoView({behavior:'smooth',block:'center'});
+          return;
+        }
+        document.getElementById('pa-summary').textContent=j.summary;
+        modal.hidden=false; document.getElementById('pa-confirm').focus();
+      })
+      .catch(function(){btn.disabled=false; form.submit();});   // server shows a confirm page
+  });
+  document.getElementById('pa-back').addEventListener('click',function(){modal.hidden=true;});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')modal.hidden=true;});
+  document.getElementById('pa-confirm').addEventListener('click',function(){
+    document.getElementById('confirmed').value='1'; this.disabled=true; form.submit();
+  });
+})();
+</script>
+{% endblock %}
