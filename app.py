@@ -31,6 +31,7 @@ import angka
 import auth
 import chunked
 import cleanup
+import partner_approval
 
 BASE = Path(__file__).resolve().parent
 JOBS = Path(os.environ.get("DW_JOB_DIR", Path(tempfile.gettempdir()) /
@@ -72,7 +73,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.32 · 2026-10-30' (no date part when build is empty)."""
+    """'DW Calculator v1.33 · 2026-11-02' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
@@ -239,6 +240,8 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024 * 1024
 # decorating each view so a new endpoint cannot be added unprotected by accident.
 auth.register(app)
 chunked.register(app, JOBS)
+# Partner Approval (Beta): its own blueprints, SQLite file and storage folder.
+partner_approval.register(app)
 
 
 @app.teardown_request
@@ -256,6 +259,8 @@ def _require_login():
         return None
     if request.path.startswith("/admin"):
         return None                      # admin views carry their own stricter check
+    if request.blueprint == "partner_sign":
+        return None                      # public signing page: the link token is the key
     user = auth.current_user()
     if not user:
         # Browsers get the styled sign-in page. Accept */* and a missing Accept
@@ -266,7 +271,8 @@ def _require_login():
         return auth._deny()
     request.user = user
     if (request.path == "/" or request.path.startswith("/tool/") or
-            request.path == "/template"):
+            request.path == "/template" or request.path == "/approval" or
+            request.path.startswith("/approval/")):
         return _require_company("dpm")
     if request.path == "/kvb" or request.path.startswith("/kvb/"):
         return _require_company("kvb")

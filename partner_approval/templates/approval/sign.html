@@ -1,0 +1,90 @@
+{% extends "approval/_sign_base.html" %}
+{% block body %}
+<h1>Partnership agreement</h1>
+<p class="muted">Please read the agreement, then sign it on this page or upload a signed copy. This link is personal and can be used once. It is valid until {{ expires }}.</p>
+{% if req.resign_note and req.status == 'resign' %}<div class="card" style="border-color:#f0c48a;background:#fff8ee"><b>Note from Dupoin:</b> {{ req.resign_note }}</div>{% endif %}
+{% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+
+<div class="card">
+  <h2>Your details</h2>
+  <dl>
+    <dt>Name</dt><dd>{{ req.data.partner_name }}</dd>
+    <dt>Passport/National ID</dt><dd>{{ req.data.passport }}</dd>
+    <dt>Role</dt><dd>{{ req.data.role }}</dd>
+    <dt>Dupoin UID</dt><dd>{{ req.data.uid }}</dd>
+    <dt>Region</dt><dd>{{ req.data.region }}</dd>
+    <dt>Effective date</dt><dd>{{ req.data.effective_date }}</dd>
+  </dl>
+</div>
+
+<div class="card">
+  <div class="row" style="justify-content:space-between"><h2 style="margin:0">Agreement</h2>
+    <a class="btn light" href="{{ url_for('partner_sign.sign_pdf', token=token, download=1) }}">Download PDF</a></div>
+  <iframe title="Agreement PDF" src="{{ url_for('partner_sign.sign_pdf', token=token) }}" style="margin-top:12px"></iframe>
+</div>
+
+<div class="card" id="opt-a">
+  <h2>Option A · Sign on this page</h2>
+  <div class="tabs" role="tablist">
+    <button type="button" role="tab" aria-selected="true" data-mode="draw">Draw signature</button>
+    <button type="button" role="tab" aria-selected="false" data-mode="typed">Type your name</button>
+  </div>
+  <form method="post" action="{{ url_for('partner_sign.sign_submit', token=token) }}" id="sign-form">
+    <input type="hidden" name="mode" value="draw" id="mode">
+    <input type="hidden" name="signature" id="signature">
+    <div data-panel="draw">
+      <canvas class="pad" id="pad" aria-label="Signature pad"></canvas>
+      <div class="row" style="margin-top:8px"><button type="button" class="btn light" id="clear">Clear</button>
+        <span class="muted">Sign with your mouse, finger or pen.</span></div>
+    </div>
+    <div data-panel="typed" hidden>
+      <input type="text" name="typed_name" id="typed_name" maxlength="80" placeholder="Type your full name" value="{{ req.data.partner_name }}" autocomplete="name">
+      <div class="typed" id="typed-preview" aria-hidden="true">{{ req.data.partner_name }}</div>
+    </div>
+    <label class="agree"><input type="checkbox" name="agree" value="1" id="agree">
+      <span>I agree to the terms of this agreement, and I agree that my electronic signature above is my signature.</span></label>
+    <button class="btn" type="submit" id="sign-submit">Sign agreement</button>
+  </form>
+</div>
+
+<div class="card" id="opt-b">
+  <h2>Option B · Sign on paper and upload</h2>
+  <p class="muted">Download the PDF, print and sign it (or sign the PDF), then upload the signed copy. PDF, JPG or PNG, up to {{ max_mb }} MB.</p>
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('partner_sign.sign_upload', token=token) }}">
+    <input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required>
+    <p><button class="btn" type="submit">Upload signed copy</button></p>
+  </form>
+</div>
+
+<script>
+(function(){
+  var pad=document.getElementById('pad'), ctx=pad.getContext('2d'), drawn=false, last=null;
+  var lastW=0;
+  function size(){var r=pad.getBoundingClientRect(), d=window.devicePixelRatio||1;
+    if(Math.round(r.width)===lastW) return; lastW=Math.round(r.width);  // height-only resizes keep the drawing
+    var img=drawn?pad.toDataURL():null; pad.width=r.width*d; pad.height=r.height*d;
+    ctx.setTransform(d,0,0,d,0,0); ctx.lineWidth=2.6; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#102060';
+    if(img){var i=new Image(); i.onload=function(){ctx.drawImage(i,0,0,r.width,r.height)}; i.src=img;}}
+  size(); window.addEventListener('resize',size);
+  function pt(e){var r=pad.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top};}
+  pad.addEventListener('pointerdown',function(e){pad.setPointerCapture(e.pointerId); last=pt(e); ctx.beginPath(); ctx.arc(last.x,last.y,1.2,0,7); ctx.fillStyle='#102060'; ctx.fill(); drawn=true;});
+  pad.addEventListener('pointermove',function(e){if(!last)return; var p=pt(e); ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(p.x,p.y); ctx.stroke(); last=p;});
+  ['pointerup','pointercancel','pointerleave'].forEach(function(n){pad.addEventListener(n,function(){last=null;});});
+  document.getElementById('clear').addEventListener('click',function(){ctx.clearRect(0,0,pad.width,pad.height); drawn=false;});
+  var mode=document.getElementById('mode');
+  document.querySelectorAll('[data-mode]').forEach(function(b){b.addEventListener('click',function(){
+    mode.value=b.dataset.mode;
+    document.querySelectorAll('[data-mode]').forEach(function(x){x.setAttribute('aria-selected',x===b);});
+    document.querySelectorAll('[data-panel]').forEach(function(p){p.hidden=p.dataset.panel!==b.dataset.mode;});
+  });});
+  var tn=document.getElementById('typed_name'), tp=document.getElementById('typed-preview');
+  tn.addEventListener('input',function(){tp.textContent=tn.value;});
+  document.getElementById('sign-form').addEventListener('submit',function(e){
+    if(mode.value==='draw'){ if(!drawn){e.preventDefault(); alert('Please draw your signature first.'); return;}
+      document.getElementById('signature').value=pad.toDataURL('image/png'); }
+    if(!document.getElementById('agree').checked){e.preventDefault(); alert("Please tick 'I agree' to sign."); return;}
+    document.getElementById('sign-submit').disabled=true;
+  });
+})();
+</script>
+{% endblock %}

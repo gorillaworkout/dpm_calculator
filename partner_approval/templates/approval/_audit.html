@@ -1,0 +1,10 @@
+<table class="pa audit">
+  <thead><tr><th>When (WIB)</th><th>Who</th><th>Status</th><th>Note</th></tr></thead>
+  <tbody>
+  {% for a in audit %}
+  <tr><td style="white-space:nowrap">{{ wib(a['at'], '%Y-%m-%d %H:%M:%S WIB') }}</td><td>{{ a['actor'] }}</td>
+    <td>{% if a['from_status'] != a['to_status'] %}{{ STATUS.get(a['from_status'], '—') if a['from_status'] else '—' }} → {{ STATUS.get(a['to_status'], a['to_status']) }}{% else %}{{ STATUS.get(a['to_status'], '') }}{% endif %}</td>
+    <td>{{ a['note'] or '' }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>

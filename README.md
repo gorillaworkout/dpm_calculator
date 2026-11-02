@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.32 · 2026-10-30`.
+required) show the running version, for example `DW Calculator v1.33 · 2026-11-02`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.32)
+### Tests (`test_*.py`, v1.33)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -894,3 +894,53 @@ python3 hitung_dw.py file.xlsx --sheet D Withdrawal
   resume. Queue tickets expire 30 s after the last poll.
 - The browser discards its upload when retries run out, when a file cannot be read, and on
   tab close (`pagehide` via `sendBeacon`, skipped for pages kept in the back/forward cache).
+
+---
+
+## Partner Approval (Beta, v1.33)
+
+Test-only, DPM-only. Sales fill the "Sales PartnerRequest" form at `/approval`
+(the same fields and conditional rules as the Lark form). The admin approves or
+rejects at `/approval/admin`. For **Agreement** and **Special MIB** requests,
+approving fills the role's Word template, converts it to PDF, and creates a
+one-time signing link (`/sign/<token>`, no login, valid 14 days). The partner
+either signs on screen (draws, or types their name in a script font) or uploads a
+signed copy. The request then waits as **Signed – Under Review** until the admin
+marks it **Completed** or asks for a re-sign, which creates a new link. A
+**Dowgrade** or **Remove - Exit** request is approved or rejected only; approving
+one marks it Completed.
+
+- The code is self-contained in `partner_approval/`, with two Flask blueprints
+  and its own SQLite DB, so it can move to FinanceOS later. `app.py` only calls
+  `partner_approval.register(app)`.
+- **Who can use it:** only users with DPM access. A KVB-only user is sent to
+  `/kvb`. Admin pages and actions are for admins only.
+- **Agreement templates:** `partner_approval/agreement_templates/<ROLE>.docx`.
+  Only `CM.docx` exists so far. Approving any other role still works, with the
+  note "Agreement template for <role> not ready yet" and no link.
+  See `agreement_templates/README.md`.
+- **The company signature column is never filled**, not even after the partner
+  signs. The partner's signature goes in the "SIGNED by the Country Manager"
+  cell.
+- **PDF needs LibreOffice on the server:** `sudo apt install libreoffice-writer`.
+  If it is missing, approval still records the decision and the admin page
+  shows the install hint and a "Retry agreement" button. There is no separate
+  pip package for this. `python-docx` and `Pillow` are listed in
+  `requirements.txt`.
+- **E-mail:** sent only when `DW_SMTP_HOST` and `DW_SMTP_FROM` are set.
+  Otherwise the admin page shows the link with a Copy button and the note
+  "Email not sent: SMTP not configured".
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `DW_APPROVAL_DB` | `approval.db` next to `DW_AUTH_DB` | requests, tokens, audit log |
+| `DW_APPROVAL_DIR` | `approval_files/` next to `DW_AUTH_DB` | generated and signed files |
+| `DW_APPROVAL_TEMPLATES` | `partner_approval/agreement_templates` | `<ROLE>.docx` templates |
+| `DW_SIGN_LINK_DAYS` | `14` | days a signing link stays valid |
+| `DW_PUBLIC_BASE_URL` | `https://dw-calculator.gorillaworkout.id` | base URL used in signing links |
+| `DW_SOFFICE` | `soffice` on PATH | path to LibreOffice |
+| `DW_SMTP_HOST`, `DW_SMTP_PORT`, `DW_SMTP_USER`, `DW_SMTP_PASSWORD`, `DW_SMTP_FROM`, `DW_SMTP_TLS` (`starttls`/`ssl`/`none`) | unset | outgoing e-mail |
+
+`approval.db` and `approval_files/` hold partner data. Keep them out of git and
+back them up like `users.db`. Tests: `test_partner_approval.py` and
+`test_partner_approval_docs.py`. Both run without LibreOffice.

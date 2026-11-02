@@ -32,3 +32,8 @@ users.db
 
 # Isolated feature worktrees
 .worktrees/
+
+# Partner Approval (Beta) data: partner details and signed agreements
+approval.db
+approval.db-*
+approval_files/

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% from "approval/_status.html" import badge %}
+{% block title %}Partner Approval (Beta) · Dupoin DPM Tools{% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+{% include "approval/_style.html" %}
+<div class="pa-head"><h1>Partner <span>Approval</span></h1><span class="beta">Beta · test only</span></div>
+<p class="lede">Submit a Sales Partner Request (Agreement, Special MIB, Dowgrade, Remove - Exit) and follow its status here.</p>
+<p><a class="dl" href="{{ url_for('partner_approval.new') }}">+ New request</a>
+{% if is_admin %} &nbsp; <a href="{{ url_for('partner_approval.admin_list') }}" style="color:#9db8ff">Admin: review requests →</a>{% endif %}</p>
+<h3 style="margin-top:30px">My requests</h3>
+{% if requests %}
+<table class="pa">
+  <thead><tr><th>Ref</th><th>Type</th><th>Partner</th><th>Role</th><th>Submitted</th><th>Status</th></tr></thead>
+  <tbody>
+  {% for r in requests %}
+    <tr><td><a href="{{ url_for('partner_approval.mine', rid=r.id) }}">{{ r.ref }}</a></td>
+      <td>{{ types[r.request_type] }}</td><td>{{ r.partner_name }}</td><td>{{ r.role }}</td>
+      <td>{{ wib(r.created_at) }}</td><td>{{ badge(r) }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="hint">You have not submitted a request yet.</p>{% endif %}
+{% endblock %}

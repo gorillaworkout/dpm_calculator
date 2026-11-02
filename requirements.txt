@@ -7,3 +7,7 @@ Werkzeug>=3
 itsdangerous>=2
 openpyxl>=3.1
 pdfplumber>=0.11
+# Partner Approval (Beta): fill the Word agreement template, signature images.
+# PDF conversion uses LibreOffice (apt: libreoffice-writer), not a pip package.
+python-docx>=1.1
+Pillow>=10
