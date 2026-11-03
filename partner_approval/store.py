@@ -99,7 +99,9 @@ CREATE INDEX IF NOT EXISTS hits_key ON hits(key, at);
 
 # Columns added after v1.33; existing databases get them on first open.
 MIGRATIONS = {
-    "requests": {"submit_key": "TEXT", "email_at": "REAL"},
+    "requests": {"submit_key": "TEXT", "email_at": "REAL",
+                 # v1.35: admin-only Personal Information Form (never shown to the partner)
+                 "pif_pdf": "TEXT", "pif_docx": "TEXT", "pif_note": "TEXT"},
     "tokens": {"token_hash": "TEXT", "opened_at": "REAL"},
 }
 INDEXES = """
@@ -316,6 +318,12 @@ def _req(row):
         return None
     r = dict(row)
     r["data"] = json.loads(r["data"])
+    # v1.35 renamed "Special MIB" to "Special Terms": old rows are mapped on read
+    # (the stored row is not rewritten, so a rollback still reads it).
+    legacy = {"special_mib": "special_terms"}
+    r["request_type"] = legacy.get(r["request_type"], r["request_type"])
+    if r["data"].get("request_type") in legacy:
+        r["data"]["request_type"] = legacy[r["data"]["request_type"]]
     r["ref"] = ref(r["id"])
     r["status_label"] = STATUS.get(r["status"], r["status"])
     return r

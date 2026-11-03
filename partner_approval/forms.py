@@ -11,14 +11,20 @@ import unicodedata
 # Request type key -> label. "Dowgrade" is the source form's own spelling.
 REQUEST_TYPES = {
     "agreement": "Agreement",
-    "special_mib": "Special MIB",
+    "special_terms": "Special Terms",
     "downgrade": "Dowgrade",
     "exit": "Remove - Exit",
 }
-AGREEMENT_TYPES = ("agreement", "special_mib")      # an agreement may be generated
+AGREEMENT_TYPES = ("agreement", "special_terms")    # an agreement is always generated
+# Requests stored before v1.35 say "special_mib" (the type was called "Special
+# MIB"); they are read as "special_terms" (store._req), nothing is rewritten.
+LEGACY_TYPES = {"special_mib": "special_terms"}
+PIF_TYPES = ("agreement",)                           # admin-only Personal Information Form
 CHANGE_TYPES = ("downgrade", "exit")                 # approve / reject only
 
 ROLES = ("CM", "BM", "RM", "MIB", "NCIB", "RD")
+# Roles a request type allows (default: all). Special Terms is for MIB only.
+ROLES_FOR = {"special_terms": ("MIB",)}
 REGIONS = ("Vietnam", "Thailand", "India", "Japan", "Egypt", "PH", "Laos", "Korea",
            "Singapore", "Pakistan", "Bangladesh", "UAE", "Saudi Arabia")
 DESKS = ("TH & LA Desk", "VN Desk", "ASIA Desk", "GEM Desk")
@@ -29,7 +35,6 @@ SALES_TEAMS = {"Frank Team": "\U0001F7E2 Frank Team",
 CONTRACT_TYPES = {"NEW": "NEW", "RENEW / UPDATE": "RENEW / UPDATE"}
 NEW_POSITIONS = ("RM", "MIB", "Client")
 DOWNGRADE_TYPES = ("Remove from Salary List", "Downgrade CRM Role", "Adjustment Rebate")
-YES_NO = ("Yes", "No")
 
 A, C = set(AGREEMENT_TYPES), set(CHANGE_TYPES)
 ALL = A | C
@@ -57,9 +62,9 @@ FIELDS = [
     dict(name="partner_name", label="Partner Name", kind="text", req=ALL, opt=set()),
     dict(name="passport", label="Passport/National ID", kind="text", req=A, opt=set()),
     dict(name="address", label="Address", kind="textarea", req=A, opt=set()),
-    dict(name="team_upline", label="Team Upline ONLY", kind="text", req=A, opt=set(),
-         help="111111-222222-333333",
-         placeholder="ISS L\u00ca TH\u00c0NH T\u00c2M 446157 > RM 543936 LODIS"),
+    dict(name="team_upline", label="Team Upline ONLY", kind="upline", req=A, opt=set(),
+         help="Digits only, 6 per UID. \u201c - \u201d is added after every 6 digits.",
+         placeholder="123456 - 123456 - 123456"),
     dict(name="background", label="Background", kind="textarea", req=A, opt=set()),
     dict(name="allowance_scheme", label="Allowance Scheme", kind="textarea", req=A, opt=set(),
          placeholder="Net Deposit : 12%"),
@@ -67,7 +72,7 @@ FIELDS = [
          placeholder="Rebate will be set by superior"),
     dict(name="region", label="Region", kind="select", options=_opts(REGIONS), req=A, opt=set()),
     dict(name="effective_date", label="Effective Date", kind="date", req=ALL, opt=set(),
-         help="Apply for Agreement , Special MIB & Downgrade", default_today=True),
+         help="Apply for Agreement , Special Terms & Downgrade", default_today=True),
     dict(name="onboard_date", label="Onboard Date", kind="date", req=A, opt=set()),
     dict(name="submission_date", label="Agreement Submission Date", kind="date", req=A, opt=set()),
     dict(name="new_position", label="New Position", kind="radio", options=_opts(NEW_POSITIONS),
@@ -78,8 +83,9 @@ FIELDS = [
     dict(name="partner_email", label="Partner Email", kind="email", req=A, opt=C),
     dict(name="desk", label="Desk Accountable", kind="radio", options=_opts(DESKS),
          req=ALL, opt=set()),
-    dict(name="create_agreement", label="Do u want to create agreement?", kind="radio",
-         options=_opts(YES_NO), req=set(), opt=ALL),
+    # "Do u want to create agreement?" was removed in v1.35: Agreement and Special
+    # Terms always create one. Old requests may still have it in their data; it
+    # is neither shown nor required.
 ]
 FIELD = {f["name"]: f for f in FIELDS}
 
@@ -94,6 +100,33 @@ _SPOOF = re.compile("[\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]")
 
 def valid_email(value):
     return bool(value) and len(value) <= 254 and _EMAIL.fullmatch(value) is not None
+
+
+UPLINE_GROUP = 6
+UPLINE_RE = re.compile(r"^\d{6}( - \d{6})*$")
+
+
+def format_upline(value):
+    """'123456123456' / '123456-123456' / '123456 - 123456' -> '123456 - 123456'.
+
+    Returns (formatted, error). Spaces and dashes between the digits are
+    ignored (pasted text); any other character is an error, as is a last group
+    that is not 6 digits.
+    """
+    if re.search(r"[^\d\s\-\u2013\u2014]", value):
+        return None, "Team Upline: digits only (6-digit UIDs separated by \u201c - \u201d)."
+    digits = re.sub(r"\D", "", value)
+    if not digits:
+        return None, "Team Upline: digits only (6-digit UIDs separated by \u201c - \u201d)."
+    if len(digits) % UPLINE_GROUP:
+        return None, (f"Team Upline: each UID has {UPLINE_GROUP} digits. The last one has "
+                      f"{len(digits) % UPLINE_GROUP}, add the missing digits or remove it.")
+    out = " - ".join(digits[i:i + UPLINE_GROUP] for i in range(0, len(digits), UPLINE_GROUP))
+    return out, None
+
+
+def roles_for(rtype):
+    return ROLES_FOR.get(rtype, ROLES)
 
 
 def fields_for(rtype):
@@ -120,6 +153,7 @@ def validate(form):
     """
     errors = {}
     rtype = (form.get("request_type") or "").strip()
+    rtype = LEGACY_TYPES.get(rtype, rtype)          # a form opened before v1.35
     if rtype not in REQUEST_TYPES:
         return {}, {"request_type": "Choose what request you have."}
     data = {"request_type": rtype}
@@ -153,6 +187,15 @@ def validate(form):
             if not valid_email(raw):
                 errors[name] = f"{f['label']} is not a valid e-mail address."
                 continue
+        elif kind == "upline":
+            raw, err = format_upline(raw)
+            if err:
+                errors[name] = err
+                continue
+        if name == "role" and raw not in roles_for(rtype):
+            errors[name] = (f"{REQUEST_TYPES[rtype]} requests are for the "
+                            f"{' / '.join(roles_for(rtype))} role only.")
+            continue
         data[name] = raw
     return data, errors
 
@@ -181,7 +224,7 @@ def summary(data):
     lines = []
     if rtype in AGREEMENT_TYPES:
         lines.append("Partnership Agreement" if rtype == "agreement"
-                     else "Partnership Agreement (Special MIB)")
+                     else "Partnership Agreement (Special Terms)")
         lines.append(f"Effective Date: {us_date(g('effective_date'))}")
         lines.append(f"Onboard Date: {us_date(g('onboard_date'))}")
         lines.append(f"Team: {(g('sales_team') or '').replace(' Team', '')}")
@@ -201,8 +244,7 @@ def summary(data):
         lines += [f"Partner Email: {g('partner_email', '')}",
                   f"Sales UID: {g('sales_uid', '')}",
                   f"Agreement Submission Date: {us_date(g('submission_date'))}",
-                  f"Desk Accountable: {g('desk', '')}",
-                  f"Create agreement: {g('create_agreement') or '-'}"]
+                  f"Desk Accountable: {g('desk', '')}"]
     else:
         lines.append(REQUEST_TYPES[rtype])
         lines += [f"Effective Date: {us_date(g('effective_date'))}",
@@ -212,15 +254,14 @@ def summary(data):
                   f"New Position: {g('new_position', '')}",
                   f"Type of Downgrade: {g('downgrade_type', '')}",
                   f"Partner Email: {g('partner_email') or '-'}",
-                  f"Desk Accountable: {g('desk', '')}",
-                  f"Create agreement: {g('create_agreement') or '-'}"]
+                  f"Desk Accountable: {g('desk', '')}"]
     return "\n".join(lines)
 
 
 DETAIL_SECTIONS = (
     ("Request", ("contract_type", "sales_team", "sales_uid", "region", "desk", "effective_date",
                  "onboard_date", "submission_date", "new_position", "downgrade_type",
-                 "create_agreement", "team_upline", "background", "allowance_scheme",
+                 "team_upline", "background", "allowance_scheme",
                  "remarks")),
     ("Partner", ("partner_name", "role", "uid", "passport", "partner_email", "address")),
 )
@@ -242,8 +283,7 @@ def details(data):
                 value = AGREEMENT_TYPE_LABEL.get(value, value)
             elif name == "sales_team":
                 value = value.replace(" Team", "")
-            rows.append((fd["label"].replace(" ONLY", "").replace("Do u want to create agreement?",
-                                                                    "Create agreement"),
+            rows.append((fd["label"].replace(" ONLY", ""),
                          value or "\u2014", fd["kind"] == "textarea" or len(value) > 60))
         if rows:
             out.append((title, rows))
