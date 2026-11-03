@@ -24,7 +24,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SIGNATURE_FONTS = HERE / "static" / "signature_fonts"
 SCRIPT_FONT = SIGNATURE_FONTS / "1-DarceyOliver-Regular.ttf"  # fallback if a custom folder is empty
-MAX_SIGNATURE_FONTS = 6
+MAX_SIGNATURE_FONTS = 8
 _FONT_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(ttf|otf)$")
 MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 

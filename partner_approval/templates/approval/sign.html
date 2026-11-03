@@ -58,7 +58,7 @@
       <label class="fl" for="typed_name">Full name</label>
       <input type="text" name="typed_name" id="typed_name" maxlength="80" value="{{ typed if typed is not none else req.data.partner_name }}" autocomplete="name">
       {% set shown = typed if typed is not none else req.data.partner_name %}
-      <fieldset class="fonts" id="fonts" role="radiogroup" aria-label="Signature style">
+      <fieldset class="fonts" id="fonts" role="radiogroup" aria-label="Signature style" data-chose="{{ '1' if font_chosen else '' }}">
         <legend>Choose a signature style</legend>
         {% for f in fonts %}
         <label class="fopt{{ ' off' if f.missing }}" data-chars="{{ f.chars }}"><input type="radio" name="font" value="{{ f.id }}"{{ ' checked' if f.id == font }}{{ ' disabled' if f.missing }}>
@@ -140,7 +140,9 @@
 
   var tn = document.getElementById('typed_name'), sigs = document.querySelectorAll('[data-sig]');
   // A style that lacks a letter of the name is disabled (the server applies the same rule).
-  var fopts = document.querySelectorAll('.fopt[data-chars]'), fnote = document.getElementById('font-note');
+  // Until the partner picks a style, the first style that can show the name is selected.
+  var fopts = document.querySelectorAll('.fopt[data-chars]'), fnote = document.getElementById('font-note'), chose = document.getElementById('fonts').dataset.chose === '1';
+  fopts.forEach(function (o) { o.querySelector('input').addEventListener('change', function () { chose = true; }); });
   function fit() {
     var name = (tn.value || '').normalize('NFC'), first = null, picked = null;
     fopts.forEach(function (o) {
@@ -149,9 +151,9 @@
       r.disabled = miss.length > 0; o.classList.toggle('off', r.disabled);
       o.querySelector('[data-na]').textContent = miss.length ? 'Can\u2019t show ' + miss.join(' ') : '';
       if (!r.disabled && !first) first = r;
-      if (r.checked && !r.disabled) picked = r;
+      if (r.checked && !r.disabled && chose) picked = r;
     });
-    if (!picked) fopts.forEach(function (o) { o.querySelector('input').checked = false; });
+    if (!picked) { chose = false; fopts.forEach(function (o) { o.querySelector('input').checked = false; }); }
     if (!picked && first) first.checked = true;
     fnote.hidden = !!first || !fopts.length;
   }

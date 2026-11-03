@@ -178,8 +178,14 @@ for bad in ("", " ", "x", "y" * 81):
 fonts = docs.signature_fonts()
 assert 1 <= len(fonts) <= docs.MAX_SIGNATURE_FONTS, fonts
 assert [f["id"] for f in fonts] == sorted(f["id"] for f in fonts)
-assert [f["id"] for f in fonts] == ["1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia"]
-assert [f["label"] for f in fonts] == ["Darcey Oliver", "Budaphest", "Augustia"]
+VI_FONTS = ["4-GreatVibes-Regular", "5-DancingScript-Regular", "6-Allura-Regular"]
+assert [f["id"] for f in fonts] == ["1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia"] + VI_FONTS
+assert [f["label"] for f in fonts] == ["Darcey Oliver", "Budaphest", "Augustia",
+                                       "Great Vibes", "Dancing Script", "Allura"]
+assert docs.MAX_SIGNATURE_FONTS >= 6
+for fid in VI_FONTS:                            # each free font ships its OFL licence
+    stem = fid.split("-", 1)[1].replace("-Regular", "")
+    assert "SIL Open Font License" in (docs.SIGNATURE_FONTS / f"{stem}-OFL.txt").read_text()
 assert docs.SCRIPT_FONT.is_file() and docs.SCRIPT_FONT.name == fonts[0]["file"]
 assert all(f["label"] and "Regular" not in f["label"] for f in fonts), fonts
 assert docs._font_label("2-MyBrandScript-Regular") == "My Brand Script"
@@ -192,7 +198,10 @@ except ImportError:
 for f in fonts:
     if TTFont:
         cmap = {chr(c) for c in TTFont(docs.SIGNATURE_FONTS / f["file"]).getBestCmap()}
-        assert set(f["chars"]) == cmap & docs.SIGNATURE_CHARSET, f["id"]   # measured == real cmap
+        # measured coverage = the cmap, plus letters PIL composes from base + combining marks
+        assert cmap & docs.SIGNATURE_CHARSET <= set(f["chars"]), f["id"]
+        if f["id"] in ("1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia"):
+            assert set(f["chars"]) == cmap & docs.SIGNATURE_CHARSET, f["id"]
     assert set("ABCXYZabcxyz") <= set(f["chars"]), f["id"]
     assert docs.typed_signature("Andrew Tan", f["id"]).startswith(docs.PNG_MAGIC)
 VI = "Nguy\u1ec5n V\u0103n \u0110\u1ee9c"
@@ -201,13 +210,23 @@ assert docs.unsupported_chars("Jean-Luc O'Brien 2", "2-Budaphest-Regular") == ["
 assert docs.unsupported_chars("Jean-Luc O'Brien 2", "1-DarceyOliver-Regular") == []
 assert docs.unsupported_chars("Nguye\u0302\u0303n", "1-DarceyOliver-Regular") == ["\u1ec5"]  # NFD -> NFC
 assert docs.unsupported_chars("Andrew \U0001F600", "3-Augustia") == ["\U0001F600"]
-assert docs.first_font_for("Jean-Luc") == "1-DarceyOliver-Regular" and docs.first_font_for(VI) is None
-for f in fonts:
+assert docs.first_font_for("Jean-Luc") == "1-DarceyOliver-Regular"
+assert docs.first_font_for(VI) == "4-GreatVibes-Regular"
+assert docs.first_font_for("Lê Thành Tâm") == "4-GreatVibes-Regular"
+assert docs.first_font_for("\u738b\u5c0f\u660e") is None              # not Latin/Vietnamese -> draw
+# every Vietnamese letter is drawable in at least the 3 OFL styles
+ALL_VI = ("ÀÁÂÃÈÉÊÌÍÒÓÔÕÙÚÝàáâãèéêìíòóôõùúýĂăĐđĨĩŨũƠơƯưẠạẢảẤấẦầẨẩẪẫẬậẮắẰằẲẳẴẵẶặẸẹẺẻẼẽẾếỀềỂểỄễỆệ"
+          "ỈỉỊịỌọỎỏỐốỒồỔổỖỗỘộỚớỜờỞởỠỡỢợỤụỦủỨứỪừỬửỮữỰựỲỳỴỵỶỷỸỹ")
+for fid in VI_FONTS:
+    assert docs.unsupported_chars(ALL_VI, fid) == [], fid
+    assert docs.typed_signature(VI, fid).startswith(docs.PNG_MAGIC)
+for f in fonts[:3]:                              # Bayu's fonts: refused, never tofu
     try:
         docs.typed_signature(VI, f["id"])
         raise AssertionError(f"tofu accepted in {f['id']}")
     except docs.SignatureError as exc:
         assert "cannot show some letters" in str(exc)
+assert sum(not docs.unsupported_chars(VI, f["id"]) for f in fonts) >= 3
 try:
     docs.typed_signature("O'Brien", "2-Budaphest-Regular")
     raise AssertionError("Budaphest has no apostrophe")

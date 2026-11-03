@@ -590,12 +590,13 @@ def _render_sign(req, token, row, error=None, mode="draw", typed=None, font=None
         f["missing"] = "".join(ch for ch in dict.fromkeys(shown)
                                if not ch.isspace() and ch not in f["chars"])
     usable = [f["id"] for f in fonts if not f["missing"]]
-    if font not in usable:
+    font_chosen = font in usable            # a style the partner picked (form re-shown after an error)
+    if not font_chosen:
         font = usable[0] if usable else ""
     return render_template("approval/sign.html", req=req, token=token,
                            expires=wib(row["expires_at"], LONG_DATE), error=error,
                            pages=_previews(req), mode=mode, typed=typed,
-                           fonts=fonts, font=font,
+                           fonts=fonts, font=font, font_chosen=font_chosen,
                            max_mb=docs.MAX_UPLOAD // (1024 * 1024))
 
 

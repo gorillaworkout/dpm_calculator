@@ -965,13 +965,14 @@ without LibreOffice.
   `partner_approval/static/signature_fonts/` (each option previews their name).
   The server renders the signature with the chosen font: the id must match a
   file in that folder (letters, digits, `-`, `_`; `.ttf`/`.otf`; no symlinks;
-  max 6), anything else is refused. The style is written to the activity log.
-  The fonts are Darcey Oliver (default), Budaphest and Augustia. A style that
-  cannot show a letter of the typed name is greyed out on the page and refused
-  by the server (same rule), so no empty "tofu" boxes; if no style can show the
-  name (most Vietnamese names), the partner is asked to draw. Add/replace fonts
-  by dropping TTFs in that folder, no restart needed. See
-  `signature_fonts/README.md`.
+  max 8), anything else is refused. The style is written to the activity log.
+  The fonts are Bayu's Darcey Oliver (default), Budaphest and Augustia, then
+  Great Vibes, Dancing Script and Allura (SIL OFL, full Vietnamese). A style
+  that cannot show a letter of the typed name is greyed out on the page and
+  refused by the server (same rule), so no empty "tofu" boxes; the first style
+  that can show the name is pre-selected (a Vietnamese name always has the 3
+  OFL styles). Add/replace fonts by dropping TTFs in that folder, no restart
+  needed. See `signature_fonts/README.md`.
 
 ### Admin pages (v1.34)
 
