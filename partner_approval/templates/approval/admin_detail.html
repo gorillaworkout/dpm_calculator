@@ -93,6 +93,23 @@
       {{ details_card(details) }}
     </section>
 
+    {% if latest or files.pif_pdf or pif_applies %}
+    <section class="pa-card" id="quick-files">
+      <h3>Files <span class="mini">(admin only)</span></h3>
+      <div class="doclist">
+        {% if latest %}<div class="row"><span>Agreement (PDF) <span class="mini">· {{ 'signed copy' if latest == 'signed_file' else 'generated, not signed yet' }}</span></span><span class="btns">
+          <a class="btn btn-secondary btn-sm" id="latest-agreement" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind=latest, inline=1) }}" target="_blank" rel="noopener">Open</a></span></div>{% endif %}
+        {% if files.pif_pdf %}<div class="row"><span>Personal Information Form (PDF) <span class="mini">· never sent to the partner</span></span><span class="btns">
+          <a class="btn btn-secondary btn-sm" id="pif-link" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='pif_pdf', inline=1) }}" target="_blank" rel="noopener">Open</a>
+          {% if files.pif_docx %}<a class="btn btn-ghost btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='pif_docx') }}">.docx</a>{% endif %}</span></div>
+        {% elif pif_applies %}<div class="row"><span>Personal Information Form <span class="mini">· {{ req.pif_note or ('made at approval' if req.status == 'pending' else 'not created yet') }}</span></span><span class="btns">
+          {% if req.status not in ('pending', 'rejected') %}<form method="post" action="{{ url_for('partner_approval.pif', rid=req.id) }}" class="once">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button type="submit" class="btn btn-secondary btn-sm" id="pif-btn">Create PIF</button></form>{% endif %}</span></div>{% endif %}
+      </div>
+    </section>
+    {% endif %}
+
     {% if files.agreement_pdf or files.agreement_docx or (files.signed_file and not show_signed) %}
     <section class="pa-card" id="documents">
       <h3>{{ 'Agreement sent for signature' if show_signed else 'Documents' }}</h3>

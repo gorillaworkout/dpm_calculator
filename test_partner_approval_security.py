@@ -77,11 +77,11 @@ def sign_csrf(token):
 AGREEMENT = {
     "request_type": "agreement", "contract_type": "NEW", "sales_team": "Shawn Team",
     "sales_uid": "100200", "role": "CM", "uid": "999001", "partner_name": "Sec Partner",
-    "passport": "X0000001", "address": "1 Sample Road", "team_upline": "RM 1",
+    "passport": "X0000001", "address": "1 Sample Road", "team_upline": "123456",
     "background": "Dummy.", "allowance_scheme": "Net Deposit : 12%", "remarks": "-",
     "region": "Vietnam", "effective_date": "2026-11-01", "onboard_date": "2026-10-09",
     "submission_date": "2026-10-30", "partner_email": "partner@example.com",
-    "desk": "VN Desk", "create_agreement": "Yes",
+    "desk": "VN Desk",
 }
 
 

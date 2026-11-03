@@ -139,6 +139,54 @@ def _agreement_applies(req):
     return req["request_type"] in forms.AGREEMENT_TYPES
 
 
+def _pif_applies(req):
+    return req["request_type"] in forms.PIF_TYPES
+
+
+def _issue_pif(req, actor):
+    """Fill + convert the admin-only Personal Information Form (Agreement requests).
+
+    Stored as <files>/<id>/pif.pdf. It is never e-mailed and no /sign route
+    serves it. Never raises for an expected problem; the reason goes to pif_note.
+    Returns True when the PDF exists afterwards.
+    """
+    rid = req["id"]
+    if not _pif_applies(req):
+        return False
+    template = docs.pif_template(SETTINGS.templates)
+    if template is None:
+        note = "PIF template (PIF.docx) not found"
+        STORE.update(rid, pif_note=note)
+        STORE.log(rid, actor, note)
+        return False
+    out = _files_dir(rid)
+    docx_path = out / "pif.docx"
+    try:
+        docs.fill_pif(template, req["data"], docx_path)
+        STORE.update(rid, pif_docx=_rel(docx_path))
+        pdf = docs.docx_to_pdf(docx_path, out / "pif.pdf", SETTINGS.soffice)
+    except (docs.ConversionUnavailable, docs.ConversionFailed) as exc:
+        STORE.update(rid, pif_note=str(exc), pif_pdf=None)
+        STORE.log(rid, actor, f"PIF PDF not created: {exc}")
+        return False
+    except Exception as exc:  # noqa: BLE001 - the approval itself must go through
+        STORE.update(rid, pif_note=f"PIF not created: {type(exc).__name__}", pif_pdf=None)
+        STORE.log(rid, actor, f"PIF not created: {type(exc).__name__}")
+        return False
+    STORE.update(rid, pif_pdf=_rel(pdf), pif_note=None)
+    STORE.log(rid, actor, "Personal Information Form created (admin only)")
+    return True
+
+
+def _latest_agreement(req):
+    """FILE_KINDS key of the newest agreement file: the signed one once signed."""
+    if req["status"] in ("signed", "completed") and _abs(req.get("signed_file")):
+        return "signed_file"
+    if _abs(req.get("agreement_pdf")):
+        return "agreement_pdf"
+    return None
+
+
 def _issue_agreement(req, actor, resign_note=None, regenerate=True):
     """Fill + convert the agreement, create a fresh signing link, e-mail it.
 
@@ -262,7 +310,11 @@ def admin_list():
     status = request.args.get("status") or ""
     if status and status not in STATUS:
         status = ""
-    return render_template("approval/admin_list.html", requests=STORE.list(status=status or None),
+    rows = STORE.list(status=status or None)
+    for r in rows:                      # quick links: newest agreement + PIF (admin only)
+        r["latest"] = _latest_agreement(r)
+        r["has_pif"] = bool(_abs(r.get("pif_pdf")))
+    return render_template("approval/admin_list.html", requests=rows,
                            status=status, counts=STORE.counts(), types=forms.REQUEST_TYPES)
 
 
@@ -284,7 +336,9 @@ def admin_detail(rid):
         allowed=TRANSITIONS.get(req["status"], ()), audit=STORE.audit(rid), link=link, agreement=_agreement_applies(req),
         template=template.name if template else None, smtp_ready=SETTINGS.smtp_ready,
         files={k: bool(_abs(req.get(k))) for k in
-               ("agreement_pdf", "agreement_docx", "signed_file", "signed_docx")},
+               ("agreement_pdf", "agreement_docx", "signed_file", "signed_docx",
+                "pif_pdf", "pif_docx")},
+        pif_applies=_pif_applies(req), latest=_latest_agreement(req),
         signed_pages=_signed_previews(req)[0] if req["status"] in ("signed", "completed") else 0,
         completed=next((a for a in reversed(STORE.audit(rid)) if a["to_status"] == "completed"
                         and a["from_status"] != "completed"), None),
@@ -311,6 +365,7 @@ def approve(rid):
     if not STORE.set_status(rid, "approved", _actor(), "Approved", expect=("pending",)):
         flash(f"{req['ref']} was already handled by someone else.")     # double click / race
         return redirect(url_for("partner_approval.admin_detail", rid=rid))
+    _issue_pif(STORE.get(rid), _actor())            # Agreement only; admin-only file
     token = _issue_agreement(STORE.get(rid), _actor())
     after = STORE.get(rid)
     flash(f"{req['ref']} approved. " + ((after["email_note"] if token else after["agreement_note"])
@@ -348,6 +403,17 @@ def retry(rid):
     after = STORE.get(rid)
     flash(("Signing link created. " + (after["email_note"] or "")) if token
           else (after["agreement_note"] or "No signing link was created."))
+    return redirect(url_for("partner_approval.admin_detail", rid=rid))
+
+
+@bp.post("/admin/<int:rid>/pif")
+def pif(rid):
+    """(Re)create the PIF on demand, e.g. for a request approved before v1.35."""
+    req = _get_or_404(rid)
+    if not _pif_applies(req) or req["status"] in ("pending", "rejected"):
+        abort(409)
+    flash("Personal Information Form created." if _issue_pif(req, _actor())
+          else (STORE.get(rid)["pif_note"] or "The PIF could not be created."))
     return redirect(url_for("partner_approval.admin_detail", rid=rid))
 
 
@@ -402,7 +468,8 @@ def complete(rid):
 
 
 FILE_KINDS = {"agreement_pdf": "agreement", "agreement_docx": "agreement",
-              "signed_file": "signed", "signed_docx": "signed"}
+              "signed_file": "signed", "signed_docx": "signed",
+              "pif_pdf": "PIF", "pif_docx": "PIF"}          # admin routes only
 
 
 @bp.get("/admin/<int:rid>/file/<kind>")
@@ -610,6 +677,13 @@ def sign_page(token):
     if STORE.mark_opened(token):
         STORE.log(req["id"], "partner", f"Signing page opened (IP {_client_ip()})")
     return _render_sign(req, token, row)
+
+
+@sign_bp.get("/<token>/<path:_rest>")
+def sign_other(token, _rest):
+    """Anything else under a link is a plain 404, never the sign-in page: a link
+    only ever serves its agreement and its page previews (never the PIF)."""
+    abort(404)
 
 
 @sign_bp.get("/<token>/agreement.pdf")

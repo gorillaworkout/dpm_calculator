@@ -6,6 +6,7 @@ python3 test_partner_approval_docs.py   (no LibreOffice needed)
 import base64
 import io
 import os
+import re
 import shutil
 import tempfile
 from pathlib import Path
@@ -23,12 +24,12 @@ AGREEMENT = {
     "request_type": "agreement", "contract_type": "NEW", "sales_team": "Shawn Team",
     "sales_uid": "100200", "role": "CM", "uid": "999001", "partner_name": "Test Partner",
     "passport": "X0000001", "address": "1 Sample Road\nSample City",
-    "team_upline": "ISS L\u00ca TH\u00c0NH T\u00c2M 446157 > RM 543936 LODIS",
+    "team_upline": "446157 - 543936",
     "background": "Dummy background text.", "allowance_scheme": "Net Deposit : 12%",
     "remarks": "Rebate will be set by superior", "region": "Vietnam",
     "effective_date": "2026-11-01", "onboard_date": "2026-10-09",
     "submission_date": "2026-10-30", "partner_email": "partner@example.com",
-    "desk": "VN Desk", "create_agreement": "Yes",
+    "desk": "VN Desk",
 }
 DOWNGRADE = {
     "request_type": "downgrade", "role": "RM", "uid": "999002", "partner_name": "Test Two",
@@ -39,11 +40,52 @@ DOWNGRADE = {
 # ------------------------------------------------------------ form rules
 data, err = forms.validate(AGREEMENT)
 assert not err, err
-assert data["team_upline"] == AGREEMENT["team_upline"]          # unicode kept as typed
+assert data["team_upline"] == "446157 - 543936"
 assert data["address"] == "1 Sample Road\nSample City"            # long text keeps lines
 
-data, err = forms.validate({**AGREEMENT, "request_type": "special_mib"})
+# Special Terms (was "Special MIB"): MIB role only, server side
+data, err = forms.validate({**AGREEMENT, "request_type": "special_terms", "role": "MIB"})
 assert not err, err
+assert forms.REQUEST_TYPES["special_terms"] == "Special Terms"
+assert "special_mib" not in forms.REQUEST_TYPES
+for role in ("CM", "BM", "RM", "NCIB", "RD"):
+    _d, err = forms.validate({**AGREEMENT, "request_type": "special_terms", "role": role})
+    assert err.get("role") == "Special Terms requests are for the MIB role only.", (role, err)
+for role in forms.ROLES:                                          # Agreement: every role
+    assert not forms.validate({**AGREEMENT, "role": role})[1], role
+assert forms.roles_for("agreement") == ("CM", "BM", "RM", "MIB", "NCIB", "RD")
+assert forms.roles_for("special_terms") == ("MIB",)
+# a form opened before the rename still posts "special_mib"
+data, err = forms.validate({**AGREEMENT, "request_type": "special_mib", "role": "MIB"})
+assert not err and data["request_type"] == "special_terms", (data, err)
+assert "Partnership Agreement (Special Terms)" in forms.summary(data)
+
+# "Do u want to create agreement?" is gone: not a field, not in the summary
+assert "create_agreement" not in {f["name"] for f in forms.FIELDS}
+data, err = forms.validate({**AGREEMENT, "create_agreement": "No"})
+assert not err and "create_agreement" not in data
+s_old = forms.summary({**forms.validate(AGREEMENT)[0], "create_agreement": "No"})  # old stored data
+assert "reate agreement" not in s_old
+assert all("reate agreement" not in r[0] for _sec, rows in forms.details(
+    {**forms.validate(AGREEMENT)[0], "create_agreement": "Yes"}) for r in rows)
+
+# Team Upline: 6-digit groups joined by " - "
+for raw, want in (("123456", "123456"), ("123456123456", "123456 - 123456"),
+                  ("123456 - 123456 - 123456", "123456 - 123456 - 123456"),
+                  ("123456-123456", "123456 - 123456"), (" 123456  -  654321 ", "123456 - 654321"),
+                  ("123456\u2013654321", "123456 - 654321")):
+    data, err = forms.validate({**AGREEMENT, "team_upline": raw})
+    assert not err and data["team_upline"] == want, (raw, data.get("team_upline"), err)
+    assert forms.UPLINE_RE.match(data["team_upline"])
+for raw, part in (("12345", "has 5"), ("123456 - 1234", "has 4"), ("1234567", "has 1"),
+                  ("123456 > RM 543936", "digits only"), ("ISS 446157", "digits only"),
+                  ("123456 - ", None), (" - ", "digits only")):
+    _d, err = forms.validate({**AGREEMENT, "team_upline": raw})
+    if part is None:                       # trailing dash only: still a valid group
+        assert not err and _d["team_upline"] == "123456", (raw, err)
+        continue
+    assert part in err.get("team_upline", ""), (raw, err)
+assert "Team Upline:\n446157 - 543936" in forms.summary(forms.validate(AGREEMENT)[0])
 
 # every required agreement field is required
 for name in ("contract_type", "sales_team", "sales_uid", "role", "uid", "partner_name",
@@ -52,7 +94,7 @@ for name in ("contract_type", "sales_team", "sales_uid", "role", "uid", "partner
              "partner_email", "desk"):
     _d, err = forms.validate({**AGREEMENT, name: ""})
     assert name in err, (name, err)
-for name in ("remarks", "create_agreement"):                     # optional
+for name in ("remarks",):                                        # optional
     _d, err = forms.validate({**AGREEMENT, name: ""})
     assert not err, (name, err)
 
@@ -106,7 +148,7 @@ Onboard Date: 10/09/2026
 Team: Shawn
 Region: Vietnam
 Team Upline:
-ISS L\u00ca TH\u00c0NH T\u00c2M 446157 > RM 543936 LODIS
+446157 - 543936
 Background:
 Dummy background text.
 Agreement Type: New Join
@@ -121,7 +163,9 @@ assert "New Position: MIB" in s and "Type of Downgrade: Downgrade CRM Role" in s
 
 # ------------------------------------------------------------ templates
 assert docs.template_for(CM.parent, "CM") == CM
-for role in ("BM", "RM", "MIB", "NCIB", "RD"):
+for role in ("BM", "RM"):                                          # v1.35
+    assert docs.template_for(CM.parent, role) == CM.parent / f"{role}.docx", role
+for role in ("MIB", "NCIB", "RD", "PIF"):                         # PIF is not an agreement
     assert docs.template_for(CM.parent, role) is None, role
 assert docs.template_for(CM.parent, "../CM") is None
 
@@ -300,6 +344,70 @@ assert docs.company_column_blank(out2), "company signature column must stay blan
 text = "\n".join(p.text for p in Document(str(out2)).paragraphs)
 assert "Date\t\t\t: 2 November 2026" in text
 assert "Passport/ID No\t: X0000001" in text
+
+# ------------------------------------------------ BM / RM templates (v1.35)
+EXPECT = {"made_on", "region", "partner_name", "passport", "address", "uid", "as_of",
+          "sign_partner_name", "sign_passport", "sign_sign_date", "signature"}
+for role, title in (("BM", "Business Manager"), ("RM", "Relationship Manager")):
+    tpl_path = CM.parent / f"{role}.docx"
+    meta = Document(str(tpl_path)).core_properties
+    assert meta.author == "Dupoin Markets Ltd" and meta.last_modified_by == "Dupoin Markets Ltd", role
+    raw = __import__("zipfile").ZipFile(tpl_path).read("docProps/core.xml").decode()
+    assert "ZHUZI" not in raw and "Andrew" not in raw, role               # staff names scrubbed
+    want = EXPECT | ({"primary_location"} if role == "BM" else set())    # RM has no location line
+    assert set(docs.unfilled_placeholders(tpl_path, signed=True)) >= want, role
+    rdata, _ = forms.validate({**AGREEMENT, "role": role})
+    o = TMP / f"{role}-signed.docx"
+    got = docs.fill_agreement(tpl_path, rdata, o, sign_date="2026-11-02", signature_png=drawn)
+    assert set(got) == want | {"allowance", "remark"}, (role, sorted(got))
+    assert docs.unfilled_placeholders(o, signed=True) == [], (role, docs.unfilled_placeholders(o, signed=True))
+    assert docs.company_column_blank(o), role
+    rd = Document(str(o))
+    t, pcol = docs._signature_table(rd)
+    assert t.rows[0].cells[pcol].text.strip() == f"SIGNED by the {title}", role
+    assert t.rows[1].cells[pcol]._tc.xpath(".//*[local-name()='drawing']"), role   # partner column
+    rtext = "\n".join(p.text for p in rd.paragraphs)
+    made = ("This agreement was made on 1 November 2026" if role == "RM"
+            else "This Agreement is made on 1 November 2026")
+    assert made in rtext and "made on on" not in rtext, role
+    assert "Test Partner" in rtext and "X0000001" in rtext and "1 Sample Road, Sample City" in rtext
+    assert "Remark: Rebate will be set by superior" in rtext, role
+    assert "Agreed Allowance Scheme:\nNet Deposit : 12%" in rtext, role
+    assert "Date\t\t\t: 2 November 2026" in rtext, role
+    assert "Dupoin UID|999001" in ["|".join(c.text for c in r.cells) for tb in rd.tables for r in tb.rows]
+    assert rd.core_properties.author == "Dupoin Markets Ltd", role
+    if role == "BM":
+        assert "The primary location is Vietnam, with" in rtext
+# the date line regex covers both wordings, and only them
+for line, ok in (("This Agreement is made on ", True), ("This agreement was made", True),
+                 ("This Agreement is made on", True), ("This Agreement shall be made", False)):
+    assert bool(docs.MADE_ON.match(line)) is ok, line
+
+# ------------------------------------- Personal Information Form (admin only)
+PIF = docs.pif_template(CM.parent)
+assert PIF == CM.parent / "PIF.docx"
+raw = __import__("zipfile").ZipFile(PIF).read("docProps/core.xml").decode()
+assert "ZHUZI" not in raw and "Andrew" not in raw
+assert docs.PIF_UNMAPPED == ["Nickname", "Mobile No", "Attachments", "Date", "Signature"]
+po = TMP / "pif.docx"
+got = docs.fill_pif(PIF, forms.validate(AGREEMENT)[0], po)
+assert got == ["Full Name", "Address", "Passport / National ID Number", "Position",
+               "Region / Country", "Email Address", "Dupoin UID", "Passport / ID No"], got
+pd = Document(str(po))
+cells = {lab: c.text for lab, c in docs._pif_cells(pd)}
+assert cells["Full Name"].endswith("Test Partner")
+assert cells["Address"].rstrip().endswith("1 Sample Road, Sample City")
+assert cells["Passport / National ID Number"].rstrip().endswith("X0000001")
+assert cells["Position"].rstrip().endswith("CM") and cells["Region / Country"].rstrip().endswith("Vietnam")
+assert cells["Email Address"].rstrip().endswith("partner@example.com")
+assert cells["Dupoin UID"].rstrip().endswith("999001")
+assert cells["Mobile No"].strip() == "Mobile No:"                 # no form field: blank
+assert cells["Nickname"].strip() == "Nickname: -"
+assert any(re.search(r"Passport / ID No\s*: X0000001$", p.text.rstrip()) for p in pd.paragraphs)
+assert pd.core_properties.author == "Dupoin Markets Ltd"
+# missing values stay blank, nothing crashes
+got = docs.fill_pif(PIF, {"partner_name": "Only Name"}, TMP / "pif2.docx")
+assert got == ["Full Name"], got
 
 # ------------------------------------------------------ uploads by magic bytes
 assert docs.sniff_upload(b"%PDF-1.7\n") == "pdf"

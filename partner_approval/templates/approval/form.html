@@ -40,6 +40,8 @@
       <input id="f-{{ fd.name }}" type="date" name="{{ fd.name }}" value="{{ val }}">
     {% elif fd.kind == 'int' %}
       <input id="f-{{ fd.name }}" type="text" inputmode="numeric" pattern="[0-9]*" name="{{ fd.name }}" value="{{ val }}" maxlength="15">
+    {% elif fd.kind == 'upline' %}
+      <input id="f-{{ fd.name }}" type="text" inputmode="numeric" autocomplete="off" name="{{ fd.name }}" value="{{ val }}" maxlength="200" placeholder="{{ fd.placeholder or '' }}" data-upline>
     {% elif fd.kind == 'email' %}
       <input id="f-{{ fd.name }}" type="email" name="{{ fd.name }}" value="{{ val }}" maxlength="254">
     {% else %}
@@ -83,8 +85,61 @@
     });
     document.getElementById('pa-submit').hidden=!t;
   }
-  form.querySelectorAll('input[name=request_type]').forEach(function(r){r.addEventListener('change',apply);});
-  apply();
+  // Special Terms is for MIB only (the server checks it too).
+  var ROLES_FOR={{ f.ROLES_FOR|tojson }};
+  function applyRoles(){
+    var only=ROLES_FOR[rtype()], radios=form.querySelectorAll('input[name=role]');
+    radios.forEach(function(r){
+      var ok=!only || only.indexOf(r.value)>=0;
+      var lb=r.closest('label'); lb.hidden=!ok; lb.style.display=ok?'':'none';
+      if(!ok){r.checked=false; r.disabled=true;}
+      else if(!r.closest('.field').hidden){r.disabled=false;}
+      if(only && only.length===1 && ok)r.checked=true;
+    });
+  }
+  form.querySelectorAll('input[name=request_type]').forEach(function(r){r.addEventListener('change',function(){apply();applyRoles();});});
+  apply(); applyRoles();
+
+  // Team Upline: digits only, " - " after every 6 digits when more follow.
+  var up=form.querySelector('[data-upline]');
+  function fmtUp(d){return (d.match(/.{1,6}/g)||[]).join(' - ');}
+  function upErr(msg){
+    var host=up.closest('.field'), e=host.querySelector('.err.up');
+    if(!msg){if(e)e.remove(); up.removeAttribute('aria-invalid'); return;}
+    if(!e){e=document.createElement('p'); e.className='err js up'; host.appendChild(e);}
+    e.textContent=msg; up.setAttribute('aria-invalid','true');
+  }
+  function upCheck(){
+    var d=up.value.replace(/\D/g,'');
+    if(!d)return '';
+    if(d.length%6)return 'Team Upline: each UID has 6 digits. The last one has '+(d.length%6)+', add the missing digits or remove it.';
+    return '';
+  }
+  if(up){
+    up.addEventListener('input',function(){
+      var pos=up.selectionStart||0, before=up.value.slice(0,pos).replace(/\D/g,'').length;
+      var d=up.value.replace(/\D/g,''), v=fmtUp(d);
+      if(v!==up.value){
+        up.value=v;
+        var n=0,i=0; while(i<v.length && n<before){if(/\d/.test(v[i]))n++; i++;}
+        up.setSelectionRange(i,i);
+      }
+      if(up.getAttribute('aria-invalid') && !upCheck())upErr('');
+    });
+    up.addEventListener('paste',function(ev){
+      var t=(ev.clipboardData||window.clipboardData);
+      if(!t)return;
+      ev.preventDefault();
+      var txt=t.getData('text').replace(/\D/g,'');
+      var a=up.selectionStart||0,b=up.selectionEnd||0;
+      var d=up.value.slice(0,a).replace(/\D/g,'')+txt, after=up.value.slice(b).replace(/\D/g,'');
+      up.value=fmtUp(d+after);
+      var v=up.value,n=0,i=0; while(i<v.length && n<d.length){if(/\d/.test(v[i]))n++; i++;}
+      up.setSelectionRange(i,i);
+      up.dispatchEvent(new Event('input'));
+    });
+    if(/^[\d\s-]+$/.test(up.value))up.value=fmtUp(up.value.replace(/\D/g,''));
+  }
 
   var modal=document.getElementById('pa-modal');
   function clearErrors(){form.querySelectorAll('.err.js').forEach(function(e){e.remove();});}
@@ -92,6 +147,7 @@
     if(document.getElementById('confirmed').value==='1')return;
     ev.preventDefault();
     clearErrors();
+    if(up && !up.disabled){var m=upCheck(); if(m){upErr(m); up.focus(); up.closest('.field').scrollIntoView({behavior:'smooth',block:'center'}); return;}}
     var btn=document.getElementById('pa-submit'); btn.disabled=true;
     fetch('{{ url_for("partner_approval.preview") }}',{method:'POST',body:new FormData(form),credentials:'same-origin'})
       .then(function(r){return r.json();})

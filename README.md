@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.34 · 2026-11-03`.
+required) show the running version, for example `DW Calculator v1.35 · 2026-11-03`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.34)
+### Tests (`test_*.py`, v1.35)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -897,11 +897,11 @@ python3 hitung_dw.py file.xlsx --sheet D Withdrawal
 
 ---
 
-## Partner Approval (Beta, v1.34)
+## Partner Approval (Beta, v1.35)
 
 Test-only, DPM-only. Sales fill the "Sales PartnerRequest" form at `/approval`
 (the same fields and conditional rules as the Lark form). The admin approves or
-rejects at `/approval/admin`. For **Agreement** and **Special MIB** requests,
+rejects at `/approval/admin`. For **Agreement** and **Special Terms** requests,
 approving fills the role's Word template, converts it to PDF, and creates a
 one-time signing link (`/sign/<token>`, no login, valid 14 days). The partner
 either signs on screen (draws, or types their name in a script font) or uploads a
@@ -916,12 +916,50 @@ one marks it Completed.
 - **Who can use it:** only users with DPM access. A KVB-only user is sent to
   `/kvb`. Admin pages and actions are for admins only.
 - **Agreement templates:** `partner_approval/agreement_templates/<ROLE>.docx`.
-  Only `CM.docx` exists so far. Approving any other role still works, with the
-  note "Agreement template for <role> not ready yet" and no link.
-  See `agreement_templates/README.md`.
+  `CM.docx`, `BM.docx` and `RM.docx` exist (v1.35). MIB, NCIB and RD have no
+  template yet: approving one still works (the request is Approved, not
+  blocked), with the note "Agreement template for <role> not ready yet", no
+  signing link and a **Retry agreement** button for when the file is added.
+  Special Terms is MIB-only, so a Special Terms approval makes no agreement
+  until `MIB.docx` exists. See `agreement_templates/README.md`.
 - **The company signature column is never filled**, not even after the partner
-  signs. The partner's signature goes in the "SIGNED by the Country Manager"
-  cell.
+  signs. The partner's signature goes in the "SIGNED by the <role>" cell
+  (Country Manager / Business Manager / Relationship Manager).
+
+### Form changes (v1.35)
+
+- **Special MIB is now Special Terms.** Agreement requests offer every role
+  (CM, BM, RM, MIB, NCIB, RD); Special Terms is **MIB only** (the form shows only
+  MIB, the server refuses any other role). Requests stored as `special_mib`
+  are read as Special Terms; the stored row is not rewritten.
+- **Team Upline ONLY** takes digits only, in 6-digit UIDs. While typing (or
+  pasting, non-digits are dropped) the form inserts " - " after every 6 digits
+  when more follow, e.g. `123456 - 123456 - 123456`, never a trailing dash. A
+  last UID with fewer than 6 digits is an error on submit, in the browser and on
+  the server. The server stores `^\d{6}( - \d{6})*$`.
+- **"Do u want to create agreement?" is removed.** Agreement and Special Terms
+  requests always create the agreement. Old requests keep the value in their
+  data, but it is never shown or required.
+
+### Personal Information Form (PIF, admin only, v1.35)
+
+- Made **only for Agreement requests** (not Special Terms, Dowgrade or Remove -
+  Exit) when the admin approves, from `agreement_templates/PIF.docx`, and
+  stored as `approval_files/<id>/pif.pdf` (+ `.docx`). A **Create PIF** button
+  on the request page makes it on demand (e.g. for a request approved before
+  v1.35, or when LibreOffice was missing).
+- **Never sent to or shown to the partner:** not in the e-mail, not on the sign
+  page, and no `/sign/<token>` route serves it (any other path under a link is
+  404). It is served only by `/approval/admin/<id>/file/pif_pdf` (admin login,
+  `no-store`, `nosniff`, path checked to stay inside `DW_APPROVAL_DIR`).
+- Filled from the request: Full Name, Address, Passport / National ID Number,
+  Position (role), Region / Country, Email Address, Dupoin UID, and the
+  Declaration "Passport / ID No". **No form field yet** (left blank): Nickname,
+  Mobile No, Attachments (photocopy of passport / ID), Declaration Date and
+  Signature.
+- The admin list has quick links per request: **Agreement** (the latest: the
+  signed copy once signed, marked ✓, otherwise the generated PDF) and **PIF**.
+  The request page shows the same links in a "Files (admin only)" card.
 - **PDF needs LibreOffice on the server:** `sudo apt install libreoffice-writer`.
   If it is missing, approval still records the decision and the admin page
   shows the install hint and a "Retry agreement" button. There is no separate

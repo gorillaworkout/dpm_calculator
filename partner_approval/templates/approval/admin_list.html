@@ -4,6 +4,7 @@
 {% block wide %} wide{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
+<style>.pa-table td.files .flink{display:block;width:max-content;font-size:12px;font-weight:600;padding:2px 8px;margin:2px 0;border:1px solid var(--line,#d7dde4);border-radius:6px;text-decoration:none;white-space:nowrap}.pa-table td.files .flink:hover{background:rgba(0,0,0,.04)}</style>
 <header class="pa-top">
   <div class="pa-titles">
     <div class="pa-head"><h1>Partner <span>requests</span></h1><span class="beta">Beta · admin</span></div>
@@ -20,13 +21,16 @@
 <section class="pa-card pa-table">
 {% if requests %}
 <table class="pa">
-  <thead><tr><th>Ref</th><th>Partner</th><th>Type</th><th>Updated</th><th>Status</th><th></th></tr></thead>
+  <thead><tr><th>Ref</th><th>Partner</th><th>Type</th><th>Updated</th><th>Status</th><th>Files</th><th></th></tr></thead>
   <tbody>
   {% for r in requests %}
   <tr><td class="nowrap"><a href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ r.ref }}</a></td>
     <td>{{ r.partner_name }}<span class="sub">{{ r.role }} · UID {{ r.data.uid }}</span></td>
     <td>{{ types[r.request_type] }}<span class="sub">by {{ r.created_by }}</span></td>
     <td class="nowrap">{{ wib(r.updated_at) }}</td><td>{{ badge(r) }}</td>
+    <td class="files nowrap">{% if r.latest %}<a class="flink" href="{{ url_for('partner_approval.admin_file', rid=r.id, kind=r.latest, inline=1) }}" target="_blank" rel="noopener" title="{{ 'Signed agreement' if r.latest == 'signed_file' else 'Generated agreement (not signed yet)' }}">{{ 'Agreement ✓' if r.latest == 'signed_file' else 'Agreement' }}</a>{% endif %}
+      {% if r.has_pif %}<a class="flink" href="{{ url_for('partner_approval.admin_file', rid=r.id, kind='pif_pdf', inline=1) }}" target="_blank" rel="noopener" title="Personal Information Form (admin only)">PIF</a>{% endif %}
+      {% if not r.latest and not r.has_pif %}<span class="sub">–</span>{% endif %}</td>
     <td class="act"><a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ 'Review' if r.status in ('pending', 'signed') else 'Open' }}</a></td></tr>
   {% endfor %}
   </tbody>

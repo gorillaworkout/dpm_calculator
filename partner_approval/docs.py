@@ -44,8 +44,8 @@ class SignatureError(ValueError):
 # ------------------------------------------------------------------ templates
 def template_for(templates_dir, role):
     """The .docx for a role (CM.docx, BM.docx, ...) or None when not ready yet."""
-    if not role or not re.fullmatch(r"[A-Za-z]{1,10}", role):
-        return None
+    if not role or not re.fullmatch(r"[A-Za-z]{1,10}", role) or role.upper() == "PIF":
+        return None                      # PIF.docx is the admin-only form, not an agreement
     for name in (f"{role}.docx", f"{role.upper()}.docx", f"{role.lower()}.docx"):
         p = Path(templates_dir) / name
         if p.is_file():
@@ -154,6 +154,9 @@ def _signature_table(doc):
     return None, None
 
 
+# The opening date line. Templates differ: "This Agreement is made on " (CM, BM)
+# and "This agreement was made" (RM). Group 1 = the template already has "on".
+MADE_ON = re.compile(r"^This [Aa]greement (?:is|was) made( on)?\s*$")
 LABEL = r"\s*:\s*$"
 PARTY_LABELS = {  # label regex (whole paragraph) -> data key
     r"^Region/Country" + LABEL: "region",
@@ -196,8 +199,13 @@ def fill_agreement(template, data, out_path, sign_date=None, signature_png=None)
             continue
         p = block
         text = p.text
-        if re.match(r"^This Agreement is made on\s*$", text):
-            _append_value(p, values["effective_date"])
+        m = MADE_ON.match(text)
+        if m and "made_on" not in filled:
+            # CM/BM: "This Agreement is made on " -> "... made on 1 November 2026"
+            # RM:    "This agreement was made"    -> "... was made on 1 November 2026"
+            lead = "" if text.endswith((" ", "\t")) else " "
+            date = values["effective_date"]
+            _append_value(p, (lead + date) if m.group(1) else f"{lead}on {date}")
             filled.append("made_on")
             continue
         if not after_sig_table:
@@ -275,7 +283,7 @@ def unfilled_placeholders(docx_path, signed=False):
                 after = True
             continue
         text = block.text
-        if re.match(r"^This Agreement is made on\s*$", text):
+        if MADE_ON.match(text):
             left.append("made_on")
         if not after:
             for rx, key in PARTY_LABELS.items():
@@ -600,3 +608,98 @@ def preview_count(out_dir):
     while (out_dir / f"page-{n + 1}.png").is_file():
         n += 1
     return n
+
+
+# ------------------------------------------------- Personal Information Form
+# Admin-only (v1.35): made for Agreement requests at approval, stored with the
+# request files, never e-mailed, never reachable from a /sign link.
+PIF_FILE = "PIF.docx"
+# label at the start of a table cell -> request field. None = no form field
+# for it yet, left blank for the partner / admin to complete.
+PIF_CELLS = (
+    ("Full Name", "partner_name"),
+    ("Nickname", None),
+    ("Address", "address"),
+    ("Passport / National ID Number", "passport"),
+    ("Position", "role"),
+    ("Region / Country", "region"),
+    ("Email Address", "partner_email"),
+    ("Mobile No", None),
+    ("Dupoin UID", "uid"),
+    ("Attachments", None),
+)
+# Declaration lines under the table
+PIF_LINES = (("Date", None), ("Signature", None), ("Passport / ID No", "passport"))
+PIF_UNMAPPED = [label for label, key in PIF_CELLS + PIF_LINES if key is None]
+
+
+def pif_template(templates_dir):
+    p = Path(templates_dir) / PIF_FILE
+    return p if p.is_file() else None
+
+
+def _pif_cells(doc):
+    """[(label, cell)] for the PIF table, merged cells once."""
+    if not doc.tables:
+        return []
+    out, seen = [], set()
+    for row in doc.tables[0].rows:
+        for cell in row.cells:
+            if id(cell._tc) in seen:
+                continue
+            seen.add(id(cell._tc))
+            head = cell.paragraphs[0].text.strip() if cell.paragraphs else ""
+            label = next((lab for lab, _k in PIF_CELLS if head.startswith(lab)), None)
+            if label:
+                out.append((label, cell))
+    return out
+
+
+def fill_pif(template, data, out_path):
+    """Write the filled PIF (.docx). Returns the labels that got a value."""
+    from docx import Document
+    doc = Document(str(template))
+    keys = dict(PIF_CELLS)
+    values = {
+        "partner_name": data.get("partner_name", ""),
+        "address": ", ".join(x.strip() for x in (data.get("address") or "").split("\n") if x.strip()),
+        "passport": data.get("passport", ""),
+        "role": data.get("role", ""),
+        "region": data.get("region", ""),
+        "partner_email": data.get("partner_email", ""),
+        "uid": data.get("uid", ""),
+    }
+    filled = []
+    for label, cell in _pif_cells(doc):
+        key = keys[label]
+        value = values.get(key) if key else ""
+        if not value or label in filled:
+            continue
+        head = cell.paragraphs[0]
+        model = _last_text_run(head)
+        nxt = cell.paragraphs[1] if len(cell.paragraphs) > 1 else None
+        if nxt is not None and not nxt.text.strip():
+            for r in nxt.runs:
+                r.text = ""
+            if head._p.pPr is not None:       # same indent as the label line
+                if nxt._p.pPr is not None:
+                    nxt._p.remove(nxt._p.pPr)
+                nxt._p.insert(0, copy.deepcopy(head._p.pPr))
+            run = _copy_run_after(nxt, model, value)
+        else:                             # one paragraph ending in a line break
+            run = _copy_run_after(head, model, value if head.text.endswith("\n") else " " + value)
+        run.bold = False
+        filled.append(label)
+    for p in doc.paragraphs:
+        if re.search(r"Passport / ID No\s*$", p.text) and values["passport"] \
+                and "Passport / ID No" not in filled:
+            run = _copy_run_after(p, _last_text_run(p), ": " + values["passport"])
+            run.bold = False
+            filled.append("Passport / ID No")
+    cp = doc.core_properties
+    cp.author = "Dupoin Markets Ltd"
+    cp.last_modified_by = "DW Calculator"
+    cp.comments = ""
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(out_path))
+    return filled

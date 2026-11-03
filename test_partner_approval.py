@@ -96,12 +96,12 @@ AGREEMENT = {
     "request_type": "agreement", "contract_type": "NEW", "sales_team": "Shawn Team",
     "sales_uid": "100200", "role": "CM", "uid": "999001", "partner_name": "Test Partner",
     "passport": "X0000001", "address": "1 Sample Road\nSample City",
-    "team_upline": "ISS L\u00ca TH\u00c0NH T\u00c2M 446157 > RM 543936 LODIS",
+    "team_upline": "446157 - 543936",
     "background": "Dummy background.", "allowance_scheme": "Net Deposit : 12%",
     "remarks": "Rebate will be set by superior", "region": "Vietnam",
     "effective_date": "2026-11-01", "onboard_date": "2026-10-09",
     "submission_date": "2026-10-30", "partner_email": "partner@example.com",
-    "desk": "VN Desk", "create_agreement": "Yes",
+    "desk": "VN Desk",
 }
 DOWNGRADE = {"request_type": "downgrade", "role": "RM", "uid": "999002",
              "partner_name": "Test Two", "effective_date": "2026-11-01",
@@ -133,9 +133,9 @@ assert 'href="/approval"' not in kvb.get("/kvb").get_data(as_text=True)
 assert 'href="/approval"' not in admin.get("/kvb").get_data(as_text=True)
 
 page = sales.get("/approval/new").get_data(as_text=True)
-for label in ("Agreement", "Special MIB", "Dowgrade", "Remove - Exit", "Contract Type",
-              "Which Sales Team", "Team Upline ONLY", "111111-222222-333333",
-              "Apply for Agreement , Special MIB &amp; Downgrade", "Do u want to create agreement?",
+for label in ("Agreement", "Special Terms", "Dowgrade", "Remove - Exit", "Contract Type",
+              "Which Sales Team", "Team Upline ONLY", "123456 - 123456 - 123456", "data-upline",
+              "Apply for Agreement , Special Terms &amp; Downgrade",
               "New Position", "Type of Downgrade", "Desk Accountable", "Beta"):
     assert label in page, label
 assert "Attachment" not in page
@@ -177,7 +177,7 @@ assert "PA-%05d" % rid not in sales2.get("/approval").get_data(as_text=True)
 
 # escaping of user input everywhere
 xss_rid = submit(sales, {**AGREEMENT, "partner_name": "<script>alert(1)</script>",
-                         "background": "<img src=x onerror=alert(1)>", "role": "BM"})
+                         "background": "<img src=x onerror=alert(1)>", "role": "NCIB"})
 for client, path in ((sales, f"/approval/{xss_rid}"), (admin, f"/approval/admin/{xss_rid}"),
                      (admin, "/approval/admin"), (sales, "/approval")):
     body = client.get(path).get_data(as_text=True)
@@ -202,7 +202,7 @@ assert r.status_code == 302
 a = req(rid)
 assert a["status"] == "approved", a
 assert a["email_note"] == "Email not sent: SMTP not configured"
-assert CONVERTED == ["agreement.docx"]
+assert CONVERTED == ["pif.docx", "agreement.docx"]           # PIF (admin only) + agreement
 t1 = latest_token(rid)
 assert len(t1["token"]) >= 43                                  # token_urlsafe(32)
 assert abs((t1["expires_at"] - t1["created_at"]) - 14 * 86400) < 5
@@ -218,9 +218,89 @@ assert "WIB" in audit and "boss" in audit and "Submitted" in audit
 # -------------------------------------------------- role with no template
 r = admin.post(f"/approval/admin/{xss_rid}/approve", data={"csrf_token": atok})
 b = req(xss_rid)
-assert b["status"] == "approved" and b["agreement_note"] == "Agreement template for BM not ready yet"
+assert b["status"] == "approved" and b["agreement_note"] == "Agreement template for NCIB not ready yet"
 assert not rows("SELECT * FROM tokens WHERE request_id=?", xss_rid)
-assert "Agreement template for BM not ready yet" in admin.get(f"/approval/admin/{xss_rid}").get_data(as_text=True)
+assert "Agreement template for NCIB not ready yet" in admin.get(f"/approval/admin/{xss_rid}").get_data(as_text=True)
+assert req(xss_rid)["pif_pdf"]                    # PIF does not need the agreement template
+
+# ------------------------------------- PIF: Agreement only, admin only (v1.35)
+a = req(rid)
+assert a["pif_pdf"] == f"{rid:06d}/pif.pdf" and a["pif_docx"] == f"{rid:06d}/pif.docx", a
+r = admin.get(f"/approval/admin/{rid}/file/pif_pdf?inline=1")
+assert r.status_code == 200 and r.data.startswith(b"%PDF") and "inline" in r.headers["Content-Disposition"]
+assert "no-store" in r.headers["Cache-Control"] and r.headers["X-Content-Type-Options"] == "nosniff"
+assert admin.get(f"/approval/admin/{rid}/file/pif_docx").status_code == 200
+for who, code in ((sales, 403), (sales2, 403), (kvb, (302, 403))):     # non-admins, even the creator
+    for kind in ("pif_pdf", "pif_docx"):
+        got = who.get(f"/approval/admin/{rid}/file/{kind}").status_code
+        assert got in (code if isinstance(code, tuple) else (code,)), (kind, got)
+assert anon.get(f"/approval/admin/{rid}/file/pif_pdf").status_code in (302, 401)
+assert sales.post(f"/approval/admin/{rid}/pif", data={"csrf_token": csrf(sales)}).status_code == 403
+# a /sign link can never reach it: no route, no path trick
+tok = t1["token"]
+for path in ("/pif.pdf", "/pif", "/pif_pdf", "/file/pif_pdf", "/../pif.pdf", "/page/pif.png",
+             "/page/1.png/../../pif.pdf", "/%2e%2e/pif.pdf", "/page/..%2fpif.pdf", "/pif.docx"):
+    r = anon.get(f"/sign/{tok}{path}")
+    assert r.status_code == 404 and not r.data.startswith(b"%PDF"), (path, r.status_code)
+assert anon.get(f"/sign/{tok}/agreement.pdf").status_code == 200
+assert "pif" not in anon.get(f"/sign/{tok}").get_data(as_text=True).lower()
+assert "Personal Information" not in anon.get(f"/sign/{tok}").get_data(as_text=True)
+# the requester's own page does not link it either
+assert "pif" not in sales.get(f"/approval/{rid}").get_data(as_text=True).lower()
+# admin list + detail: quick links to the latest agreement and the PIF
+lst = admin.get("/approval/admin").get_data(as_text=True)
+assert f"/approval/admin/{rid}/file/agreement_pdf?inline=1" in lst
+assert f"/approval/admin/{rid}/file/pif_pdf?inline=1" in lst
+d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+assert 'id="pif-link"' in d and 'id="latest-agreement"' in d and "generated, not signed yet" in d
+# on demand (re)creation, admin + CSRF only
+CONVERTED.clear()
+assert admin.post(f"/approval/admin/{rid}/pif", data={"csrf_token": atok}).status_code == 302
+assert CONVERTED == ["pif.docx"]
+assert admin.post(f"/approval/admin/{rid}/pif", data={}).status_code in (400, 403)
+
+# --------------------------------- Special Terms: MIB only, no MIB template yet
+r = sales.post("/approval/new", data={**AGREEMENT, "request_type": "special_terms", "role": "CM",
+                                      "csrf_token": csrf(sales), "confirmed": "1"})
+assert r.status_code == 400 and "Special Terms requests are for the MIB role only." in r.get_data(as_text=True)
+st_rid = submit(sales, {**AGREEMENT, "request_type": "special_terms", "role": "MIB",
+                        "partner_name": "Special Partner"})
+CONVERTED.clear()
+admin.post(f"/approval/admin/{st_rid}/approve", data={"csrf_token": atok})
+st = req(st_rid)
+assert st["status"] == "approved" and st["agreement_note"] == "Agreement template for MIB not ready yet"
+assert st["request_type"] == "special_terms" and not st["pif_pdf"] and CONVERTED == []   # no PIF
+assert admin.get(f"/approval/admin/{st_rid}/file/pif_pdf").status_code == 404
+assert admin.post(f"/approval/admin/{st_rid}/pif", data={"csrf_token": atok}).status_code == 409
+assert "Special Terms" in admin.get(f"/approval/admin/{st_rid}").get_data(as_text=True)
+# a request stored before v1.35 as "special_mib" shows as Special Terms
+with sqlite3.connect(PA.SETTINGS.db) as con:
+    con.execute("UPDATE requests SET request_type='special_mib', data=replace(data, "
+                "'\"special_terms\"', '\"special_mib\"') WHERE id=?", (st_rid,))
+assert rows("SELECT request_type FROM requests WHERE id=?", st_rid)[0][0] == "special_mib"
+assert req(st_rid)["request_type"] == "special_terms" and req(st_rid)["data"]["request_type"] == "special_terms"
+for page in (admin.get(f"/approval/admin/{st_rid}"), admin.get("/approval/admin"),
+             sales.get("/approval"), sales.get(f"/approval/{st_rid}")):
+    body = page.get_data(as_text=True)
+    assert page.status_code == 200 and "Special MIB" not in body and "Special Terms" in body
+# old data with "Do u want to create agreement?" is kept but never shown
+with sqlite3.connect(PA.SETTINGS.db) as con:
+    con.execute("UPDATE requests SET data=json_set(data, '$.create_agreement', 'No') WHERE id=?", (st_rid,))
+for page in (admin.get(f"/approval/admin/{st_rid}"), sales.get(f"/approval/{st_rid}")):
+    assert "reate agreement" not in page.get_data(as_text=True)
+# Team Upline: server re-formats, rejects a partial group
+r = sales.post("/approval/new", data={**AGREEMENT, "team_upline": "123456 - 1234",
+                                      "csrf_token": csrf(sales), "confirmed": "1"})
+assert r.status_code == 400 and "The last one has 4" in r.get_data(as_text=True)
+up_rid = submit(sales, {**AGREEMENT, "team_upline": "123456654321", "partner_name": "Upline Partner"})
+assert req(up_rid)["data"]["team_upline"] == "123456 - 654321"
+token = csrf(sales)
+j = sales.post("/approval/preview", data={**AGREEMENT, "team_upline": "111111222222333333",
+                                          "csrf_token": token}).get_json()
+assert j["ok"] and "111111 - 222222 - 333333" in j["summary"], j
+j = sales.post("/approval/preview", data={**AGREEMENT, "team_upline": "11111122",
+                                          "csrf_token": token}).get_json()
+assert not j["ok"] and "has 2" in j["errors"]["team_upline"], j
 
 # ---------------------------------------------------------- signing page
 anon = app.test_client()
@@ -337,6 +417,9 @@ try:
     assert f"/sign/{t2['token']}" in text and f"/sign/{t2['token']}" in html
     assert "Please sign <again> & initial page 2" in text
     assert "Please sign &lt;again&gt; &amp; initial page 2" in html and "<again>" not in html
+    # the PIF is never e-mailed
+    assert all("pif" not in (att.get_filename() or "").lower() for att in msg.iter_attachments())
+    assert "Personal Information" not in text and "pif" not in html.lower()
     # the e-mail failing must not undo anything
     class BrokenSMTP(FakeSMTP):
         def send_message(self, msg):
