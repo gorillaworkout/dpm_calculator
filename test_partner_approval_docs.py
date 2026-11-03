@@ -162,7 +162,7 @@ assert "Date\t\t\t: " in text and "Date\t\t\t: 2" not in text
 assert d.core_properties.author == "Dupoin Markets Ltd"
 
 # ---------------------------------------------------------- signatures
-typed = docs.typed_signature("L\u00ea Th\u00e0nh T\u00e2m")       # Vietnamese in the script font
+typed = docs.typed_signature("Andrew Tan")                       # default script font
 assert typed.startswith(docs.PNG_MAGIC)
 from PIL import Image, ImageDraw  # noqa: E402
 assert Image.open(io.BytesIO(typed)).width > 100
@@ -178,15 +178,44 @@ for bad in ("", " ", "x", "y" * 81):
 fonts = docs.signature_fonts()
 assert 1 <= len(fonts) <= docs.MAX_SIGNATURE_FONTS, fonts
 assert [f["id"] for f in fonts] == sorted(f["id"] for f in fonts)
-assert {"Allura-Regular", "DancingScript-Regular", "GreatVibes-Regular"} <= {f["id"] for f in fonts}
+assert [f["id"] for f in fonts] == ["1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia"]
+assert [f["label"] for f in fonts] == ["Darcey Oliver", "Budaphest", "Augustia"]
+assert docs.SCRIPT_FONT.is_file() and docs.SCRIPT_FONT.name == fonts[0]["file"]
 assert all(f["label"] and "Regular" not in f["label"] for f in fonts), fonts
 assert docs._font_label("2-MyBrandScript-Regular") == "My Brand Script"
 assert docs._font_label("DancingScript-VariableFont_wght") == "Dancing Script"
-for f in fonts:                                  # every listed font renders Vietnamese
-    assert docs.typed_signature("Nguy\u1ec5n V\u0103n \u0110\u1ee9c", f["id"]).startswith(docs.PNG_MAGIC)
+# glyph coverage: a style that lacks a letter of the name is refused, never drawn as tofu
+try:
+    from fontTools.ttLib import TTFont  # noqa: E402  (optional, dev-only cross-check)
+except ImportError:
+    TTFont = None
+for f in fonts:
+    if TTFont:
+        cmap = {chr(c) for c in TTFont(docs.SIGNATURE_FONTS / f["file"]).getBestCmap()}
+        assert set(f["chars"]) == cmap & docs.SIGNATURE_CHARSET, f["id"]   # measured == real cmap
+    assert set("ABCXYZabcxyz") <= set(f["chars"]), f["id"]
+    assert docs.typed_signature("Andrew Tan", f["id"]).startswith(docs.PNG_MAGIC)
+VI = "Nguy\u1ec5n V\u0103n \u0110\u1ee9c"
+assert docs.unsupported_chars(VI, "1-DarceyOliver-Regular") == ["\u1ec5", "\u0110", "\u1ee9"]
+assert docs.unsupported_chars("Jean-Luc O'Brien 2", "2-Budaphest-Regular") == ["-", "'", "2"]
+assert docs.unsupported_chars("Jean-Luc O'Brien 2", "1-DarceyOliver-Regular") == []
+assert docs.unsupported_chars("Nguye\u0302\u0303n", "1-DarceyOliver-Regular") == ["\u1ec5"]  # NFD -> NFC
+assert docs.unsupported_chars("Andrew \U0001F600", "3-Augustia") == ["\U0001F600"]
+assert docs.first_font_for("Jean-Luc") == "1-DarceyOliver-Regular" and docs.first_font_for(VI) is None
+for f in fonts:
+    try:
+        docs.typed_signature(VI, f["id"])
+        raise AssertionError(f"tofu accepted in {f['id']}")
+    except docs.SignatureError as exc:
+        assert "cannot show some letters" in str(exc)
+try:
+    docs.typed_signature("O'Brien", "2-Budaphest-Regular")
+    raise AssertionError("Budaphest has no apostrophe")
+except docs.SignatureError:
+    pass
 assert docs.signature_font_path(None) == docs.signature_font_path("") == docs.SIGNATURE_FONTS / fonts[0]["file"]
-for bad in ("../signature_fonts/Allura-Regular", "../../app", "/etc/passwd", "Allura-Regular.ttf",
-            "allura-regular", "nope", "Allura-Regular\x00", "..", "x" * 90):
+for bad in ("../signature_fonts/3-Augustia", "../../app", "/etc/passwd", "3-Augustia.ttf",
+            "3-augustia", "nope", "3-Augustia\x00", "..", "x" * 90):
     try:
         docs.signature_font_path(bad)
         raise AssertionError(f"font {bad!r} accepted")
@@ -195,7 +224,7 @@ for bad in ("../signature_fonts/Allura-Regular", "../../app", "/etc/passwd", "Al
 import tempfile, shutil as _sh  # noqa: E402
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
-    src = docs.SIGNATURE_FONTS / "Allura-Regular.ttf"
+    src = docs.SIGNATURE_FONTS / "3-Augustia.ttf"
     _sh.copy(src, tmp / "1-Zeta-Regular.ttf"); _sh.copy(src, tmp / "2-Alpha.otf")
     _sh.copy(src, tmp / "bad name.ttf"); _sh.copy(src, tmp / ".hidden.ttf"); _sh.copy(src, tmp / "notes.txt")
     outside = Path(tempfile.mkdtemp()); _sh.copy(src, outside / "Evil.ttf")

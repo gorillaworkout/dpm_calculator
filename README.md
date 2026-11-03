@@ -966,9 +966,12 @@ without LibreOffice.
   The server renders the signature with the chosen font: the id must match a
   file in that folder (letters, digits, `-`, `_`; `.ttf`/`.otf`; no symlinks;
   max 6), anything else is refused. The style is written to the activity log.
-  The current fonts (Great Vibes, Allura, Dancing Script, all OFL) are
-  placeholders: drop the custom TTFs in that folder and remove the old ones, no
-  restart needed. See `signature_fonts/README.md`.
+  The fonts are Darcey Oliver (default), Budaphest and Augustia. A style that
+  cannot show a letter of the typed name is greyed out on the page and refused
+  by the server (same rule), so no empty "tofu" boxes; if no style can show the
+  name (most Vietnamese names), the partner is asked to draw. Add/replace fonts
+  by dropping TTFs in that folder, no restart needed. See
+  `signature_fonts/README.md`.
 
 ### Admin pages (v1.34)
 

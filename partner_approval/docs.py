@@ -18,11 +18,12 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SIGNATURE_FONTS = HERE / "static" / "signature_fonts"
-SCRIPT_FONT = SIGNATURE_FONTS / "GreatVibes-Regular.ttf"     # fallback if the folder is empty
+SCRIPT_FONT = SIGNATURE_FONTS / "1-DarceyOliver-Regular.ttf"  # fallback if a custom folder is empty
 MAX_SIGNATURE_FONTS = 6
 _FONT_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(ttf|otf)$")
 MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
@@ -404,11 +405,56 @@ def signature_fonts(folder=None):
     if folder.is_dir():
         for f in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
             if _FONT_FILE.match(f.name) and f.is_file() and not f.is_symlink():
-                out.append({"id": f.stem, "label": _font_label(f.stem), "file": f.name})
+                out.append({"id": f.stem, "label": _font_label(f.stem), "file": f.name,
+                            "path": f})
     if not out and SCRIPT_FONT.is_file():
         out.append({"id": SCRIPT_FONT.stem, "label": _font_label(SCRIPT_FONT.stem),
-                    "file": SCRIPT_FONT.name})
-    return out[:MAX_SIGNATURE_FONTS]
+                    "file": SCRIPT_FONT.name, "path": SCRIPT_FONT})
+    out = out[:MAX_SIGNATURE_FONTS]
+    for f in out:
+        f["chars"] = "".join(sorted(font_coverage(f.pop("path"))))
+    return out
+
+
+# Characters a typed name may contain. Each font's real coverage of this set is
+# measured once (font_coverage); the page disables a style that cannot show the
+# typed name and the server refuses it with the same rule -> never a tofu box.
+SIGNATURE_CHARSET = frozenset(
+    [chr(c) for c in range(0x21, 0x7F)] + [chr(c) for c in range(0xC0, 0x250)]
+    + [chr(c) for c in range(0x1E00, 0x1F00)] + list("\u2018\u2019\u201c\u201d"))
+_COVERAGE = {}
+
+
+def font_coverage(path):
+    """Characters of SIGNATURE_CHARSET that the font really draws (not the tofu box)."""
+    from PIL import ImageFont
+    path = Path(path)
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _COVERAGE:
+        font = ImageFont.truetype(str(path), 48)
+        missing = set(_missing_glyphs(font, "".join(SIGNATURE_CHARSET)))
+        _COVERAGE[key] = frozenset(SIGNATURE_CHARSET - missing)
+    return _COVERAGE[key]
+
+
+def unsupported_chars(name, font_id=None, folder=None):
+    """Letters of `name` the chosen style cannot show, in order of appearance."""
+    name = unicodedata.normalize("NFC", name or "")
+    have = font_coverage(signature_font_path(font_id, folder))
+    out = []
+    for ch in name:
+        if not ch.isspace() and ch not in have and ch not in out:
+            out.append(ch)
+    return out
+
+
+def first_font_for(name, folder=None):
+    """Id of the first offered style that can show `name` (None if none can)."""
+    for f in signature_fonts(folder):
+        if not unsupported_chars(name, f["id"], folder):
+            return f["id"]
+    return None
 
 
 def signature_font_path(font_id=None, folder=None):
@@ -431,15 +477,16 @@ def signature_font_path(font_id=None, folder=None):
 def typed_signature(name, font_id=None, folder=None):
     """Typed name rendered in the chosen script font -> PNG bytes."""
     from PIL import Image, ImageDraw, ImageFont
-    name = " ".join((name or "").split())
+    name = " ".join(unicodedata.normalize("NFC", name or "").split())
     if len(name) < 2:
         raise SignatureError("Please type your full name.")
     if len(name) > 80:
         raise SignatureError("The name is too long.")
-    font = ImageFont.truetype(str(signature_font_path(font_id, folder)), 96)
-    if _missing_glyphs(font, name):
+    path = signature_font_path(font_id, folder)
+    if unsupported_chars(name, font_id, folder):
         raise SignatureError("This signature style cannot show some letters of your name. "
                              "Please choose another style or draw your signature.")
+    font = ImageFont.truetype(str(path), 96)
     left, top, right, bottom = font.getbbox(name)
     img = Image.new("RGBA", (right - left + 80, bottom - top + 80), (255, 255, 255, 0))
     ImageDraw.Draw(img).text((40 - left, 40 - top), name, font=font, fill=(16, 32, 96, 255))

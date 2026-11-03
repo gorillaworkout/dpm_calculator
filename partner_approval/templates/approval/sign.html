@@ -61,12 +61,14 @@
       <fieldset class="fonts" id="fonts" role="radiogroup" aria-label="Signature style">
         <legend>Choose a signature style</legend>
         {% for f in fonts %}
-        <label class="fopt"><input type="radio" name="font" value="{{ f.id }}"{{ ' checked' if f.id == font }}>
+        <label class="fopt{{ ' off' if f.missing }}" data-chars="{{ f.chars }}"><input type="radio" name="font" value="{{ f.id }}"{{ ' checked' if f.id == font }}{{ ' disabled' if f.missing }}>
           <span class="sig" data-sig style="font-family:'sig-{{ f.id }}',cursive">{{ shown }}</span>
-          <span class="fl2">{{ f.label }}<span class="tick" aria-hidden="true">✓</span></span></label>
+          <span class="fl2">{{ f.label }}<span class="tick" aria-hidden="true">✓</span><span class="na" data-na>{{ ('Can’t show ' ~ f.missing|list|join(' ')) if f.missing }}</span></span></label>
         {% endfor %}
       </fieldset>
-      <p class="muted" style="margin:8px 0 0">This is how your signature appears on the agreement. Latin and Vietnamese letters are supported; otherwise please draw.</p>
+      {% set none_ok = fonts and fonts|rejectattr('missing')|list|length == 0 %}
+      <p class="font-note" id="font-note" role="status"{{ ' hidden' if not none_ok }}>None of the signature styles can show all the letters of your name. Please <button type="button" class="linkbtn" data-go="draw">draw your signature</button> instead.</p>
+      <p class="muted" style="margin:8px 0 0">This is how your signature appears on the agreement. Styles that can’t show a letter of your name are greyed out; you can always draw instead.</p>
     </div>
     <label class="agree"><input type="checkbox" name="agree" value="1" id="agree">
       <span>I have read and agree to the terms of this Partnership Agreement, and I agree that my electronic signature is as valid as my handwritten signature.</span></label>
@@ -133,10 +135,28 @@
     if (m === 'draw') { lastW = 0; size(); }
   }
   document.querySelectorAll('[data-mode]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.mode); }); });
+  document.querySelectorAll('[data-go]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.go); }); });
   window.addEventListener('resize', size); size();
 
   var tn = document.getElementById('typed_name'), sigs = document.querySelectorAll('[data-sig]');
-  tn.addEventListener('input', function () { sigs.forEach(function (s) { s.textContent = tn.value || ' '; }); });
+  // A style that lacks a letter of the name is disabled (the server applies the same rule).
+  var fopts = document.querySelectorAll('.fopt[data-chars]'), fnote = document.getElementById('font-note');
+  function fit() {
+    var name = (tn.value || '').normalize('NFC'), first = null, picked = null;
+    fopts.forEach(function (o) {
+      var have = o.dataset.chars, miss = [], r = o.querySelector('input');
+      Array.from(name).forEach(function (ch) { if (!/\s/.test(ch) && have.indexOf(ch) < 0 && miss.indexOf(ch) < 0) miss.push(ch); });
+      r.disabled = miss.length > 0; o.classList.toggle('off', r.disabled);
+      o.querySelector('[data-na]').textContent = miss.length ? 'Can\u2019t show ' + miss.join(' ') : '';
+      if (!r.disabled && !first) first = r;
+      if (r.checked && !r.disabled) picked = r;
+    });
+    if (!picked) fopts.forEach(function (o) { o.querySelector('input').checked = false; });
+    if (!picked && first) first.checked = true;
+    fnote.hidden = !!first || !fopts.length;
+  }
+  tn.addEventListener('input', function () { sigs.forEach(function (s) { s.textContent = tn.value || ' '; }); fit(); });
+  fit();
 
   var err = document.getElementById('sign-err'), btn = document.getElementById('sign-submit');
   document.getElementById('sign-form').addEventListener('submit', function (e) {
@@ -150,6 +170,7 @@
       var o = out.getContext('2d'); o.scale(s, s); o.drawImage(pad, 0, 0, r.width, r.height);
       document.getElementById('signature').value = out.toDataURL('image/png');
     } else if (!tn.value.trim()) { e.preventDefault(); err.textContent = 'Please type your full name.'; return; }
+    else if (!document.querySelector('.fopt input:checked:not(:disabled)')) { e.preventDefault(); err.textContent = 'None of the styles can show your name. Please draw your signature.'; return; }
     if (!document.getElementById('agree').checked) { e.preventDefault(); err.textContent = 'Please tick the box to confirm that you agree.'; return; }
     btn.disabled = true; btn.textContent = 'Signing…';
   });

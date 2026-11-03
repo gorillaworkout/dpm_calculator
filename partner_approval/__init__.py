@@ -585,8 +585,13 @@ def _previews(req):
 
 def _render_sign(req, token, row, error=None, mode="draw", typed=None, font=None):
     fonts = docs.signature_fonts()
-    if font not in {f["id"] for f in fonts}:
-        font = fonts[0]["id"] if fonts else ""
+    shown = forms._clean(typed if typed is not None else (req["data"].get("partner_name") or ""), False)
+    for f in fonts:                     # same rule as docs.typed_signature -> no tofu boxes
+        f["missing"] = "".join(ch for ch in dict.fromkeys(shown)
+                               if not ch.isspace() and ch not in f["chars"])
+    usable = [f["id"] for f in fonts if not f["missing"]]
+    if font not in usable:
+        font = usable[0] if usable else ""
     return render_template("approval/sign.html", req=req, token=token,
                            expires=wib(row["expires_at"], LONG_DATE), error=error,
                            pages=_previews(req), mode=mode, typed=typed,

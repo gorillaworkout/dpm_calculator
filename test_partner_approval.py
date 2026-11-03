@@ -356,22 +356,40 @@ url2 = f"/sign/{t2['token']}"
 assert "Please sign &lt;again&gt;" in anon.get(url2).get_data(as_text=True)
 # the typed tab offers every font in signature_fonts/, each preview in its own @font-face
 page = anon.get(url2).get_data(as_text=True)
-for fid in ("Allura-Regular", "DancingScript-Regular", "GreatVibes-Regular"):
+for fid in ("1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia"):
     assert f'name="font" value="{fid}"' in page and f"signature_fonts/{fid}.ttf" in page, fid
-assert anon.get("/sign/static/signature_fonts/Allura-Regular.ttf").status_code == 200
+assert anon.get("/sign/static/signature_fonts/1-DarceyOliver-Regular.ttf").status_code == 200
+assert page.count("data-chars=") == 3 and 'id="font-note"' in page
+# a typed name no style can show: every style disabled + "draw instead" note (server-rendered)
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "1-DarceyOliver-Regular",
+                                       "typed_name": "Nguy\u1ec5n V\u0103n \u0110\u1ee9c"})
+assert page.status_code == 400 and "cannot show some letters" in page.get_data(as_text=True)
+page = page.get_data(as_text=True)
+assert page.count(" disabled>") >= 3 and 'id="font-note" role="status">' in page
+assert "Can\u2019t show \u1ec5 \u0110 \u1ee9" in page
+assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
+# a name only some styles can show: those are disabled, the first usable one is pre-selected
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "font": "2-Budaphest-Regular",
+                                       "typed_name": "Jean-Luc O'Brien"}).get_data(as_text=True)
+assert 'value="2-Budaphest-Regular" disabled>' in page and 'value="1-DarceyOliver-Regular" checked>' in page
+assert 'id="font-note" role="status" hidden>' in page
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "2-Budaphest-Regular",
+                                    "typed_name": "Jean-Luc O'Brien"})
+assert r.status_code == 400 and "cannot show some letters" in r.get_data(as_text=True)
+assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
 # an unknown / path-like font id is refused and nothing is signed
-for bad in ("../../app", "Allura-Regular.ttf", "/etc/passwd", "nope"):
+for bad in ("../../app", "3-Augustia.ttf", "/etc/passwd", "nope"):
     r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": bad,
                                         "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
     assert r.status_code == 400 and "Choose one of the signature styles" in r.get_data(as_text=True), bad
     assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
-# typed signature (Vietnamese name) in the chosen style
-r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "Allura-Regular",
-                                    "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
+# typed signature in the chosen style
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "2-Budaphest-Regular",
+                                    "typed_name": "Andrew Tan"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid)
 assert s["status"] == "signed" and s["signed_kind"] == "typed"
-assert any("typed name, style Allura" in (a["note"] or "") for a in PA.STORE.audit(rid)), PA.STORE.audit(rid)
+assert any("typed name, style Budaphest" in (a["note"] or "") for a in PA.STORE.audit(rid)), PA.STORE.audit(rid)
 # under review: compact header actions, textareas only inside the modals, no dark gradients
 d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
 head = d[d.index('class="pa-top"'):d.index('id="next-step"')]

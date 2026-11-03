@@ -83,6 +83,14 @@ label.fl{display:block;font-size:13px;font-weight:600;color:var(--mute);margin:0
 .fopt .fl2{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--mute);font-weight:600}
 .fopt .tick{display:none;width:16px;height:16px;border-radius:50%;background:var(--teal-d);color:#fff;font-size:11px;line-height:16px;text-align:center}
 .fopt:has(input:checked) .tick{display:inline-block}
+.fopt .na{display:none;font-weight:500;color:#9A6B12}
+.fopt.off,.fopt.off:has(input:checked){cursor:not-allowed;background:#F4F6F7;border-style:dashed;border-color:#D5DEE1;box-shadow:none}
+.fopt.off .sig{opacity:.28}
+.fopt.off .tick,.fopt.off:has(input:checked) .tick{display:none}
+.fopt.off .na:not(:empty){display:inline}
+.font-note{margin:10px 0 0;padding:9px 12px;border:1px solid #F0D9A8;border-radius:8px;background:#FFF8EA;color:#7A5410;font-size:13px}
+.font-note[hidden]{display:none}
+.linkbtn{padding:0;border:0;background:none;color:var(--teal-d);font:inherit;font-weight:600;text-decoration:underline;cursor:pointer}
 .agree{display:flex;gap:10px;align-items:flex-start;margin:18px 0 0;padding:14px 16px;background:#F7FAFA;border:1px solid var(--line);border-radius:10px;font-size:14px;cursor:pointer}
 .agree input{margin:2px 0 0;width:18px;height:18px;accent-color:var(--teal-d);flex:none}
 .submitrow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;flex-wrap:wrap}
