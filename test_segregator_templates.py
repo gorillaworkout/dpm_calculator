@@ -147,11 +147,14 @@ mt4_book.close()
 print("OK MT4 template header and guide")
 
 akun_book = load_workbook(io.BytesIO(blobs["accounts"]))
-assert sheet_header(akun_book["Accounts"]) == list(_KOLOM_PETA)
-types = [akun_book["Accounts"].cell(row, 2).value for row in range(2, 6)]
-assert types == ["Classic", "CentAccount", "Plus", "Pro"]
+assert sheet_header(akun_book["Accounts"]) == ["account", "GROUP", "account_type"]
+types = [akun_book["Accounts"].cell(row, 3).value for row in range(2, 7)]
+assert types == ["Classic", "CentAccount", "Plus", "Pro", "Pro"]
+groups = [akun_book["Accounts"].cell(row, 2).value for row in range(2, 7)]
+assert groups[4] == "real\\Pro-06-cents", groups
 marks = guide_marks(akun_book)
 assert marks["account"] == "required" and marks["account_type"] == "required"
+assert marks["GROUP"] == "optional"
 assert akun_book["Accounts"].cell(2, 1).number_format == "@"
 akun_book.close()
 print("OK account-type template")
@@ -180,6 +183,7 @@ assert len(fx) == 3
 akun = baca_peta_akun(paths["accounts"])
 assert akun["100002"] == "USC"
 assert akun["100001"] == "USD" and akun["100003"] == "USD" and akun["100004"] == "USD"
+assert akun["100005"] == "USC"          # type Pro, but GROUP real\\Pro-06-cents
 
 mt5_out = folder / "mt5.zip"
 proses([paths["mt5"]], mt5_out)
@@ -195,7 +199,11 @@ mt4_out = folder / "mt4.zip"
 proses([paths["mt4"]], mt4_out, allow_mt4=True, mt4_accounts=paths["accounts"])
 mt4_summary = verification(mt4_out)
 assert mt4_summary["MT4 closed buy/sell kept"] == 2
-assert "1 CentAccount" in mt4_summary[f"  - {paths['accounts'].name} (MT4 account types)"]
+assert "2 USC" in mt4_summary[f"  - {paths['accounts'].name} (MT4 account types)"]
+assert "cent group only (type not CentAccount, USC by group): 1" in \
+    mt4_summary["MT4 cent counts (account_type vs GROUP)"]
+assert "100005" in mt4_summary[
+    "MT4 logins changed to USC by GROUP (account_type alone would be USD)"]
 print("OK each template passes through the parser")
 
 

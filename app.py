@@ -685,7 +685,8 @@ KVB_DOC = {
 KVB_SEGREGATE_HINT = (
     "Choose one or more MT5 Deals History files (.csv/.xlsx/.xlsm). "
     "MT4 Raw Report is optional and is detected from the file contents, not the file name. "
-    "Any MT4 file requires the account-type file (account, account_type): CentAccount = USC (÷100), other types = USD. "
+    "Any MT4 file requires the account-type file (account, account_type, optional GROUP): CentAccount or a cent GROUP "
+    "(e.g. real\\Plus-10-cents) = USC (÷100), everything else = USD. "
     "You may also include one Client Equity FX workbook (.xlsx, sheet 'Query result')."
 )
 KVB_SEGREGATE_DOC = {
@@ -700,10 +701,14 @@ KVB_SEGREGATE_DOC = {
         "(comma-separated, with or without a trailing currency column). "
         "MT4 is optional. If you do not upload one, the result is the same MT5 workbook as before.",
         "<strong>Required with any MT4 file:</strong> the <strong>account-type</strong> file with columns "
-        "<code>account</code> and <code>account_type</code>. Without it the run stops before upload. "
+        "<code>account</code> and <code>account_type</code>, and optionally <code>GROUP</code> "
+        "(the newer export is <code>account, GROUP, account_type</code>). Without it the run stops before upload. "
         "Each MT4 row's Login is matched to <code>account</code>: <code>CentAccount</code> (any case or spacing, "
         "e.g. <code>Cent Account</code>, <code>cent_account</code>) is USC and its amounts are divided by 100 to USD. "
-        "Classic, Plus, Pro, and every other type are USD.",
+        "A login whose <code>GROUP</code> name contains <code>cent</code>, <code>cents</code> or "
+        "<code>USC</code> (e.g. <code>real\\Plus-10-cents</code>, <code>Plus-10-centsFM</code>) is also USC, "
+        "even when its account_type is Pro. Classic, Plus, Pro, and every other type in a non-cent group are USD. "
+        "Verifikasi shows the rule, the counts, and every login that is USC only because of its GROUP.",
         "A Login missing from the account-type file is treated as USD and listed on the Verifikasi sheet. "
         "There is no USD/USC choice per file; a currency column in the MT4 file is only a cross-check.",
         "Each MT5 file must contain Deal, Login, Time, Type, Entry, Symbol, Volume, Commission, Fee, Swap, Profit and Currency. Group and Country are ignored.",
@@ -1147,7 +1152,7 @@ def _mt4_tanpa_peta_akun(paths, names):
     if mt4 and not peta:
         return ("STOP: the MT4 account-type file is required. MT4 file(s) uploaded: "
                 f"{', '.join(mt4)}. Add the account-type file (columns account, "
-                "account_type) and run again. CentAccount is USC (÷100); every other "
+                "account_type, optional GROUP) and run again. CentAccount or a cent GROUP is USC (÷100); every other "
                 "type is USD.")
     return None
 

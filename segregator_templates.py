@@ -28,7 +28,7 @@ HEADER_MT4 = [
 ]
 TEKS_MT4 = ("Deal", "Login", "Gateway Order")
 
-HEADER_AKUN = ["account", "account_type"]
+HEADER_AKUN = ["account", "GROUP", "account_type"]
 HEADER_FX = ["date", "Currency", "rate"]
 
 NAMA_BERKAS = {
@@ -170,18 +170,26 @@ def buku_mt4():
 
 def buku_akun():
     contoh = [
-        ["100001", "Classic"],
-        ["100002", "CentAccount"],
-        ["100003", "Plus"],
-        ["100004", "Pro"],
+        ["100001", "real\\Plus-10", "Classic"],
+        ["100002", "real\\Plus-10-cents", "CentAccount"],
+        ["100003", "real\\Plus-03", "Plus"],
+        ["100004", "real\\Pro-06", "Pro"],
+        ["100005", "real\\Pro-06-cents", "Pro"],
     ]
     panduan = _panduan(HEADER_AKUN, _KOLOM_PETA, {
         "account": "Text. The MT4 login.",
-        "account_type": "CentAccount (any case or spacing) is USC, divided by 100. Classic, Plus, Pro, and every other type are USD. Logins missing from this file are USD and listed on Verifikasi.",
+        "GROUP": "Optional MT4 group. A group whose name contains cent, cents or USC as a word "
+                 "(real\\Plus-10-cents, Plus-10-centsFM) is USC, whatever account_type says. "
+                 "Older files without this column still work.",
+        "account_type": "CentAccount (any case or spacing) is USC, divided by 100. Classic, Plus, Pro, "
+                        "and every other type are USD unless GROUP is a cent group. Logins missing "
+                        "from this file are USD and listed on Verifikasi.",
     })
     panduan.insert(2, [
         "Layout", "",
-        "Required with any MT4 file, KVB only. One row per MT4 account. DPM does not use this file.",
+        "Required with any MT4 file, KVB only. One row per MT4 account. Columns account, GROUP, "
+        "account_type (the older account, account_type layout is also accepted). "
+        "USC = account_type CentAccount OR a cent GROUP. DPM does not use this file.",
     ])
     return _tulis("Accounts", HEADER_AKUN, contoh, panduan, ("account",))
 

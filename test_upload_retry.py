@@ -192,6 +192,103 @@ test('one failed read is retried once; the bytes read are what gets sent', funct
   });
 });
 
+
+// --- pick-time probe and pre-flight (stale File after the file changed on disk) ---
+function fakeFile(name, bytes, opts) {
+  opts = opts || {};
+  var reads = 0;
+  var f = {name: name, size: bytes.length, lastModified: 1,
+    get reads() { return reads; },
+    slice: function (a, b) {
+      return {size: Math.max(0, Math.min(b, bytes.length) - a), arrayBuffer: function () {
+        reads++;
+        if (opts.fail && opts.fail(reads)) {
+          var x = new Error('The requested file could not be read'); x.name = 'NotReadableError';
+          return Promise.reject(x);
+        }
+        var src = (opts.data ? opts.data() : bytes);
+        return Promise.resolve(Uint8Array.from(src.slice(a, b)).buffer);
+      }};
+    }};
+  return f;
+}
+function nosleep() { return Promise.resolve(); }
+function bytesOf(n, seed) { var a = []; for (var i = 0; i < n; i++) a.push((i * 7 + seed) & 255); return a; }
+
+test('size: KB below 1 MB, never "0 MB" for a non-empty file', function () {
+  assert.strictEqual(size(0), '0 bytes');
+  assert.strictEqual(size(10), '1 KB');
+  assert.strictEqual(size(300 * 1024), '300 KB');
+  assert.strictEqual(size(3.4 * 1048576), '3.4 MB');
+  assert.strictEqual(size(140 * 1048576), '140 MB');
+});
+
+test('probe reads head and tail, gives a fingerprint and the head bytes', function () {
+  var f = fakeFile('a.csv', bytesOf(200000, 1));
+  return probeFile(f, nosleep).then(function (r) {
+    assert.ok(r.ok);
+    assert.strictEqual(f.reads, 2, 'first and last 64 KB only');
+    assert.strictEqual(r.head.byteLength, 65536);
+    return probeFile(fakeFile('a.csv', bytesOf(200000, 1)), nosleep).then(function (r2) {
+      assert.strictEqual(r2.fp, r.fp, 'same bytes, same fingerprint');
+      return probeFile(fakeFile('a.csv', bytesOf(200000, 2)), nosleep);
+    }).then(function (r3) { assert.notStrictEqual(r3.fp, r.fp); });
+  });
+});
+
+test('probe of a small file reads it once; a 0-byte file is ok and empty', function () {
+  var f = fakeFile('Metabase_mt5 crm rate.xlsx', bytesOf(1000, 3));
+  return probeFile(f, nosleep).then(function (r) {
+    assert.ok(r.ok); assert.strictEqual(f.reads, 1);
+    return probeFile(fakeFile('empty.csv', []), nosleep);
+  }).then(function (r) { assert.ok(r.ok); assert.strictEqual(r.head.byteLength, 0); });
+});
+
+test('probe retries one failed read, then reports NotReadableError without throwing', function () {
+  var once = fakeFile('b.csv', bytesOf(1000, 1), {fail: function (n) { return n === 1; }});
+  var always = fakeFile('MT4_RawReport_20260712.csv', bytesOf(1000, 1), {fail: function () { return true; }});
+  var slept = [];
+  return probeFile(once, function (ms) { slept.push(ms); return Promise.resolve(); }).then(function (r) {
+    assert.ok(r.ok, 'second read works');
+    assert.deepStrictEqual(slept, [1000]);
+    return probeFile(always, nosleep);
+  }).then(function (r) {
+    assert.ok(!r.ok);
+    assert.strictEqual(r.err.name, 'NotReadableError');
+    assert.strictEqual(always.reads, 2, 'tried exactly twice');
+  });
+});
+
+test('pre-flight names unreadable and changed files; nothing else', function () {
+  var good = fakeFile('MT4_Cent_Account.xlsx', bytesOf(5000, 1));
+  var stale = fakeFile('MT4_RawReport_20260712.csv', bytesOf(5000, 2), {fail: function () { return true; }});
+  var data = bytesOf(5000, 3);
+  var changed = fakeFile('Deals.csv', data, {data: function () { return data; }});
+  var picked = {};
+  return Promise.all([good, changed].map(function (f) {
+    return probeFile(f, nosleep).then(function (r) { picked[f.name] = {state: 'ok', fp: r.fp}; });
+  })).then(function () {
+    data = bytesOf(5000, 4);                      // re-exported on disk, same name and size
+    return preflight([good, stale, changed], function (f) { return picked[f.name]; }, nosleep);
+  }).then(function (bad) {
+    assert.deepStrictEqual(bad.map(function (b) { return b.file.name + ':' + b.why; }),
+      ['MT4_RawReport_20260712.csv:unreadable', 'Deals.csv:changed']);
+    var t = preflightText(bad);
+    assert.ok(t.indexOf('MT4_RawReport_20260712.csv') >= 0 && t.indexOf('[NotReadableError]') >= 0, t);
+    assert.ok(t.indexOf('berubah setelah dipilih') >= 0 && t.indexOf('changed on disk') >= 0, t);
+    assert.ok(t.indexOf('Nothing was uploaded') >= 0, t);
+  });
+});
+
+test('read-error message is Indonesian and English and says to re-select only that file', function () {
+  var m = fileReadError('MT4_RawReport_20260712.csv', {name: 'NotReadableError'}).message;
+  ['tidak bisa dibaca browser', 'Pilih ulang file ini', 'file lain tetap terpilih',
+   'Re-select this file', 'the other files stay selected', 'changed or was replaced'].forEach(function (s) {
+    assert.ok(m.indexOf(s) >= 0, s);
+  });
+  assert.ok(unreadableShort({name: 'NotReadableError'}).indexOf('Re-select this file') >= 0);
+});
+
 (function run(i) {
   if (i >= tests.length) { console.log('node retry OK ' + tests.length); return; }
   Promise.resolve().then(tests[i][1]).then(function () { run(i + 1); }, function (err) {

@@ -23,6 +23,7 @@
     <style>
       #deals-drop .drop-files li span{flex:1}
       .mt4-tag{flex:none;font-size:12px;color:#555;margin-right:8px}
+      .file-bad{color:#ffb4b4}
     </style>
     <label for="deals-file">Deals files <span class="opt">— MT5 Deals History; MT4 Raw Report is optional</span></label>
     <div id="deals-drop" class="dropzone" tabindex="0" role="button">
@@ -32,7 +33,7 @@
     </div>
     <label for="mt4-accounts">MT4 account types <span class="opt">— required when any MT4 file is uploaded</span></label>
     <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
-      <strong>Drop the account-type file here</strong><br><span>Required with MT4. Columns account and account_type. CentAccount is USC (÷100); other types and unknown logins are USD.</span>
+      <strong>Drop the account-type file here</strong><br><span>Required with MT4. Columns account, GROUP (optional), account_type. CentAccount or a cent GROUP (e.g. Plus-10-cents) is USC (÷100); everything else and unknown logins are USD.</span>
       <input id="mt4-accounts" type="file" name="mt4_accounts" accept=".csv,.xlsx,.xlsm">
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
@@ -161,7 +162,10 @@
     // Deal Segregator and Segregated always use chunks, even for small files, so progress and
     // retry/error details are accurate from the first byte.
     var form = document.getElementById('uploadform'),
-        inputs = Array.prototype.slice.call(form.querySelectorAll('input[type="file"][name="file"]')),
+        // Every file field goes through the same chunked path, the KVB account-type file
+        // too, so each file is read, checked and counted ("File 2 of 3") the same way.
+        inputs = Array.prototype.slice.call(form.querySelectorAll(
+          'input[type="file"][name="file"], input[type="file"][name="mt4_accounts"]')),
         progress = document.getElementById('upload-progress'),
         progressTitle = document.getElementById('upload-progress-title'),
         progressDetail = document.getElementById('upload-progress-detail'),
@@ -170,14 +174,62 @@
         progressTrack = progress.querySelector('[role="progressbar"]');
     if (!form || !inputs.length || !window.fetch) return; // no JS: the plain form still works
 
-    function mb(n) { return (n / 1048576).toFixed(0); }
+    function mb(n) { return (n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0); }
+
+    // Every drop zone registers here so a single file can be re-picked from an error.
+    var drops = [];
+    // key -> {state: 'checking'|'ok'|'bad', fp, err}. Filled when a file is picked.
+    var checks = {};
+    function fileKey(file) { return [file.name, file.size, file.lastModified].join(':'); }
+    function dropOf(file) {
+      for (var i = 0; i < drops.length; i++) {
+        if (drops[i].files().indexOf(file) >= 0) return drops[i];
+      }
+      return null;
+    }
+    function repickButton(file, after) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'file-remove repick';
+      b.textContent = 'Pilih ulang file ini / Re-select this file';
+      b.setAttribute('aria-label', 'Re-select ' + file.name);
+      b.addEventListener('click', function (event) {
+        event.stopPropagation();
+        var drop = dropOf(file);
+        if (!drop) return;
+        var picker = document.createElement('input');
+        picker.type = 'file';
+        picker.accept = drop.input.accept || '';
+        picker.addEventListener('change', function () {
+          var fresh = picker.files && picker.files[0];
+          if (!fresh) return;
+          drop.replace(file, fresh);
+          if (after) after(fresh);
+        });
+        picker.click();
+      });
+      return b;
+    }
+    function checkFile(file, onDone) {
+      var k = fileKey(file);
+      if (checks[k] && checks[k].state !== 'checking') { if (onDone) onDone(checks[k]); return; }
+      checks[k] = {state: 'checking'};
+      probeFile(file, function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); })
+        .then(function (res) {
+          checks[k] = res.ok ? {state: 'ok', fp: res.fp} : {state: 'bad', err: res.err};
+          {% if company == 'kvb' and slug == 'segregate' %}
+          if (res.ok) sniffKind(file, res.head);
+          {% endif %}
+          if (onDone) onDone(checks[k]);
+        });
+    }
 
     function setupDrop(zoneId, input, single) {
       var zone = document.getElementById(zoneId);
       if (!zone) return;
       var list = zone.querySelector('.drop-files');
       var selected = Array.prototype.slice.call(input.files || []);
-      function key(file) { return [file.name, file.size, file.lastModified].join(':'); }
+      function key(file) { return fileKey(file); }
       function unique(files) {
         var seen = {};
         return files.filter(function (file) {
@@ -198,7 +250,13 @@
           var item = document.createElement('li');
           var name = document.createElement('span');
           var button = document.createElement('button');
-          name.textContent = file.name + ' (' + mb(file.size) + ' MB)';
+          var c = checks[key(file)];
+          name.textContent = file.name + ' (' + size(file.size) + ')' +
+            (c && c.state === 'checking' ? ' · checking…' : '');
+          if (c && c.state === 'bad') {
+            name.className = 'file-bad';
+            name.textContent = file.name + ' (' + size(file.size) + ') — ' + unreadableShort(c.err);
+          }
           button.type = 'button';
           button.className = "file-remove";
           button.textContent = 'Remove';
@@ -211,8 +269,14 @@
           });
           item.appendChild(name);
           {% if company == 'kvb' and slug == 'segregate' %}
-          sniffMt4(item, file);
+          if (sniffed[file.name] === 'mt4') {
+            var tag = document.createElement('span');
+            tag.className = 'mt4-tag';
+            tag.textContent = 'MT4';
+            item.appendChild(tag);
+          }
           {% endif %}
+          if (c && c.state === 'bad') item.appendChild(repickButton(file));
           item.appendChild(button);
           list.appendChild(item);
         });
@@ -221,9 +285,15 @@
         selected = single ? incoming.slice(0, 1) : unique(selected.concat(incoming));
         sync();
         show();
+        // Read the first and last bytes now: a file the browser cannot read shows up
+        // here, next to its name, instead of minutes into the upload.
+        selected.forEach(function (file) { checkFile(file, show); });
       }
-      zone.addEventListener('click', function (e) { if (e.target !== input) input.click(); });
+      zone.addEventListener('click', function (e) {
+        if (e.target !== input && !(e.target.closest && e.target.closest('button'))) input.click();
+      });
       zone.addEventListener('keydown', function (e) {
+        if (e.target !== zone) return;
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); }
       });
       ['dragenter', 'dragover'].forEach(function (name) {
@@ -238,7 +308,24 @@
       input.addEventListener('change', function () {
         add(Array.prototype.slice.call(input.files || []));
       });
+      drops.push({
+        input: input,
+        files: function () { return selected.slice(); },
+        // Swap one file for a freshly picked copy; every other file stays selected.
+        replace: function (old, fresh) {
+          var i = selected.indexOf(old);
+          if (i < 0) return;
+          delete checks[key(old)];
+          delete checks[key(fresh)];
+          selected[i] = fresh;
+          selected = single ? selected.slice(0, 1) : unique(selected);
+          sync();
+          show();
+          checkFile(fresh, show);
+        }
+      });
       show();
+      selected.forEach(function (file) { checkFile(file, show); });
     }
     {% if company == 'kvb' and slug == 'segregate' %}
     // name -> 'mt4' | 'accounts' | 'other', from the first bytes of the file.
@@ -255,36 +342,28 @@
       var head = lines.join('\n').toLowerCase();
       return /raw report for/.test(head) || (/open time/.test(head) && /close time/.test(head));
     }
-    function sniffMt4(item, file) {
-      file.slice(0, 2000).arrayBuffer().then(function (buf) {
-        var bytes = new Uint8Array(buf);
-        var text = '';
-        try {
-          if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
-            text = new TextDecoder('utf-16le').decode(bytes);
-          } else if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
-            text = new TextDecoder('utf-16be').decode(bytes);
-          } else {
-            text = new TextDecoder('utf-8').decode(bytes);
-          }
-        } catch (e) {
-          return;
+    function sniffKind(file, buf) {
+      var bytes = new Uint8Array(buf || new ArrayBuffer(0)).subarray(0, 2000);
+      var text = '';
+      try {
+        if (bytes.length >= 2 && bytes[0] === 0xFF && bytes[1] === 0xFE) {
+          text = new TextDecoder('utf-16le').decode(bytes);
+        } else if (bytes.length >= 2 && bytes[0] === 0xFE && bytes[1] === 0xFF) {
+          text = new TextDecoder('utf-16be').decode(bytes);
+        } else {
+          text = new TextDecoder('utf-8').decode(bytes);
         }
-        var head = text.split(/\r?\n/).slice(0, 5).join('\n').toLowerCase();
-        var kind = 'other';
-        if (isMt4Head(text)) {
-          kind = 'mt4';
-        } else if (/account_type/.test(head)) {
-          kind = 'accounts';
-        }
-        sniffed[file.name] = kind;
-        if (kind === 'mt4' && item.parentNode) {
-          var tag = document.createElement('span');
-          tag.className = 'mt4-tag';
-          tag.textContent = 'MT4';
-          item.insertBefore(tag, item.querySelector('.file-remove'));
-        }
-      }).catch(function () {});
+      } catch (e) {
+        return;
+      }
+      var head = text.split(/\r?\n/).slice(0, 5).join('\n').toLowerCase();
+      var kind = 'other';
+      if (isMt4Head(text)) {
+        kind = 'mt4';
+      } else if (/account_type/.test(head)) {
+        kind = 'accounts';
+      }
+      sniffed[file.name] = kind;
     }
     function mt4WithoutAccounts() {
       var deals = Array.prototype.slice.call(document.getElementById('deals-file').files || []);
@@ -355,13 +434,94 @@
     // The browser could not read the chosen file (moved, locked by another program,
     // or an online-only cloud placeholder). That is not a network problem: retrying
     // the upload cannot fix it, so it stops with the file name.
+    // Chrome hands out a File as a snapshot: once the file on disk is saved again,
+    // re-exported, re-downloaded under the same name, or synced by OneDrive after it was
+    // picked, every read fails with NotReadableError. Only picking it again helps.
+    function unreadableText(name) {
+      return 'File "' + name + '" tidak bisa dibaca browser — file berubah atau diganti setelah dipilih, ' +
+        'masih terbuka di Excel, atau file OneDrive/Google Drive online-only. Tutup file, salin ke folder ' +
+        'lokal, lalu klik "Pilih ulang file ini" dan pilih file itu lagi; file lain tetap terpilih. ' +
+        '(The browser could not read this file: it changed or was replaced after you picked it, is ' +
+        'open/locked in another program, or is an online-only OneDrive/Google Drive file. Close it, copy it ' +
+        'to a local folder, click "Re-select this file" and pick it again; the other files stay selected.)';
+    }
+    function unreadableShort(err) {
+      return 'tidak bisa dibaca / cannot be read (' + ((err && err.name) || 'Error') + '). ' +
+        'Pilih ulang file ini / Re-select this file.';
+    }
     function fileReadError(name, cause) {
-      var e = new Error('File "' + name + '" tidak bisa dibaca browser — copy ulang file ke folder ' +
-        'lokal lalu pilih lagi. (The browser could not read this file: it may have been moved or ' +
-        'renamed, be open/locked in another program, or be an online-only OneDrive/Google Drive file.)');
+      var e = new Error(unreadableText(name));
       e.name = 'FileReadError (' + ((cause && cause.name) || 'Error') + ')';
-      e.fileRead = true; e.noRetry = true; e.cause = cause;
+      e.fileRead = true; e.noRetry = true; e.cause = cause; e.fileName = name;
       return e;
+    }
+    // FNV-1a over the probed bytes plus size: cheap, and enough to see that the file
+    // behind a File changed between picking it and pressing Run.
+    function fingerprint(buffers, total) {
+      var h = 0x811c9dc5;
+      function mix(b) { h ^= b; h = Math.imul ? Math.imul(h, 0x01000193) : (h * 0x01000193) | 0; }
+      buffers.forEach(function (buf) {
+        var bytes = new Uint8Array(buf);
+        for (var i = 0; i < bytes.length; i++) mix(bytes[i]);
+      });
+      String(total).split('').forEach(function (ch) { mix(ch.charCodeAt(0)); });
+      return (h >>> 0).toString(16) + ':' + total;
+    }
+    // 0.3 MB used to show as "0 MB" and looked empty. Only a real 0-byte file is empty.
+    function size(n) {
+      if (n === 0) return '0 bytes';
+      if (n < 1048576) return Math.max(1, Math.round(n / 1024)) + ' KB';
+      return (n / 1048576).toFixed(n < 10 * 1048576 ? 1 : 0) + ' MB';
+    }
+    var PROBE_BYTES = 65536;
+    // Reads the first and last 64 KB of a file. One failed read is retried once after
+    // 1 s (a virus scanner or sync client can hold the file briefly).
+    // -> Promise({ok, fp, head} | {ok: false, err}); never rejects.
+    function probeFile(file, sleep) {
+      function slice(a, b) {
+        var piece = file.slice(a, b);
+        return piece.arrayBuffer ? piece.arrayBuffer() : new Response(piece).arrayBuffer();
+      }
+      function once() {
+        var n = Math.min(file.size, PROBE_BYTES), tail = Math.max(n, file.size - PROBE_BYTES);
+        return Promise.resolve().then(function () { return slice(0, n); }).then(function (head) {
+          if (tail >= file.size) return [head];
+          return slice(tail, file.size).then(function (end) { return [head, end]; });
+        });
+      }
+      function ok(parts) {
+        var got = parts.reduce(function (s, b) { return s + b.byteLength; }, 0);
+        if (got !== Math.min(file.size, 2 * PROBE_BYTES)) {   // the file shrank under us
+          var short = new Error('read ' + got + ' bytes, expected more'); short.name = 'ShortRead';
+          throw short;
+        }
+        return {ok: true, fp: fingerprint(parts, file.size), head: parts[0]};
+      }
+      return once().then(ok).catch(function () {
+        return sleep(1000).then(once).then(ok);
+      }).catch(function (err) { return {ok: false, err: err}; });
+    }
+    // Pre-flight before anything is sent: every file must still read, and read the
+    // same as when it was picked. -> list of {file, why: 'unreadable'|'changed', err}.
+    function preflight(files, picked, sleep) {
+      var bad = [];
+      return files.reduce(function (chain, file) {
+        return chain.then(function () {
+          return probeFile(file, sleep).then(function (res) {
+            var before = picked(file);
+            if (!res.ok) bad.push({file: file, why: 'unreadable', err: res.err});
+            else if (before && before.fp && before.fp !== res.fp) bad.push({file: file, why: 'changed'});
+          });
+        });
+      }, Promise.resolve()).then(function () { return bad; });
+    }
+    function preflightText(bad) {
+      return bad.map(function (b) {
+        return b.why === 'changed'
+          ? 'File "' + b.file.name + '" berubah setelah dipilih — pilih ulang file ini. ' +
+            '(This file changed on disk after you picked it; re-select it so the current version is uploaded.)'
+          : unreadableText(b.file.name) + ' [' + ((b.err && b.err.name) || 'Error') + ']';
+      }).join(' ') + ' Nothing was uploaded. / Belum ada yang dikirim.';
     }
     function isJson(r) {
       var ct = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
@@ -478,7 +638,8 @@
       if (err && err.fileRead) {
         return (context && context.file ? 'Upload stopped at file ' + context.fileIndex + ' of ' +
           context.fileCount + ', chunk ' + context.chunk + ' of ' + context.chunks + '. ' : '') +
-          err.message + ' Nothing more was sent; the files already uploaded in this run were discarded.' + details;
+          err.message + ' Nothing more was sent; the files already uploaded in this run were discarded. ' +
+          'After re-selecting, press Run again. / Setelah pilih ulang, tekan Run lagi.' + details;
       }
       if (err && err.sessionExpired) {
         return 'Session expired — please sign in again. ' + err.message +
@@ -572,6 +733,7 @@
     // Queue state: the server answers 202 while another user's heavy job runs.
     var queue = {ticket: '', cancelled: false, timer: null, wake: null, button: null};
     function cancelButton(show) {
+      if (!queue.button && !show) return;    // nothing to hide; do not create it
       if (!queue.button) {
         queue.button = document.createElement('button');
         queue.button.type = 'button';
@@ -589,7 +751,9 @@
         });
         progress.appendChild(queue.button);
       }
+      // .dl is display:inline-block, which overrides the hidden attribute.
       queue.button.hidden = !show;
+      queue.button.style.display = show ? '' : 'none';
     }
     function beginUpload(attempt, total, waitStarted) {
       if (queue.cancelled) {
@@ -640,6 +804,18 @@
       });
     }
 
+    // A "Re-select this file" button under the error: picks one file again into its own
+    // drop zone; every other file stays selected. Then Run starts a fresh upload.
+    function addRepick(file) {
+      var wrap = document.createElement('div');
+      wrap.style.marginTop = '8px';
+      wrap.appendChild(repickButton(file, function (fresh) {
+        wrap.textContent = 'Diganti / Replaced: ' + fresh.name + ' (' + size(fresh.size) + '). ' +
+          'Tekan Run lagi / Press Run again.';
+      }));
+      progressDetail.appendChild(wrap);
+    }
+
     form.addEventListener('submit', function (ev) {
       {% if company == 'kvb' and slug == 'segregate' %}
       var mt4Missing = mt4WithoutAccounts();
@@ -647,7 +823,7 @@
         ev.preventDefault();
         updateProgress('STOP: account-type file required',
           'STOP: MT4 file(s) ' + mt4Missing.join(', ') + ' need the account-type file ' +
-          '(columns account, account_type). Add it and run again. Nothing was uploaded.', 0, 'failed');
+          '(columns account, GROUP, account_type). Add it and run again. Nothing was uploaded.', 0, 'failed');
         return;
       }
       {% endif %}
@@ -655,19 +831,20 @@
         return all.concat(Array.prototype.slice.call(input.files || []));
       }, []);
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
-      var accountsInput = form.querySelector('input[type="file"][name="mt4_accounts"]');
-      var fileCount = files.length + (accountsInput ? (accountsInput.files || []).length : 0);
-      if (fileCount > MAX_FILES || files.some(function (file) { return file.size === 0; })) {
+      var fileCount = files.length;              // the account-type file is one of them
+      var empty = files.filter(function (file) { return file.size === 0; });
+      if (fileCount > MAX_FILES || empty.length) {
         ev.preventDefault();
         var message = fileCount > MAX_FILES
           ? 'Select no more than ' + MAX_FILES + ' files per run.'
-          : 'Empty files cannot be processed. Remove the 0-byte file and try again.';
+          : 'Empty files cannot be processed: ' + empty.map(function (f) { return f.name; }).join(', ') +
+            ' (0 bytes). Remove the 0-byte file and try again.';
         updateProgress('Upload failed', message, 0, 'failed');
         return;
       }
       if (!files.length || total < DIRECT) {
         form.b.disabled = true; form.b.textContent = 'Working…';
-        updateProgress('Uploading files…', files.length + ' file(s), ' + mb(total) + ' MB · waiting for server response', 0, 'uploading');
+        updateProgress('Uploading files…', files.length + ' file(s), ' + size(total) + ' · waiting for server response', 0, 'uploading');
         return;                                   // ordinary submit, unchanged
       }
 
@@ -680,8 +857,20 @@
       var started = Date.now();
       var currentContext = null;
       queue.cancelled = false; queue.ticket = '';
-      updateProgress('Starting upload…', files.length + ' file(s), ' + mb(total) + ' MB total · ' + elapsed(started), 0, 'uploading');
-      beginUpload(1, total)
+      updateProgress('Checking files…', 'Reading ' + files.length + ' file(s) before upload · ' +
+        size(total) + ' total', 0, 'uploading');
+      // Every file is read again (first and last 64 KB) before anything is sent, so a
+      // stale or locked file is reported at once, by name, with nothing uploaded.
+      preflight(files, function (f) { return checks[fileKey(f)]; },
+                function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); })
+        .then(function (bad) {
+          if (bad.length) {
+            var pe = new Error(preflightText(bad)); pe.preflight = bad; pe.noRetry = true;
+            throw pe;
+          }
+          updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
+          return beginUpload(1, total);
+        })
         .then(function (start) {
           var id = activeId = pageUpload = start.id;
 
@@ -696,7 +885,7 @@
                 chain = chain.then(function () {
                   var label = 'File ' + (fileIndex + 1) + ' of ' + files.length + ': ' + file.name +
                     ' · chunk ' + (mySeq + 1) + ' of ' + chunks;
-                  currentContext = {file: file.name, fileIndex: fileIndex + 1, fileCount: files.length,
+                  currentContext = {file: file.name, fileObj: file, fileIndex: fileIndex + 1, fileCount: files.length,
                     chunk: mySeq + 1, chunks: chunks, label: label, percent: total ? sent / total * 100 : 0};
                   updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),
                     currentContext.percent, 'uploading');
@@ -730,7 +919,7 @@
           });
 
           return chain.then(function () {
-            updateProgress('Upload complete — processing…', mb(total) + ' MB received by server · ' + elapsed(started), 100, 'processing');
+            updateProgress('Upload complete — processing…', size(total) + ' received by server · ' + elapsed(started), 100, 'processing');
             form.b.textContent = 'Working…';
             // Hand the staged files to the normal pipeline. The file input is
             // cleared first so the browser does not resend the bytes.
@@ -756,12 +945,20 @@
             return;
           }
           pageUpload = null;
+          if (err && err.preflight) {
+            updateProgress('Upload not started — re-select the file / pilih ulang file', err.message, 0, 'failed');
+            err.preflight.forEach(function (b) { addRepick(b.file); });
+            form.b.disabled = false;
+            form.b.textContent = 'Run & download result';
+            return;
+          }
           if (activeId) {
             var cleanup = new FormData(); cleanup.append('id', activeId);
             cleanup.append('reason', err && err.fileRead ? 'file-read-error' : 'upload-failed');
             fetch('/upload/discard', { method: 'POST', body: cleanup, keepalive: true });
           }
           updateProgress('Upload failed', uploadError(err, currentContext), currentContext ? currentContext.percent : 0, 'failed');
+          if (err && err.fileRead && currentContext && currentContext.fileObj) addRepick(currentContext.fileObj);
           form.b.disabled = false;
           form.b.textContent = 'Run & download result';
         });
