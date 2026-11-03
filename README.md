@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.35 · 2026-11-03`.
+required) show the running version, for example `DW Calculator v1.36 · 2026-11-03`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.35)
+### Tests (`test_*.py`, v1.36)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -896,6 +896,37 @@ python3 hitung_dw.py file.xlsx --sheet D Withdrawal
   tab close (`pagehide` via `sendBeacon`, skipped for pages kept in the back/forward cache).
 
 ---
+
+## KVB Deal Segregator — MT4 cent accounts and unreadable files (v1.36)
+
+**MT4 account-type file.** Two layouts are accepted (any column order, any header case;
+`.xlsx`/`.xlsm`/`.csv`):
+
+| Layout | Columns |
+|---|---|
+| new | `account`, `GROUP`, `account_type` |
+| old (still works, same result as before) | `account`, `account_type` |
+
+Cent rule (`deal_segregator.ATURAN_CENT`): a login is **USC** (Commission, Fee, Swap and
+Profit ÷ 100) when `account_type` is `CentAccount` **or** its `GROUP` contains
+`cent`/`cents`/`USC` as a word (`real\Plus-10-cents`, `Plus-10-centsFM`,
+`real\Pro-06-SL5-cents`). Words like `Percent`, `Accent` or `KBP-KK-CME` are not cent groups.
+Every other login, and a login missing from the file, is USD. With a GROUP column the
+Verifikasi sheet shows the rule, the counts (both / GROUP only / account_type only /
+neither) and, in yellow, the logins that GROUP made USC (account_type alone would say USD)
+and any CentAccount login whose GROUP is not a cent group (kept USC). A login listed twice
+with the same currency is fine; two different currencies for one login is a STOP.
+
+**Upload robustness.** In the browser each file is read (first and last 64 KB, one retry
+after 1 s) as soon as it is picked, and read again right before upload. A file that cannot
+be read (`NotReadableError`) or changed since it was picked (fingerprint mismatch)
+is named in Indonesian and English with a **Pilih ulang file ini / Re-select this file**
+button that replaces only that file; nothing is uploaded until it is fixed. The cause is
+almost always that the file changed on disk after it was picked (re-exported or
+re-downloaded with the same name, saved in Excel, synced by OneDrive/Google Drive or
+online-only). The account-type file is now sent in the chunked upload too, so the
+"file N of M" counter includes it. Sizes under 1 MB show in KB (no more "0 MB" for a
+300 KB file).
 
 ## Partner Approval (Beta, v1.35)
 

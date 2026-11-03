@@ -52,8 +52,8 @@ dan export yang header-nya di baris pertama (koma, boleh ada kolom mata uang
 di ujung). Hanya buy/sell yang sudah ditutup (Close Time) yang masuk, ke sheet
 yang sama dengan MT5, dengan kolom Platform. Tanpa file MT4, sheet dan angka
 MT5 tidak berubah. File account,account_type WAJIB untuk MT4. Mata uang per
-baris hanya dari peta itu (CentAccount = USC, tipe lain dan login yang tidak
-ada di peta = USD; kolom mata uang di file hanya cek silang). USC MT4 dibagi 100
+baris hanya dari peta itu (CentAccount atau GROUP berisi cent/cents/USC = USC,
+tipe lain dan login yang tidak ada di peta = USD; kolom GROUP opsional; kolom mata uang di file hanya cek silang). USC MT4 dibagi 100
 (bukan kurs Client Equity FX). Agent tidak masuk ke total manapun.
 
 Line break di dalam sebuah field (Name, Comment, atau kolom teks lain) disambung
@@ -74,7 +74,7 @@ import tempfile
 import sys
 import traceback
 import zipfile
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -1074,13 +1074,32 @@ def _indeks_mata_uang_mt4(header):
 
 
 _KOLOM_PETA = ("account", "account_type")
+# Optional third column in the newer export (account, GROUP, account_type).
+_KOLOM_GROUP = ("group", "mt4 group", "mt4_group")
+# MT4 group names put the deposit currency in the name: real\Plus-10-cents,
+# Plus-10-centsFM, real\Pro-06-cents. "cent"/"cents"/"USC" must start a word, so
+# names like "Percent" do not count; text after it (FM, -SL5) is allowed.
+_GROUP_CENT = re.compile(r"(?<![a-z])(?:cents?|usc)", re.I)
+ATURAN_CENT = ("USC (÷100) when account_type is CentAccount OR the GROUP name contains "
+               "'cent'/'cents'/'USC' as a word (e.g. real\\Plus-10-cents, Plus-10-centsFM). "
+               "Every other login, and a login missing from the file, is USD.")
 
 
 def _header_peta_dari_sel(cells):
     nama = [_teks(c).strip().lower() for c in cells]
     if all(k in nama for k in _KOLOM_PETA):
-        return {k: nama.index(k) for k in _KOLOM_PETA}
+        idx = {k: nama.index(k) for k in _KOLOM_PETA}
+        for g in _KOLOM_GROUP:
+            if g in nama:
+                idx["group"] = nama.index(g)
+                break
+        return idx
     return None
+
+
+def _group_cent(group) -> bool:
+    """real\\Plus-10-cents, Plus-10-centsFM, USC-STD -> True; Plus-10, Percent -> False."""
+    return bool(_GROUP_CENT.search(_teks(group)))
 
 
 def _adalah_peta_akun(path: Path) -> bool:
@@ -1121,9 +1140,25 @@ def _adalah_cent(tipe) -> bool:
 
 
 def baca_peta_akun(path: Path) -> dict:
-    """account -> 'USD' atau 'USC'. CentAccount = USC. Tipe lain = USD.
+    """account -> 'USD' atau 'USC'. Lihat baca_peta_akun_detail."""
+    return baca_peta_akun_detail(path)[0]
 
-    Dua tipe berbeda untuk akun yang sama menghentikan run.
+
+def _info_peta_kosong(group: bool) -> dict:
+    return {"group_column": group, "rows": 0, "type_cent": 0, "group_cent": 0, "both": 0,
+            "group_only": 0, "type_only": 0, "blank_type": 0, "blank_group": 0,
+            "repeated": 0, "group_only_logins": [], "type_only_logins": [],
+            "group_only_by": Counter(), "type_only_by": Counter(), "types": Counter()}
+
+
+def baca_peta_akun_detail(path: Path):
+    """(account -> 'USD'/'USC', info). USC = account_type CentAccount, ATAU nama
+    GROUP mengandung cent/cents/USC (kolom GROUP opsional; layout lama
+    account,account_type tetap jalan). Lainnya USD.
+
+    info menghitung tipe vs group: both, group_only (tipe bukan CentAccount tapi
+    group cent -> USC karena group), type_only, kosong, baris berulang.
+    Mata uang berbeda untuk akun yang sama menghentikan run.
     """
     _ingat_berkas(path)
     suffix = path.suffix.lower()
@@ -1178,13 +1213,14 @@ def baca_peta_akun(path: Path) -> dict:
         def tutup():
             f.close()
     hasil = {}
+    ig = idx.get("group")
+    info = _info_peta_kosong(ig is not None)
     try:
         for nomor, row in baris_sumber:
             _ingat_baris(nomor)
             if row is None or idx["account"] >= len(row):
                 continue
-            for kunci in _KOLOM_PETA:
-                i = idx[kunci]
+            for kunci, i in idx.items():
                 if i < len(row) and _ada_pengganti(row[i]):
                     sys.exit(
                         f"STOP: unreadable characters in {kunci} in '{path.name}', "
@@ -1193,16 +1229,47 @@ def baca_peta_akun(path: Path) -> dict:
             akun = _kunci_akun(row[idx["account"]])
             if not akun:
                 continue
-            tipe = _teks(row[idx["account_type"]] if idx["account_type"] < len(row) else "")
-            mata = "USC" if _adalah_cent(tipe) else "USD"
+            tipe = _teks(row[idx["account_type"]] if idx["account_type"] < len(row) else "").strip()
+            group = _teks(row[ig] if ig is not None and ig < len(row) else "").strip()
+            t_cent = _adalah_cent(tipe)
+            g_cent = _group_cent(group)
+            mata = "USC" if (t_cent or g_cent) else "USD"
             lama = hasil.get(akun)
-            if lama is not None and lama != mata:
-                sys.exit(f"STOP: account {akun} has conflicting account types in '{path.name}', "
-                         f"row {nomor}.")
+            if lama is not None:
+                if lama != mata:
+                    sys.exit(f"STOP: account {akun} has conflicting account types in '{path.name}', "
+                             f"row {nomor}.")
+                info["repeated"] += 1
+                continue
             hasil[akun] = mata
+            info["rows"] += 1
+            info["types"][tipe or "(blank)"] += 1
+            info["blank_type"] += not tipe
+            info["blank_group"] += ig is not None and not group
+            info["type_cent"] += t_cent
+            info["group_cent"] += g_cent
+            info["both"] += t_cent and g_cent
+            if g_cent and not t_cent:
+                info["group_only"] += 1
+                info["group_only_logins"].append(akun)
+                info["group_only_by"][(group, tipe or "(blank)")] += 1
+            if t_cent and ig is not None and not g_cent:
+                info["type_only"] += 1
+                info["type_only_logins"].append(akun)
+                info["type_only_by"][(group or "(blank)", tipe)] += 1
     finally:
         tutup()
-    return hasil
+    return hasil, info
+
+
+def _teks_kelompok(counter, batas=12) -> str:
+    items = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+    if not items:
+        return "(none)"
+    text = "; ".join(f"{g} / {t}: {n}" for (g, t), n in items[:batas])
+    if len(items) > batas:
+        text += f"; and {len(items) - batas} more groups"
+    return text
 
 
 def _selesaikan_mata_uang_mt4(login, kolom, akun):
@@ -1468,8 +1535,8 @@ def _iter_mt4(path: Path, info: dict):
 def _normalisasi_mt4(path: Path, info: dict, deals, pakai_baris, akun=None):
     """Satu export MT4 -> baris out saja, pada Close Time.
 
-    Mata uang tiap baris hanya dari peta account type (CentAccount = USC,
-    lainnya USD; login tak dikenal = USD). Kolom mata uang hanya cek silang. USC dibagi 100 pada Commission, Fee, Swap, dan Profit sebelum
+    Mata uang tiap baris hanya dari peta account type (CentAccount atau
+    GROUP cent = USC, lainnya USD; login tak dikenal = USD). Kolom mata uang hanya cek silang. USC dibagi 100 pada Commission, Fee, Swap, dan Profit sebelum
     diagregasi. Volume tidak dibagi. Agent hanya untuk Verifikasi.
     """
     header = info["header"]
@@ -1735,7 +1802,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
     if len(peta_paths) > 1:
         names = ", ".join(p.name for p in peta_paths)
         sys.exit(f"STOP: upload only one MT4 account-type file. Found: {names}.")
-    akun = baca_peta_akun(peta_paths[0]) if peta_paths else {}
+    akun, info_peta = baca_peta_akun_detail(peta_paths[0]) if peta_paths else ({}, None)
     peta_resolved = {p.resolve() for p in peta_paths}
     deal_paths = [p for p in rest if p.resolve() not in peta_resolved]
     if len(fx_paths) > 1:
@@ -1757,8 +1824,9 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
         names = ", ".join(path.name for path in mt4_paths)
         sys.exit(
             "STOP: the MT4 account-type file is required for MT4 Raw Report(s): "
-            f"{names}. Upload the account-type file (columns account, account_type) "
-            "together with the MT4 file. CentAccount is USC (÷100); every other type is USD."
+            f"{names}. Upload the account-type file (columns account, account_type, "
+            "optional GROUP) together with the MT4 file. CentAccount or a cent GROUP "
+            "(e.g. real\\Plus-10-cents) is USC (÷100); everything else is USD."
         )
     fx = {}
     for path in fx_paths:
@@ -1853,8 +1921,8 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
     yellow_labels = set()
     for r in per_file:
         if r.get("platform") == "mt4":
-            how = ("per row from the account-type file (CentAccount = USC, other types "
-                   "and unknown logins = USD)")
+            how = ("per row from the account-type file (CentAccount or a cent GROUP = USC, "
+                   "other types and unknown logins = USD)")
             ringkasan[f"  - {r['nama']} (MT4 Raw Report)"] = (
                 f"{r['total']} rows, {r['out']} closed buy/sell, "
                 f"currency {how}, "
@@ -1878,9 +1946,43 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
         _tulis_tidak_terbaca(ringkasan, r)
     if peta_paths:
         n_cent = sum(1 for mata in akun.values() if mata == "USC")
-        ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
-            f"{len(akun)} accounts, {n_cent} CentAccount (USC), "
-            f"{len(akun) - n_cent} other types (USD)")
+        ip = info_peta
+        if ip and ip["group_column"]:
+            ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
+                f"{len(akun)} accounts (columns account, GROUP, account_type), "
+                f"{n_cent} USC, {len(akun) - n_cent} USD")
+            ringkasan["MT4 cent rule"] = ATURAN_CENT
+            ringkasan["MT4 cent counts (account_type vs GROUP)"] = (
+                f"both CentAccount and cent group: {ip['both']}; "
+                f"cent group only (type not CentAccount, USC by group): {ip['group_only']}; "
+                f"CentAccount only (group not cent, USC by type): {ip['type_only']}; "
+                f"neither (USD): {len(akun) - n_cent}"
+                + (f"; blank GROUP: {ip['blank_group']}" if ip["blank_group"] else "")
+                + (f"; blank account_type: {ip['blank_type']}" if ip["blank_type"] else ""))
+            if ip["group_only"]:
+                lbl = ("MT4 logins changed to USC by GROUP (account_type alone would be USD)")
+                dipetakan = set()
+                for r in berkas_mt4:
+                    dipetakan |= r["source_logins"]["mapping"]
+                dipakai_run = [a for a in ip["group_only_logins"] if a in dipetakan]
+                ringkasan[lbl] = (
+                    f"{ip['group_only']} logins in the file, {len(dipakai_run)} of them "
+                    f"in this run's MT4 rows. By group / type: "
+                    f"{_teks_kelompok(ip['group_only_by'])}. "
+                    f"Logins in this run: {_daftar_login(dipakai_run)}. "
+                    f"All logins: {_daftar_login(ip['group_only_logins'])}")
+                yellow_labels.add(lbl)
+            if ip["type_only"]:
+                lbl = "MT4 CentAccount logins whose GROUP is not a cent group (kept USC)"
+                ringkasan[lbl] = (
+                    f"{ip['type_only']} logins. By group / type: "
+                    f"{_teks_kelompok(ip['type_only_by'])}. "
+                    f"Logins: {_daftar_login(ip['type_only_logins'])}")
+                yellow_labels.add(lbl)
+        else:
+            ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
+                f"{len(akun)} accounts, {n_cent} CentAccount (USC), "
+                f"{len(akun) - n_cent} other types (USD)")
     for path in fx_paths:
         ringkasan[f"  - {path.name} (Client Equity FX)"] = f"FX table, {len(fx):,} date/currency rates"
     ringkasan["USD conversion (Commission/Fee/Swap/Profit)"] = (
@@ -1990,7 +2092,9 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
             "MT4 currency rule":
                 "The account-type file is required. Each row's Login is matched to "
                 "account: CentAccount is USC, every other type is USD, and a login "
-                "missing from the file is USD (listed above). A currency column in the "
+                "missing from the file is USD (listed above). When the file has a GROUP "
+                "column, a login whose GROUP name contains cent/cents/USC (for example "
+                "real\\Plus-10-cents) is also USC, whatever its account_type. A currency column in the "
                 "file is only a cross-check, never the source. Symbol suffix, the report title, login number and "
                 "profit size cannot separate USD from USC. MT4 USC amounts on the sheet are "
                 "divided by 100. Balance and credit rows stay excluded, the same rule as MT5.",
@@ -2222,8 +2326,9 @@ def main():
     ap.add_argument("--allow-mt4", action="store_true",
                     help="accept an MT4 Manager Raw Report as well (KVB). DPM must leave this off.")
     ap.add_argument("--mt4-accounts",
-                    help="account,account_type file; REQUIRED when any MT4 Raw Report is given. "
-                         "CentAccount is USC (÷100); every other type and unknown logins are USD. "
+                    help="account,account_type file (optional GROUP column); REQUIRED when any "
+                         "MT4 Raw Report is given. CentAccount or a GROUP containing cent/cents/USC "
+                         "is USC (÷100); everything else and unknown logins are USD. "
                          "Used only with --allow-mt4.")
     ap.add_argument("--delete-input", action="store_true",
                     help="After the result is written, delete the input files. "
