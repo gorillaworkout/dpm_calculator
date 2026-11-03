@@ -1,14 +1,24 @@
 {% extends "base.html" %}
-{% from "approval/_status.html" import badge %}
+{% from "approval/_status.html" import badge, details_card %}
 {% block title %}{{ req.ref }} · Partner Approval (Beta){% endblock %}
+{% block wide %} wide{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
-<div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta</span></div>
-<p class="lede">{{ types[req.request_type] }} · {{ req.partner_name }} · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
-{% if req.status == 'rejected' and req.reject_reason %}<div class="note bad" style="margin:0 0 18px">Rejected: {{ req.reject_reason }}</div>{% endif %}
-<pre style="color:var(--ink);max-height:none">{{ summary }}</pre>
-<h3 style="margin-top:28px">History</h3>
-{% include "approval/_audit.html" %}
-<p><a href="{{ url_for('partner_approval.index') }}" style="color:#9db8ff">← My requests</a>
-{% if is_admin %} · <a href="{{ url_for('partner_approval.admin_detail', rid=req.id) }}" style="color:#9db8ff">Open in admin</a>{% endif %}</p>
+<a class="pa-back" href="{{ url_for('partner_approval.index') }}">← My requests</a>
+<header class="pa-top">
+  <div class="pa-titles">
+    <div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta</span></div>
+    <p class="pa-meta">{{ types[req.request_type] }} · <b>{{ req.partner_name }}</b> · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
+  </div>
+  {% if is_admin %}<div class="btns"><a class="btn btn-secondary" href="{{ url_for('partner_approval.admin_detail', rid=req.id) }}">Open in admin</a></div>{% endif %}
+</header>
+{% if req.status == 'rejected' and req.reject_reason %}<div class="pa-strip bad"><span class="ic">×</span><span class="t"><b>Rejected:</b> {{ req.reject_reason }}</span></div>
+{% elif req.status == 'pending' %}<div class="pa-strip"><span class="ic">i</span><span class="t">Waiting for an admin to review this request.</span></div>
+{% elif req.status in ('approved', 'resign') %}<div class="pa-strip"><span class="ic">i</span><span class="t">Approved. Waiting for the partner to sign the agreement.</span></div>
+{% elif req.status == 'signed' %}<div class="pa-strip"><span class="ic">✓</span><span class="t">Signed by the partner. An admin is checking the signed agreement.</span></div>
+{% elif req.status == 'completed' %}<div class="pa-strip ok"><span class="ic">✓</span><span class="t">Completed.</span></div>{% endif %}
+<div class="pa-grid">
+  <section class="pa-card"><h3>Request details</h3>{{ details_card(details) }}</section>
+  <aside><section class="pa-card"><h3>History</h3>{% include "approval/_audit.html" %}</section></aside>
+</div>
 {% endblock %}

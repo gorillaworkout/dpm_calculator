@@ -4,24 +4,33 @@
 {% block wide %} wide{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
-<div class="pa-head"><h1>Partner <span>requests</span></h1><span class="beta">Beta · admin</span></div>
-<p class="lede">Pending → Approved (Awaiting Signature) → Signed – Under Review → Completed.</p>
+<header class="pa-top">
+  <div class="pa-titles">
+    <div class="pa-head"><h1>Partner <span>requests</span></h1><span class="beta">Beta · admin</span></div>
+    <p class="pa-meta">Pending → Approved (Awaiting Signature) → Signed – Under Review → Completed.</p>
+  </div>
+  <div class="btns"><a class="btn btn-secondary" href="{{ url_for('partner_approval.index') }}">My requests</a></div>
+</header>
 <div class="pa-tabs">
   <a href="{{ url_for('partner_approval.admin_list') }}" class="{{ 'on' if not status }}">All<b>{{ counts.values()|sum }}</b></a>
   {% for key, label in STATUS.items() %}
   <a href="{{ url_for('partner_approval.admin_list', status=key) }}" class="{{ 'on' if status == key }}">{{ label }}<b>{{ counts.get(key, 0) }}</b></a>
   {% endfor %}
 </div>
+<section class="pa-card pa-table">
 {% if requests %}
 <table class="pa">
-  <thead><tr><th>Ref</th><th>Type</th><th>Partner</th><th>Role</th><th>UID</th><th>By</th><th>Updated</th><th>Status</th></tr></thead>
+  <thead><tr><th>Ref</th><th>Partner</th><th>Type</th><th>Updated</th><th>Status</th><th></th></tr></thead>
   <tbody>
   {% for r in requests %}
-  <tr><td><a href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ r.ref }}</a></td>
-    <td>{{ types[r.request_type] }}</td><td>{{ r.partner_name }}</td><td>{{ r.role }}</td>
-    <td>{{ r.data.uid }}</td><td>{{ r.created_by }}</td><td style="white-space:nowrap">{{ wib(r.updated_at) }}</td><td>{{ badge(r) }}</td></tr>
+  <tr><td class="nowrap"><a href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ r.ref }}</a></td>
+    <td>{{ r.partner_name }}<span class="sub">{{ r.role }} · UID {{ r.data.uid }}</span></td>
+    <td>{{ types[r.request_type] }}<span class="sub">by {{ r.created_by }}</span></td>
+    <td class="nowrap">{{ wib(r.updated_at) }}</td><td>{{ badge(r) }}</td>
+    <td class="act"><a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_detail', rid=r.id) }}">{{ 'Review' if r.status in ('pending', 'signed') else 'Open' }}</a></td></tr>
   {% endfor %}
   </tbody>
 </table>
-{% else %}<p class="hint">No requests{{ ' with this status' if status }}.</p>{% endif %}
+{% else %}<p class="empty">No requests{{ ' with this status' if status }}.</p>{% endif %}
+</section>
 {% endblock %}

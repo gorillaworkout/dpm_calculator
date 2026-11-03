@@ -1,0 +1,7 @@
+{% macro steps(step) %}
+<ol class="steps" aria-label="Progress">
+  {% for n, label in ((1, 'Review'), (2, 'Sign'), (3, 'Done')) %}
+  <li class="{{ 'done' if n < step or step == 3 else ('on' if n == step or (step == 1 and n == 2) else '') }}"{% if n == step %} aria-current="step"{% endif %}><span class="dot">{{ '✓' if n < step or step == 3 else n }}</span>{{ label }}</li>
+  {% endfor %}
+</ol>
+{% endmacro %}

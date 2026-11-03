@@ -44,6 +44,16 @@ def fake_convert(docx_path, pdf_path, soffice="", timeout=180):
 docs.docx_to_pdf = fake_convert
 
 
+def sign_csrf(token):
+    with app.test_request_context():
+        return PA._sign_csrf(token)
+
+
+def spost(client, path, data=None, **kw):
+    """POST to a public sign form with its per-link CSRF field, like the page does."""
+    return client.post(path, data={**(data or {}), "csrf": sign_csrf(path.split("/")[2])}, **kw)
+
+
 def sign_in(username, password):
     c = app.test_client()
     r = c.post("/login", data={"username": username, "password": password})
@@ -219,8 +229,8 @@ r = anon.get(url)
 assert r.status_code == 200
 assert r.headers["Cache-Control"] == "no-store" and r.headers["Referrer-Policy"] == "no-referrer"
 body = r.get_data(as_text=True)
-for s in ("Test Partner", "X0000001", "Option A", "Option B", "Draw signature", "Type your name",
-          "I agree", "Download PDF"):
+for s in ("Test Partner", "X0000001", "Review", "Draw", "Type name", "Upload signed copy",
+          "Undo", "Clear", "I have read and agree", "Open PDF", "Download PDF", 'name="csrf"'):
     assert s in body, s
 r = anon.get(url + "/agreement.pdf")
 assert r.status_code == 200 and r.data.startswith(b"%PDF")
@@ -239,18 +249,18 @@ def drawn_data_url():
 
 
 # no "I agree" / blank signature are refused and do not use the link
-r = anon.post(url + "/sign", data={"mode": "draw", "signature": drawn_data_url()})
+r = spost(anon, url + "/sign", data={"mode": "draw", "signature": drawn_data_url()})
 assert r.status_code == 400 and "I agree" in r.get_data(as_text=True)
 blank = Image.new("RGBA", (200, 80), (0, 0, 0, 0))
 buf = io.BytesIO()
 blank.save(buf, "PNG")
-r = anon.post(url + "/sign", data={"mode": "draw", "agree": "1",
+r = spost(anon, url + "/sign", data={"mode": "draw", "agree": "1",
               "signature": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()})
 assert r.status_code == 400 and "draw your signature" in r.get_data(as_text=True)
 assert latest_token(rid)["used_at"] is None
 
 # drawn signature
-r = anon.post(url + "/sign", data={"mode": "draw", "agree": "1", "signature": drawn_data_url()},
+r = spost(anon, url + "/sign", data={"mode": "draw", "agree": "1", "signature": drawn_data_url()},
               headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1", "User-Agent": "TestBrowser/1.0"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 assert "signed.pdf" not in r.get_data(as_text=True)                  # partner gets no file
@@ -265,7 +275,7 @@ assert docs.company_column_blank(PA.SETTINGS.files / s["signed_docx"])
 for path in (url, url + "/agreement.pdf"):
     r = anon.get(path)
     assert "Already submitted" in r.get_data(as_text=True), path
-r = anon.post(url + "/sign", data={"mode": "typed", "agree": "1", "typed_name": "Again"})
+r = spost(anon, url + "/sign", data={"mode": "typed", "agree": "1", "typed_name": "Again"})
 assert "Already submitted" in r.get_data(as_text=True) and req(rid)["signed_kind"] == "drawn"
 
 # admin review
@@ -320,7 +330,8 @@ try:
     assert (server.host, server.port) == ("smtp.test.invalid", 2525)
     assert server.calls == ["starttls", ("login", "mailer", "pw")]
     assert msg["To"] == "Test Partner <partner@example.com>"
-    assert "ready to sign" in msg["Subject"]
+    assert msg["Subject"] == "Dupoin Markets \u2013 Partnership Agreement for Signature"
+    assert msg["From"] == "Dupoin <no-reply@example.com>"
     text = msg.get_body(("plain",)).get_content()
     html = msg.get_body(("html",)).get_content()
     assert f"/sign/{t2['token']}" in text and f"/sign/{t2['token']}" in html
@@ -343,16 +354,81 @@ assert not PA.SETTINGS.smtp_ready
 
 url2 = f"/sign/{t2['token']}"
 assert "Please sign &lt;again&gt;" in anon.get(url2).get_data(as_text=True)
-# typed signature (Vietnamese name in the script font)
-r = anon.post(url2 + "/sign", data={"mode": "typed", "agree": "1",
+# the typed tab offers every font in signature_fonts/, each preview in its own @font-face
+page = anon.get(url2).get_data(as_text=True)
+for fid in ("1-DarceyOliver-Regular", "2-Budaphest-Regular", "3-Augustia",
+            "4-GreatVibes-Regular", "5-DancingScript-Regular", "6-Allura-Regular"):
+    assert f'name="font" value="{fid}"' in page and f"signature_fonts/{fid}.ttf" in page, fid
+assert anon.get("/sign/static/signature_fonts/1-DarceyOliver-Regular.ttf").status_code == 200
+assert page.count("data-chars=") == 6 and 'id="font-note"' in page
+# a Vietnamese name: Bayu's 3 styles are greyed out, the 3 OFL ones selectable, Great Vibes pre-selected
+VI = "Nguy\u1ec5n V\u0103n \u0110\u1ee9c"
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "1-DarceyOliver-Regular",
+                                       "typed_name": VI})
+assert page.status_code == 400 and "cannot show some letters" in page.get_data(as_text=True)
+page = page.get_data(as_text=True)
+assert len(re.findall(r'name="font" value="[^"]+" disabled>', page)) == 3 and "Can\u2019t show \u1ec5 \u0110 \u1ee9" in page
+assert 'value="4-GreatVibes-Regular" checked>' in page and 'id="font-note" role="status" hidden>' in page
+assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
+# a name no style can show (not Latin/Vietnamese): every style disabled + "draw instead" note
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "typed_name": "\u738b\u5c0f\u660e"}).get_data(as_text=True)
+assert len(re.findall(r'name="font" value="[^"]+" disabled>', page)) == 6 and 'id="font-note" role="status">' in page and " checked" not in page.split('id="fonts"')[1].split("</fieldset>")[0]
+# a name only some styles can show: those are disabled, the first usable one is pre-selected
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "font": "2-Budaphest-Regular",
+                                       "typed_name": "Jean-Luc O'Brien"}).get_data(as_text=True)
+assert 'value="2-Budaphest-Regular" disabled>' in page and 'value="1-DarceyOliver-Regular" checked>' in page
+assert 'data-chose=""' in page
+# a style the partner picked and that can show the name is kept when the form is shown again
+page = spost(anon, url2 + "/sign", data={"mode": "typed", "font": "6-Allura-Regular",
+                                       "typed_name": "Nguy\u1ec5n V\u0103n \u0110\u1ee9c"}).get_data(as_text=True)
+assert 'value="6-Allura-Regular" checked>' in page and 'data-chose="1"' in page
+assert 'id="font-note" role="status" hidden>' in page
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "2-Budaphest-Regular",
+                                    "typed_name": "Jean-Luc O'Brien"})
+assert r.status_code == 400 and "cannot show some letters" in r.get_data(as_text=True)
+assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
+# an unknown / path-like font id is refused and nothing is signed
+for bad in ("../../app", "3-Augustia.ttf", "/etc/passwd", "nope"):
+    r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": bad,
+                                        "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
+    assert r.status_code == 400 and "Choose one of the signature styles" in r.get_data(as_text=True), bad
+    assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
+# typed signature (Vietnamese name) in the chosen style
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "5-DancingScript-Regular",
                                     "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid)
 assert s["status"] == "signed" and s["signed_kind"] == "typed"
+assert any("typed name, style Dancing Script" in (a["note"] or "") for a in PA.STORE.audit(rid)), PA.STORE.audit(rid)
+# under review: compact header actions, textareas only inside the modals, no dark gradients
+d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+head = d[d.index('class="pa-top"'):d.index('id="next-step"')]
+assert "Mark Completed" in head and 'href="#resign-modal"' in head and 'href="#reject-modal"' in head
+assert "Signed by the partner" in d and 'id="signed-doc"' in d
+body = d[d.index('<main'):]
+assert "<textarea" not in body.split('<div class="modal t"')[0]
+assert body.count("<textarea") == 2
+assert "gradient(" not in d[d.index("/* Partner Approval"):d.index("</style>", d.index("/* Partner Approval"))]
+# the signed PDF is shown as page images (admin only, never cached)
+from PIL import Image as _Img  # noqa: E402
+_pdf = PA.SETTINGS.files / s["signed_file"]
+_Img.new("RGB", (595, 842), "white").save(_pdf, "PDF")
+img_url = f"/approval/admin/{rid}/signed/page/1.png"
+assert img_url in admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+r = admin.get(img_url)
+assert r.status_code == 200 and r.data.startswith(docs.PNG_MAGIC) and r.mimetype == "image/png"
+assert r.headers["Cache-Control"] == "private, no-store" and r.headers["X-Content-Type-Options"] == "nosniff"
+assert admin.get(f"/approval/admin/{rid}/signed/page/2.png").status_code == 404
+assert admin.get(f"/approval/admin/{rid}/signed/page/0.png").status_code == 404
+assert sales.get(img_url).status_code == 403
+assert anon.get(img_url, headers=HTML).status_code in (302, 401)
 assert (PA.SETTINGS.files / f"{rid:06d}" / "signature.png").read_bytes().startswith(docs.PNG_MAGIC)
 r = admin.post(f"/approval/admin/{rid}/complete", data={"csrf_token": atok})
 assert req(rid)["status"] == "completed"
-assert "Completed" in admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+assert "Completed" in d and "by boss" in d and "No further actions" in d
+assert "Mark Completed" not in d and "#reject-modal" not in d and "<textarea" not in d
+assert "Download signed agreement" in d and admin.get(img_url).status_code == 200
 r = admin.get(f"/approval/admin/{rid}/file/signed_file")
 assert r.status_code == 200
 
@@ -364,9 +440,10 @@ with sqlite3.connect(PA.SETTINGS.db) as con:
     con.execute("UPDATE tokens SET expires_at=? WHERE token=?", (time.time() - 1, t3))
 r = anon.get(f"/sign/{t3}")
 assert r.status_code == 410 and "expired" in r.get_data(as_text=True)
-r = anon.post(f"/sign/{t3}/sign", data={"mode": "typed", "agree": "1", "typed_name": "Third Partner"})
+r = spost(anon, f"/sign/{t3}/sign", data={"mode": "typed", "agree": "1", "typed_name": "Third Partner"})
 assert r.status_code == 410 and req(rid3)["status"] == "approved"
-assert "Expired" in admin.get(f"/approval/admin/{rid3}").get_data(as_text=True)
+d = admin.get(f"/approval/admin/{rid3}").get_data(as_text=True)
+assert "Expired" in d and "The signing link has expired" in d and 'href="#resign-modal"' in d
 # admin makes a new link; the old one now says "replaced"
 admin.post(f"/approval/admin/{rid3}/resign", data={"csrf_token": atok, "note": ""})
 t3b = latest_token(rid3)["token"]
@@ -377,16 +454,23 @@ assert anon.get(f"/sign/{t3b}").status_code == 200
 
 # ------------------------------------------------------------- uploads
 up = f"/sign/{t3b}/upload"
-r = anon.post(up, data={"file": (io.BytesIO(b"MZ\x90\x00 not a pdf"), "signed.pdf")},
+r = spost(anon, up, data={"file": (io.BytesIO(b"MZ\x90\x00 not a pdf"), "signed.pdf")},
               content_type="multipart/form-data")
 assert r.status_code == 400 and "PDF, JPG or PNG" in r.get_data(as_text=True)
-r = anon.post(up, data={"file": (io.BytesIO(b"%PDF-" + b"0" * (20 * 1024 * 1024)), "big.pdf")},
+r = spost(anon, up, data={"file": (io.BytesIO(b"%PDF-" + b"0" * (20 * 1024 * 1024)), "big.pdf")},
               content_type="multipart/form-data")
 assert r.status_code == 413
-r = anon.post(up, data={}, content_type="multipart/form-data")
+r = spost(anon, up, data={}, content_type="multipart/form-data")
 assert r.status_code == 400
 assert latest_token(rid3)["used_at"] is None and req(rid3)["status"] == "resign"
-r = anon.post(up, data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0 jpeg bytes"), "photo.exe")},
+# magic bytes alone are not enough: the image must really decode
+r = spost(anon, up, data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0 jpeg bytes"), "photo.jpg")},
+          content_type="multipart/form-data")
+assert r.status_code == 400 and "PDF, JPG or PNG" in r.get_data(as_text=True)
+from PIL import Image  # noqa: E402
+_jpg = io.BytesIO()
+Image.new("RGB", (40, 20), "white").save(_jpg, "JPEG")
+r = spost(anon, up, data={"file": (io.BytesIO(_jpg.getvalue()), "photo.exe")},
               content_type="multipart/form-data", headers={"CF-Connecting-IP": "198.51.100.9"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid3)
@@ -398,10 +482,17 @@ assert r.status_code == 200 and r.data.startswith(b"\xff\xd8\xff")
 
 # --------------------------------------------------- reject needs a reason
 rid4 = submit(sales, {**AGREEMENT, "partner_name": "Fourth"})
+d = admin.get(f"/approval/admin/{rid4}").get_data(as_text=True)          # pending: compact header
+head = d[d.index('class="pa-top"'):d.index('id="next-step"')]
+assert 'id="approve-btn"' in head and 'href="#reject-modal"' in head and "Mark Completed" not in head
+assert "<textarea" not in d[d.index("<main"):].split('<div class="modal t"')[0]
 admin.post(f"/approval/admin/{rid4}/reject", data={"csrf_token": atok, "reason": "  "})
 assert req(rid4)["status"] == "pending"
 admin.post(f"/approval/admin/{rid4}/reject", data={"csrf_token": atok, "reason": "UID does not match"})
 assert req(rid4)["status"] == "rejected" and req(rid4)["reject_reason"] == "UID does not match"
+d = admin.get(f"/approval/admin/{rid4}").get_data(as_text=True)
+assert 'class="pa-strip bad"' in d and "UID does not match" in d
+assert "approve-btn" not in d and "#reject-modal" not in d and "<textarea" not in d
 assert "UID does not match" in sales.get(f"/approval/{rid4}").get_data(as_text=True)
 assert admin.post(f"/approval/admin/{rid4}/approve", data={"csrf_token": atok}).status_code == 302
 assert req(rid4)["status"] == "rejected"

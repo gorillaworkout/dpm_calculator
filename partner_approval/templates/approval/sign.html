@@ -1,90 +1,191 @@
 {% extends "approval/_sign_base.html" %}
+{% from "approval/_sign_steps.html" import steps %}
 {% block body %}
-<h1>Partnership agreement</h1>
-<p class="muted">Please read the agreement, then sign it on this page or upload a signed copy. This link is personal and can be used once. It is valid until {{ expires }}.</p>
-{% if req.resign_note and req.status == 'resign' %}<div class="card" style="border-color:#f0c48a;background:#fff8ee"><b>Note from Dupoin:</b> {{ req.resign_note }}</div>{% endif %}
-{% if error %}<div class="err" role="alert">{{ error }}</div>{% endif %}
+{{ steps(1) }}
+<h1>Partnership Agreement</h1>
+<p class="lede">Dear {{ req.data.partner_name }}, please review your agreement with Dupoin Markets and sign it below. This link is personal, works once and is valid until <b>{{ expires }}</b>.</p>
+{% if req.resign_note and req.status == 'resign' %}<div class="notebox"><b>Note from Dupoin:</b> {{ req.resign_note }}</div>{% endif %}
+{% if error %}<div class="err" role="alert" id="error">{{ error }}</div>{% endif %}
 
-<div class="card">
-  <h2>Your details</h2>
-  <dl>
-    <dt>Name</dt><dd>{{ req.data.partner_name }}</dd>
-    <dt>Passport/National ID</dt><dd>{{ req.data.passport }}</dd>
-    <dt>Role</dt><dd>{{ req.data.role }}</dd>
-    <dt>Dupoin UID</dt><dd>{{ req.data.uid }}</dd>
-    <dt>Region</dt><dd>{{ req.data.region }}</dd>
-    <dt>Effective date</dt><dd>{{ req.data.effective_date }}</dd>
+<section class="card">
+  <div class="card-h"><h2>Your details</h2><span class="muted">Ref {{ req.ref }}</span></div>
+  <dl class="lv">
+    <div><dt>Name</dt><dd>{{ req.data.partner_name }}</dd></div>
+    <div><dt>Passport / ID</dt><dd>{{ req.data.passport or '—' }}</dd></div>
+    <div><dt>Role</dt><dd>{{ req.data.role }}</dd></div>
+    <div><dt>Dupoin UID</dt><dd>{{ req.data.uid }}</dd></div>
+    <div><dt>Region</dt><dd>{{ req.data.region or '—' }}</dd></div>
+    <div><dt>Effective date</dt><dd>{{ req.data.effective_date }}</dd></div>
   </dl>
-</div>
+</section>
 
-<div class="card">
-  <div class="row" style="justify-content:space-between"><h2 style="margin:0">Agreement</h2>
-    <a class="btn light" href="{{ url_for('partner_sign.sign_pdf', token=token, download=1) }}">Download PDF</a></div>
-  <iframe title="Agreement PDF" src="{{ url_for('partner_sign.sign_pdf', token=token) }}" style="margin-top:12px"></iframe>
-</div>
-
-<div class="card" id="opt-a">
-  <h2>Option A · Sign on this page</h2>
-  <div class="tabs" role="tablist">
-    <button type="button" role="tab" aria-selected="true" data-mode="draw">Draw signature</button>
-    <button type="button" role="tab" aria-selected="false" data-mode="typed">Type your name</button>
+<section class="card" id="review">
+  <div class="card-h"><h2><span class="num">1</span>Review the agreement</h2>
+    <div class="btns">
+      <a class="btn btn-secondary" href="{{ url_for('partner_sign.sign_pdf', token=token) }}" target="_blank" rel="noopener noreferrer">Open PDF</a>
+      <a class="btn btn-secondary" href="{{ url_for('partner_sign.sign_pdf', token=token, download=1) }}">Download PDF</a>
+    </div></div>
+  {% if pages %}
+  <div class="pages" id="pages" tabindex="0" aria-label="Agreement, {{ pages }} page{{ 's' if pages != 1 }}">
+    {% for n in range(1, pages + 1) %}<img src="{{ url_for('partner_sign.sign_preview', token=token, n=n) }}" alt="Agreement page {{ n }} of {{ pages }}" loading="{{ 'eager' if n == 1 else 'lazy' }}" width="1240" height="1754">{% endfor %}
   </div>
-  <form method="post" action="{{ url_for('partner_sign.sign_submit', token=token) }}" id="sign-form">
-    <input type="hidden" name="mode" value="draw" id="mode">
+  <p class="muted" style="margin:8px 0 0">{{ pages }} page{{ 's' if pages != 1 }} · scroll to read the whole agreement.</p>
+  {% else %}
+  <iframe class="pdf desktop-only" title="Agreement PDF" src="{{ url_for('partner_sign.sign_pdf', token=token) }}"></iframe>
+  <p class="muted mobile-only" style="margin:0">Tap <b>Open PDF</b> to read the agreement on your phone.</p>
+  {% endif %}
+</section>
+
+<section class="card" id="sign">
+  <div class="card-h"><h2><span class="num">2</span>Sign</h2></div>
+  <div class="tabs" role="tablist" aria-label="How to sign">
+    <button type="button" class="tab" role="tab" data-mode="draw" aria-selected="{{ 'true' if mode not in ('typed', 'upload') else 'false' }}">Draw</button>
+    <button type="button" class="tab" role="tab" data-mode="typed" aria-selected="{{ 'true' if mode == 'typed' else 'false' }}">Type name</button>
+    <button type="button" class="tab" role="tab" data-mode="upload" aria-selected="{{ 'true' if mode == 'upload' else 'false' }}">Upload signed copy</button>
+  </div>
+
+  <form method="post" action="{{ url_for('partner_sign.sign_submit', token=token) }}" id="sign-form" data-panel="sign" class="{{ 'on' if mode != 'upload' }}" novalidate>
+    <input type="hidden" name="csrf" value="{{ sign_csrf(token) }}">
+    <input type="hidden" name="mode" value="{{ 'typed' if mode == 'typed' else 'draw' }}" id="mode">
     <input type="hidden" name="signature" id="signature">
-    <div data-panel="draw">
-      <canvas class="pad" id="pad" aria-label="Signature pad"></canvas>
-      <div class="row" style="margin-top:8px"><button type="button" class="btn light" id="clear">Clear</button>
-        <span class="muted">Sign with your mouse, finger or pen.</span></div>
+    <div data-panel="draw" class="{{ 'on' if mode not in ('typed', 'upload') }}">
+      <div class="padbox"><canvas class="pad" id="pad" aria-label="Signature pad: draw your signature"></canvas>
+        <div class="padline"></div><div class="padhint" id="padhint">Sign here with your finger, mouse or pen</div></div>
+      <div class="padtools"><span class="muted">Your signature is placed on the agreement.</span>
+        <span class="btns"><button type="button" class="btn btn-ghost" id="undo" disabled>Undo</button><button type="button" class="btn btn-ghost" id="clear" disabled>Clear</button></span></div>
     </div>
-    <div data-panel="typed" hidden>
-      <input type="text" name="typed_name" id="typed_name" maxlength="80" placeholder="Type your full name" value="{{ req.data.partner_name }}" autocomplete="name">
-      <div class="typed" id="typed-preview" aria-hidden="true">{{ req.data.partner_name }}</div>
+    <div data-panel="typed" class="{{ 'on' if mode == 'typed' }}">
+      <label class="fl" for="typed_name">Full name</label>
+      <input type="text" name="typed_name" id="typed_name" maxlength="80" value="{{ typed if typed is not none else req.data.partner_name }}" autocomplete="name">
+      {% set shown = typed if typed is not none else req.data.partner_name %}
+      <fieldset class="fonts" id="fonts" role="radiogroup" aria-label="Signature style" data-chose="{{ '1' if font_chosen else '' }}">
+        <legend>Choose a signature style</legend>
+        {% for f in fonts %}
+        <label class="fopt{{ ' off' if f.missing }}" data-chars="{{ f.chars }}"><input type="radio" name="font" value="{{ f.id }}"{{ ' checked' if f.id == font }}{{ ' disabled' if f.missing }}>
+          <span class="sig" data-sig style="font-family:'sig-{{ f.id }}',cursive">{{ shown }}</span>
+          <span class="fl2">{{ f.label }}<span class="tick" aria-hidden="true">✓</span><span class="na" data-na>{{ ('Can’t show ' ~ f.missing|list|join(' ')) if f.missing }}</span></span></label>
+        {% endfor %}
+      </fieldset>
+      {% set none_ok = fonts and fonts|rejectattr('missing')|list|length == 0 %}
+      <p class="font-note" id="font-note" role="status"{{ ' hidden' if not none_ok }}>None of the signature styles can show all the letters of your name. Please <button type="button" class="linkbtn" data-go="draw">draw your signature</button> instead.</p>
+      <p class="muted" style="margin:8px 0 0">This is how your signature appears on the agreement. Styles that can’t show a letter of your name are greyed out; you can always draw instead.</p>
     </div>
     <label class="agree"><input type="checkbox" name="agree" value="1" id="agree">
-      <span>I agree to the terms of this agreement, and I agree that my electronic signature above is my signature.</span></label>
-    <button class="btn" type="submit" id="sign-submit">Sign agreement</button>
+      <span>I have read and agree to the terms of this Partnership Agreement, and I agree that my electronic signature is as valid as my handwritten signature.</span></label>
+    <div class="submitrow"><p class="inline-err" id="sign-err" role="alert"></p>
+      <button class="btn btn-primary" type="submit" id="sign-submit">Sign agreement</button></div>
   </form>
-</div>
 
-<div class="card" id="opt-b">
-  <h2>Option B · Sign on paper and upload</h2>
-  <p class="muted">Download the PDF, print and sign it (or sign the PDF), then upload the signed copy. PDF, JPG or PNG, up to {{ max_mb }} MB.</p>
-  <form method="post" enctype="multipart/form-data" action="{{ url_for('partner_sign.sign_upload', token=token) }}">
-    <input type="file" name="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required>
-    <p><button class="btn" type="submit">Upload signed copy</button></p>
+  <form method="post" enctype="multipart/form-data" action="{{ url_for('partner_sign.sign_upload', token=token) }}" id="upload-form" data-panel="upload" class="{{ 'on' if mode == 'upload' }}">
+    <input type="hidden" name="csrf" value="{{ sign_csrf(token) }}">
+    <p class="muted" style="margin:0 0 10px">Download the PDF, sign it on paper or in a PDF app, then upload the signed copy. PDF, JPG or PNG, up to {{ max_mb }} MB.</p>
+    <input type="file" name="file" id="file" accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" required>
+    <div class="submitrow"><p class="inline-err" id="upload-err" role="alert"></p>
+      <button class="btn btn-primary" type="submit" id="upload-submit">Upload signed copy</button></div>
   </form>
-</div>
+</section>
 
-<script>
-(function(){
-  var pad=document.getElementById('pad'), ctx=pad.getContext('2d'), drawn=false, last=null;
-  var lastW=0;
-  function size(){var r=pad.getBoundingClientRect(), d=window.devicePixelRatio||1;
-    if(Math.round(r.width)===lastW) return; lastW=Math.round(r.width);  // height-only resizes keep the drawing
-    var img=drawn?pad.toDataURL():null; pad.width=r.width*d; pad.height=r.height*d;
-    ctx.setTransform(d,0,0,d,0,0); ctx.lineWidth=2.6; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#102060';
-    if(img){var i=new Image(); i.onload=function(){ctx.drawImage(i,0,0,r.width,r.height)}; i.src=img;}}
-  size(); window.addEventListener('resize',size);
-  function pt(e){var r=pad.getBoundingClientRect(); return {x:e.clientX-r.left,y:e.clientY-r.top};}
-  pad.addEventListener('pointerdown',function(e){pad.setPointerCapture(e.pointerId); last=pt(e); ctx.beginPath(); ctx.arc(last.x,last.y,1.2,0,7); ctx.fillStyle='#102060'; ctx.fill(); drawn=true;});
-  pad.addEventListener('pointermove',function(e){if(!last)return; var p=pt(e); ctx.beginPath(); ctx.moveTo(last.x,last.y); ctx.lineTo(p.x,p.y); ctx.stroke(); last=p;});
-  ['pointerup','pointercancel','pointerleave'].forEach(function(n){pad.addEventListener(n,function(){last=null;});});
-  document.getElementById('clear').addEventListener('click',function(){ctx.clearRect(0,0,pad.width,pad.height); drawn=false;});
-  var mode=document.getElementById('mode');
-  document.querySelectorAll('[data-mode]').forEach(function(b){b.addEventListener('click',function(){
-    mode.value=b.dataset.mode;
-    document.querySelectorAll('[data-mode]').forEach(function(x){x.setAttribute('aria-selected',x===b);});
-    document.querySelectorAll('[data-panel]').forEach(function(p){p.hidden=p.dataset.panel!==b.dataset.mode;});
-  });});
-  var tn=document.getElementById('typed_name'), tp=document.getElementById('typed-preview');
-  tn.addEventListener('input',function(){tp.textContent=tn.value;});
-  document.getElementById('sign-form').addEventListener('submit',function(e){
-    if(mode.value==='draw'){ if(!drawn){e.preventDefault(); alert('Please draw your signature first.'); return;}
-      document.getElementById('signature').value=pad.toDataURL('image/png'); }
-    if(!document.getElementById('agree').checked){e.preventDefault(); alert("Please tick 'I agree' to sign."); return;}
-    document.getElementById('sign-submit').disabled=true;
+<script nonce="{{ csp_nonce() }}">
+(function () {
+  var INK = '#0F2A5C', MAX_MB = {{ max_mb }};
+  var pad = document.getElementById('pad'), ctx = pad.getContext('2d');
+  var strokes = [], cur = null, lastW = 0;
+  var undo = document.getElementById('undo'), clear = document.getElementById('clear'), hint = document.getElementById('padhint');
+  function tools() { undo.disabled = clear.disabled = !strokes.length; hint.hidden = !!strokes.length; }
+  function redraw() {
+    var r = pad.getBoundingClientRect();
+    ctx.clearRect(0, 0, r.width, r.height);
+    ctx.lineWidth = 2.6; ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.strokeStyle = INK; ctx.fillStyle = INK;
+    strokes.forEach(function (s) {
+      var w = s.w || r.width, k = r.width / w;
+      ctx.beginPath(); ctx.moveTo(s.p[0][0] * k, s.p[0][1] * k);
+      if (s.p.length === 1) { ctx.arc(s.p[0][0] * k, s.p[0][1] * k, 1.3, 0, 7); ctx.fill(); return; }
+      for (var i = 1; i < s.p.length; i++) ctx.lineTo(s.p[i][0] * k, s.p[i][1] * k);
+      ctx.stroke();
+    });
+    tools();
+  }
+  function size() {
+    var r = pad.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    if (!r.width || Math.round(r.width) === lastW) return;
+    lastW = Math.round(r.width);
+    pad.width = r.width * d; pad.height = r.height * d; ctx.setTransform(d, 0, 0, d, 0, 0); redraw();
+  }
+  function pt(e) { var r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+  pad.addEventListener('pointerdown', function (e) {
+    e.preventDefault(); try { pad.setPointerCapture(e.pointerId); } catch (_) {}
+    cur = { w: pad.getBoundingClientRect().width, p: [pt(e)] }; strokes.push(cur); redraw();
   });
+  pad.addEventListener('pointermove', function (e) {
+    if (!cur) return; var p = pt(e), l = cur.p[cur.p.length - 1];
+    ctx.beginPath(); ctx.moveTo(l[0], l[1]); ctx.lineTo(p[0], p[1]); ctx.stroke(); cur.p.push(p);
+  });
+  ['pointerup', 'pointercancel'].forEach(function (n) { pad.addEventListener(n, function () { cur = null; tools(); }); });
+  undo.addEventListener('click', function () { strokes.pop(); redraw(); });
+  clear.addEventListener('click', function () { strokes = []; redraw(); });
+
+  var mode = document.getElementById('mode');
+  function show(m) {
+    document.querySelectorAll('[data-mode]').forEach(function (x) { x.setAttribute('aria-selected', x.dataset.mode === m ? 'true' : 'false'); });
+    document.querySelectorAll('[data-panel]').forEach(function (p) {
+      var on = p.dataset.panel === m || (p.dataset.panel === 'sign' && m !== 'upload');
+      p.classList.toggle('on', on);
+    });
+    if (m !== 'upload') mode.value = m;
+    if (m === 'draw') { lastW = 0; size(); }
+  }
+  document.querySelectorAll('[data-mode]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.mode); }); });
+  document.querySelectorAll('[data-go]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.go); }); });
+  window.addEventListener('resize', size); size();
+
+  var tn = document.getElementById('typed_name'), sigs = document.querySelectorAll('[data-sig]');
+  // A style that lacks a letter of the name is disabled (the server applies the same rule).
+  // Until the partner picks a style, the first style that can show the name is selected.
+  var fopts = document.querySelectorAll('.fopt[data-chars]'), fnote = document.getElementById('font-note'), chose = document.getElementById('fonts').dataset.chose === '1';
+  fopts.forEach(function (o) { o.querySelector('input').addEventListener('change', function () { chose = true; }); });
+  function fit() {
+    var name = (tn.value || '').normalize('NFC'), first = null, picked = null;
+    fopts.forEach(function (o) {
+      var have = o.dataset.chars, miss = [], r = o.querySelector('input');
+      Array.from(name).forEach(function (ch) { if (!/\s/.test(ch) && have.indexOf(ch) < 0 && miss.indexOf(ch) < 0) miss.push(ch); });
+      r.disabled = miss.length > 0; o.classList.toggle('off', r.disabled);
+      o.querySelector('[data-na]').textContent = miss.length ? 'Can\u2019t show ' + miss.join(' ') : '';
+      if (!r.disabled && !first) first = r;
+      if (r.checked && !r.disabled && chose) picked = r;
+    });
+    if (!picked) { chose = false; fopts.forEach(function (o) { o.querySelector('input').checked = false; }); }
+    if (!picked && first) first.checked = true;
+    fnote.hidden = !!first || !fopts.length;
+  }
+  tn.addEventListener('input', function () { sigs.forEach(function (s) { s.textContent = tn.value || ' '; }); fit(); });
+  fit();
+
+  var err = document.getElementById('sign-err'), btn = document.getElementById('sign-submit');
+  document.getElementById('sign-form').addEventListener('submit', function (e) {
+    err.textContent = '';
+    if (btn.disabled) { e.preventDefault(); return; }
+    if (mode.value === 'draw') {
+      if (!strokes.length) { e.preventDefault(); err.textContent = 'Please draw your signature first.'; return; }
+      // export at a fixed size, independent of the screen
+      var out = document.createElement('canvas'), r = pad.getBoundingClientRect(), s = Math.min(2, 1200 / r.width);
+      out.width = Math.round(r.width * s); out.height = Math.round(r.height * s);
+      var o = out.getContext('2d'); o.scale(s, s); o.drawImage(pad, 0, 0, r.width, r.height);
+      document.getElementById('signature').value = out.toDataURL('image/png');
+    } else if (!tn.value.trim()) { e.preventDefault(); err.textContent = 'Please type your full name.'; return; }
+    else if (!document.querySelector('.fopt input:checked:not(:disabled)')) { e.preventDefault(); err.textContent = 'None of the styles can show your name. Please draw your signature.'; return; }
+    if (!document.getElementById('agree').checked) { e.preventDefault(); err.textContent = 'Please tick the box to confirm that you agree.'; return; }
+    btn.disabled = true; btn.textContent = 'Signing…';
+  });
+  var ubtn = document.getElementById('upload-submit'), uerr = document.getElementById('upload-err'), file = document.getElementById('file');
+  document.getElementById('upload-form').addEventListener('submit', function (e) {
+    uerr.textContent = '';
+    if (ubtn.disabled) { e.preventDefault(); return; }
+    var f = file.files && file.files[0];
+    if (!f) { e.preventDefault(); uerr.textContent = 'Choose the signed file to upload.'; return; }
+    if (f.size > MAX_MB * 1048576) { e.preventDefault(); uerr.textContent = 'The file is larger than ' + MAX_MB + ' MB.'; return; }
+    ubtn.disabled = true; ubtn.textContent = 'Uploading…';
+  });
+  window.addEventListener('pageshow', function () { btn.disabled = ubtn.disabled = false; btn.textContent = 'Sign agreement'; ubtn.textContent = 'Upload signed copy'; });
 })();
 </script>
 {% endblock %}

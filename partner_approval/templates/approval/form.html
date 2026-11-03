@@ -2,12 +2,14 @@
 {% block title %}New partner request (Beta) · Dupoin DPM Tools{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
+<a class="pa-back" href="{{ url_for('partner_approval.index') }}">← My requests</a>
 <div class="pa-head"><h1>Sales Partner <span>Request</span></h1><span class="beta">Beta · test only</span></div>
-<p class="lede">The same form as Lark "Sales PartnerRequest". The fields change with the request type. Fields marked <span class="req">*</span> are required.</p>
+<p class="lede" style="margin:6px 0 16px">The same form as Lark "Sales PartnerRequest". The fields change with the request type. Fields marked <span class="req">*</span> are required.</p>
 {% if errors %}<div class="note bad" role="alert" style="margin:0 0 18px">Please fix the {{ errors|length }} field{{ 's' if errors|length > 1 }} marked below.</div>{% endif %}
-<form id="pa-form" class="pa-form" method="post" action="{{ url_for('partner_approval.submit') }}" novalidate>
+<form id="pa-form" class="pa-form pa-card" style="padding:4px 22px 18px" method="post" action="{{ url_for('partner_approval.submit') }}" novalidate>
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="confirmed" value="0" id="confirmed">
+  <input type="hidden" name="submit_key" value="{{ submit_key }}">
   <div class="field">
     <label>Request type <span class="req">*</span></label>
     <div class="choices" role="radiogroup">
@@ -47,17 +49,20 @@
     {% if errors[fd.name] %}<p class="err">{{ errors[fd.name] }}</p>{% endif %}
   </div>
   {% endfor %}
-  <button type="submit" id="pa-submit">Review and submit</button>
-  <p class="hint">You will see a summary to confirm before the request is saved.</p>
+  <div class="pa-submit"><p class="hint" style="margin:0 auto 0 0;align-self:center">You will see a summary to confirm before the request is saved.</p>
+    <a class="btn btn-ghost" href="{{ url_for('partner_approval.index') }}">Cancel</a>
+    <button type="submit" class="btn btn-primary" id="pa-submit">Review and submit</button></div>
 </form>
 
 <div class="modal" id="pa-modal" hidden role="dialog" aria-modal="true" aria-labelledby="pa-modal-title">
-  <div class="sheet">
-    <h3 id="pa-modal-title" style="margin:0">Please confirm the request</h3>
-    <pre id="pa-summary"></pre>
-    <div class="row">
-      <button type="button" class="btn2" id="pa-back">Back to edit</button>
-      <button type="button" id="pa-confirm">Confirm and submit</button>
+  <div class="sheet wide">
+    <h3 id="pa-modal-title">Please confirm the request</h3>
+    <p>Check the details. The request is saved as Pending for an admin to review.</p>
+    <div id="pa-details"></div>
+    <pre id="pa-summary" hidden></pre>
+    <div class="btns">
+      <button type="button" class="btn btn-ghost" id="pa-back">Back to edit</button>
+      <button type="button" class="btn btn-primary" id="pa-confirm">Confirm and submit</button>
     </div>
   </div>
 </div>
@@ -103,6 +108,15 @@
           return;
         }
         document.getElementById('pa-summary').textContent=j.summary;
+        var box=document.getElementById('pa-details'); box.textContent='';
+        (j.details||[]).forEach(function(sec){
+          var h=document.createElement('div'); h.className='lv-sub'; h.textContent=sec[0]; box.appendChild(h);
+          var dl=document.createElement('dl'); dl.className='lv';
+          sec[1].forEach(function(row){var d=document.createElement('div'),t=document.createElement('dt'),v=document.createElement('dd');
+            t.textContent=row[0]; v.textContent=row[1]; d.appendChild(t); d.appendChild(v); dl.appendChild(d);});
+          box.appendChild(dl);
+        });
+        document.getElementById('pa-summary').hidden=!!(j.details&&j.details.length);
         modal.hidden=false; document.getElementById('pa-confirm').focus();
       })
       .catch(function(){btn.disabled=false; form.submit();});   // server shows a confirm page

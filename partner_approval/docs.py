@@ -18,10 +18,14 @@ import re
 import shutil
 import subprocess
 import tempfile
+import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT_FONT = HERE / "static" / "GreatVibes-Regular.ttf"
+SIGNATURE_FONTS = HERE / "static" / "signature_fonts"
+SCRIPT_FONT = SIGNATURE_FONTS / "1-DarceyOliver-Regular.ttf"  # fallback if a custom folder is empty
+MAX_SIGNATURE_FONTS = 8
+_FONT_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(ttf|otf)$")
 MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 
 
@@ -384,19 +388,118 @@ def drawn_signature(data_url):
     return _crop(img, "Please draw your signature first.")
 
 
-def typed_signature(name):
-    """Typed name rendered in a script font -> PNG bytes."""
+def _font_label(stem):
+    stem = re.sub(r"^\d+[-_]", "", stem)                         # "1-Foo" -> "Foo" (sort prefix)
+    stem = re.sub(r"[-_](Regular|VariableFont.*|Variable)$", "", stem, flags=re.I)
+    stem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem)              # CamelCase -> words
+    return " ".join(stem.replace("_", " ").replace("-", " ").split()) or "Script"
+
+
+def signature_fonts(folder=None):
+    """Fonts offered on the 'Type name' tab: [{id, label, file}], first = default.
+
+    Only plain file names (letters, digits, - and _) ending in .ttf/.otf directly
+    inside the folder count; symlinks and anything else are ignored."""
+    folder = Path(folder or SIGNATURE_FONTS)
+    out = []
+    if folder.is_dir():
+        for f in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+            if _FONT_FILE.match(f.name) and f.is_file() and not f.is_symlink():
+                out.append({"id": f.stem, "label": _font_label(f.stem), "file": f.name,
+                            "path": f})
+    if not out and SCRIPT_FONT.is_file():
+        out.append({"id": SCRIPT_FONT.stem, "label": _font_label(SCRIPT_FONT.stem),
+                    "file": SCRIPT_FONT.name, "path": SCRIPT_FONT})
+    out = out[:MAX_SIGNATURE_FONTS]
+    for f in out:
+        f["chars"] = "".join(sorted(font_coverage(f.pop("path"))))
+    return out
+
+
+# Characters a typed name may contain. Each font's real coverage of this set is
+# measured once (font_coverage); the page disables a style that cannot show the
+# typed name and the server refuses it with the same rule -> never a tofu box.
+SIGNATURE_CHARSET = frozenset(
+    [chr(c) for c in range(0x21, 0x7F)] + [chr(c) for c in range(0xC0, 0x250)]
+    + [chr(c) for c in range(0x1E00, 0x1F00)] + list("\u2018\u2019\u201c\u201d"))
+_COVERAGE = {}
+
+
+def font_coverage(path):
+    """Characters of SIGNATURE_CHARSET that the font really draws (not the tofu box)."""
+    from PIL import ImageFont
+    path = Path(path)
+    st = path.stat()
+    key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    if key not in _COVERAGE:
+        font = ImageFont.truetype(str(path), 48)
+        missing = set(_missing_glyphs(font, "".join(SIGNATURE_CHARSET)))
+        _COVERAGE[key] = frozenset(SIGNATURE_CHARSET - missing)
+    return _COVERAGE[key]
+
+
+def unsupported_chars(name, font_id=None, folder=None):
+    """Letters of `name` the chosen style cannot show, in order of appearance."""
+    name = unicodedata.normalize("NFC", name or "")
+    have = font_coverage(signature_font_path(font_id, folder))
+    out = []
+    for ch in name:
+        if not ch.isspace() and ch not in have and ch not in out:
+            out.append(ch)
+    return out
+
+
+def first_font_for(name, folder=None):
+    """Id of the first offered style that can show `name` (None if none can)."""
+    for f in signature_fonts(folder):
+        if not unsupported_chars(name, f["id"], folder):
+            return f["id"]
+    return None
+
+
+def signature_font_path(font_id=None, folder=None):
+    """Path of an offered font. Unknown / empty id -> the default font.
+    The id is only ever matched against the folder listing, never joined as a path."""
+    folder = Path(folder or SIGNATURE_FONTS)
+    fonts = signature_fonts(folder)
+    if not fonts:
+        raise SignatureError("Typed signatures are not available. Please draw your signature.")
+    pick = next((f for f in fonts if f["id"] == font_id), None) if font_id else fonts[0]
+    if pick is None:
+        raise SignatureError("Choose one of the signature styles.")
+    base = folder if (folder / pick["file"]).is_file() else SCRIPT_FONT.parent
+    path = (base / pick["file"]).resolve()
+    if path.parent != base.resolve():
+        raise SignatureError("Choose one of the signature styles.")
+    return path
+
+
+def typed_signature(name, font_id=None, folder=None):
+    """Typed name rendered in the chosen script font -> PNG bytes."""
     from PIL import Image, ImageDraw, ImageFont
-    name = " ".join((name or "").split())
+    name = " ".join(unicodedata.normalize("NFC", name or "").split())
     if len(name) < 2:
         raise SignatureError("Please type your full name.")
     if len(name) > 80:
         raise SignatureError("The name is too long.")
-    font = ImageFont.truetype(str(SCRIPT_FONT), 96)
+    path = signature_font_path(font_id, folder)
+    if unsupported_chars(name, font_id, folder):
+        raise SignatureError("This signature style cannot show some letters of your name. "
+                             "Please choose another style or draw your signature.")
+    font = ImageFont.truetype(str(path), 96)
     left, top, right, bottom = font.getbbox(name)
     img = Image.new("RGBA", (right - left + 80, bottom - top + 80), (255, 255, 255, 0))
     ImageDraw.Draw(img).text((40 - left, 40 - top), name, font=font, fill=(16, 32, 96, 255))
     return _crop(img, "Please type your full name.")
+
+
+def _missing_glyphs(font, text):
+    """Characters the font would draw as the empty 'tofu' box."""
+    def mask(ch):
+        m = font.getmask(ch)
+        return m.size, bytes(m)
+    tofu = {mask("\uffff"), mask("\U0010fffd")}
+    return [ch for ch in set(text) if not ch.isspace() and mask(ch) in tofu]
 
 
 def _crop(img, empty_message):
@@ -430,3 +533,70 @@ def sniff_upload(head):
         if head.startswith(magic):
             return ext
     return None
+
+
+def check_upload(blob):
+    """File type of a signed upload, checked by content. None = refused.
+
+    The magic bytes decide the type (never the file name); images must also
+    decode and stay below a sane pixel count, PDFs must have a PDF trailer.
+    """
+    ext = sniff_upload(blob[:16])
+    if ext is None:
+        return None
+    if ext == "pdf":
+        return ext if b"%%EOF" in blob[-2048:] else None
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(blob)) as img:
+            if img.width * img.height > 60_000_000:
+                return None
+            img.verify()
+    except Exception:  # noqa: BLE001 - anything unreadable is refused
+        return None
+    return ext
+
+
+# ------------------------------------------------------------- page previews
+MAX_PREVIEW_PAGES = 40
+
+
+def pdf_previews(pdf_path, out_dir, width=1240):
+    """Render each PDF page to out_dir/page-<n>.png for the signing page.
+
+    Mobile browsers often cannot show an embedded PDF, page images always work.
+    Uses pypdfium2 (installed with pdfplumber). Returns the number of pages
+    rendered, 0 when previews are not available -- the page then falls back to
+    the embedded PDF and the Open / Download buttons.
+    """
+    out_dir = Path(out_dir)
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(pdf_path))
+    except Exception:  # noqa: BLE001 - previews are optional
+        return 0
+    tmp = Path(tempfile.mkdtemp(prefix="preview-", dir=str(out_dir.parent)))
+    try:
+        n = min(len(doc), MAX_PREVIEW_PAGES)
+        for i in range(n):
+            page = doc[i]
+            scale = width / max(page.get_width(), 1)
+            img = page.render(scale=scale).to_pil().convert("RGB")
+            img.save(tmp / f"page-{i + 1}.png", "PNG", optimize=True)
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        tmp.rename(out_dir)
+        return n
+    except Exception:  # noqa: BLE001
+        shutil.rmtree(tmp, ignore_errors=True)
+        return 0
+    finally:
+        doc.close()
+
+
+def preview_count(out_dir):
+    out_dir = Path(out_dir)
+    n = 0
+    while (out_dir / f"page-{n + 1}.png").is_file():
+        n += 1
+    return n

@@ -73,7 +73,7 @@ def baca_versi(path=None):
 
 
 def label_versi(info):
-    """'DW Calculator v1.33 · 2026-11-02' (no date part when build is empty)."""
+    """'DW Calculator v1.34 · 2026-11-03' (no date part when build is empty)."""
     v = info.get("version") or "unknown"
     teks = f"{APP_NAME} v{v}" if v != "unknown" else f"{APP_NAME} version unknown"
     return f"{teks} · {info['build']}" if info.get("build") else teks
