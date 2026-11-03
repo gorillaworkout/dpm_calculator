@@ -12,6 +12,7 @@ Wire-up from app.py:  partner_approval.register(app)
 """
 import hashlib
 import hmac
+import shutil
 import re
 import secrets
 import time
@@ -284,6 +285,9 @@ def admin_detail(rid):
         template=template.name if template else None, smtp_ready=SETTINGS.smtp_ready,
         files={k: bool(_abs(req.get(k))) for k in
                ("agreement_pdf", "agreement_docx", "signed_file", "signed_docx")},
+        signed_pages=_signed_previews(req)[0] if req["status"] in ("signed", "completed") else 0,
+        completed=next((a for a in reversed(STORE.audit(rid)) if a["to_status"] == "completed"
+                        and a["from_status"] != "completed"), None),
         )
 
 
@@ -422,6 +426,35 @@ def admin_file(rid, kind):
     return resp
 
 
+def _signed_previews(req):
+    """Page images of the signed PDF for the admin review (cached per file version)."""
+    pdf = _abs(req.get("signed_file"))
+    if pdf is None or pdf.suffix.lower() != ".pdf":
+        return 0, None
+    folder = _files_dir(req["id"]) / f"signed_preview_{pdf.stat().st_mtime_ns}"
+    n = docs.preview_count(folder)
+    if not n:
+        for old in folder.parent.glob("signed_preview_*"):
+            if old != folder:
+                shutil.rmtree(old, ignore_errors=True)
+        n = docs.pdf_previews(pdf, folder)
+    return n, folder
+
+
+@bp.get("/admin/<int:rid>/signed/page/<int:n>.png")
+def admin_signed_page(rid, n):
+    req = _get_or_404(rid)
+    if not 1 <= n <= docs.MAX_PREVIEW_PAGES:
+        abort(404)
+    count, folder = _signed_previews(req)
+    if not count or n > count:
+        abort(404)
+    resp = send_file(folder / f"page-{n}.png", mimetype="image/png")
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Cache-Control"] = "private, no-store"
+    return resp
+
+
 MIMETYPES = {".pdf": "application/pdf", ".png": "image/png", ".jpg": "image/jpeg",
              ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
@@ -550,10 +583,14 @@ def _previews(req):
     return n
 
 
-def _render_sign(req, token, row, error=None, mode="draw", typed=None):
+def _render_sign(req, token, row, error=None, mode="draw", typed=None, font=None):
+    fonts = docs.signature_fonts()
+    if font not in {f["id"] for f in fonts}:
+        font = fonts[0]["id"] if fonts else ""
     return render_template("approval/sign.html", req=req, token=token,
                            expires=wib(row["expires_at"], LONG_DATE), error=error,
                            pages=_previews(req), mode=mode, typed=typed,
+                           fonts=fonts, font=font,
                            max_mb=docs.MAX_UPLOAD // (1024 * 1024))
 
 
@@ -619,21 +656,25 @@ def sign_submit(token):
         return _closed_page(state)
     mode = request.form.get("mode")
     typed = (request.form.get("typed_name") or "")[:200]
+    font = (request.form.get("font") or "")[:80]
     if not _csrf_ok(token):
         return _sign_error(req, token, row, "This page has expired. Please reload it and sign again.",
-                           mode=mode, typed=typed)
+                           mode=mode, typed=typed, font=font)
     if request.form.get("agree") != "1":
         return _sign_error(req, token, row, "Please tick the box to confirm that you agree.",
-                           mode=mode, typed=typed)
+                           mode=mode, typed=typed, font=font)
+    font_label = None
     try:
         if mode == "draw":
             png = docs.drawn_signature(request.form.get("signature") or "")
         elif mode == "typed":
-            png = docs.typed_signature(forms._clean(typed, False))
+            png = docs.typed_signature(forms._clean(typed, False), font or None)
+            fonts = docs.signature_fonts()
+            font_label = next((f["label"] for f in fonts if f["id"] == (font or fonts[0]["id"])), None)
         else:
             return _sign_error(req, token, row, "Choose how you want to sign.")
     except docs.SignatureError as exc:
-        return _sign_error(req, token, row, str(exc), mode=mode, typed=typed)
+        return _sign_error(req, token, row, str(exc), mode=mode, typed=typed, font=font)
     if not STORE.use_token(token):
         return _closed_page("used")
     rid = req["id"]
@@ -653,7 +694,8 @@ def sign_submit(token):
     except Exception as exc:  # noqa: BLE001 - the partner must still get through
         note = f"Signed document not created: {type(exc).__name__}: {exc}"
     ok = STORE.set_status(rid, "signed", "partner",
-                          f"Signed on screen ({'drawn' if mode == 'draw' else 'typed name'}) "
+                          f"Signed on screen ({'drawn' if mode == 'draw' else 'typed name'}"
+                          f"{', style ' + font_label if font_label else ''}) "
                           f"from IP {_client_ip()}",
                           expect=SIGNABLE, signed_kind="drawn" if mode == "draw" else "typed",
                           signed_file=signed_file,

@@ -174,6 +174,50 @@ for bad in ("", " ", "x", "y" * 81):
         pass
 
 
+# ------------------------------------------------- pluggable signature fonts
+fonts = docs.signature_fonts()
+assert 1 <= len(fonts) <= docs.MAX_SIGNATURE_FONTS, fonts
+assert [f["id"] for f in fonts] == sorted(f["id"] for f in fonts)
+assert {"Allura-Regular", "DancingScript-Regular", "GreatVibes-Regular"} <= {f["id"] for f in fonts}
+assert all(f["label"] and "Regular" not in f["label"] for f in fonts), fonts
+assert docs._font_label("2-MyBrandScript-Regular") == "My Brand Script"
+assert docs._font_label("DancingScript-VariableFont_wght") == "Dancing Script"
+for f in fonts:                                  # every listed font renders Vietnamese
+    assert docs.typed_signature("Nguy\u1ec5n V\u0103n \u0110\u1ee9c", f["id"]).startswith(docs.PNG_MAGIC)
+assert docs.signature_font_path(None) == docs.signature_font_path("") == docs.SIGNATURE_FONTS / fonts[0]["file"]
+for bad in ("../signature_fonts/Allura-Regular", "../../app", "/etc/passwd", "Allura-Regular.ttf",
+            "allura-regular", "nope", "Allura-Regular\x00", "..", "x" * 90):
+    try:
+        docs.signature_font_path(bad)
+        raise AssertionError(f"font {bad!r} accepted")
+    except docs.SignatureError:
+        pass
+import tempfile, shutil as _sh  # noqa: E402
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    src = docs.SIGNATURE_FONTS / "Allura-Regular.ttf"
+    _sh.copy(src, tmp / "1-Zeta-Regular.ttf"); _sh.copy(src, tmp / "2-Alpha.otf")
+    _sh.copy(src, tmp / "bad name.ttf"); _sh.copy(src, tmp / ".hidden.ttf"); _sh.copy(src, tmp / "notes.txt")
+    outside = Path(tempfile.mkdtemp()); _sh.copy(src, outside / "Evil.ttf")
+    (tmp / "Linked.ttf").symlink_to(outside / "Evil.ttf")
+    got = docs.signature_fonts(tmp)
+    assert [f["id"] for f in got] == ["1-Zeta-Regular", "2-Alpha"], got
+    assert [f["label"] for f in got] == ["Zeta", "Alpha"], got
+    assert docs.signature_font_path("2-Alpha", tmp) == tmp / "2-Alpha.otf"
+    for bad in ("Linked", "bad name", ".hidden", "notes"):
+        try:
+            docs.signature_font_path(bad, tmp)
+            raise AssertionError(bad)
+        except docs.SignatureError:
+            pass
+    for i in range(10):
+        _sh.copy(src, tmp / f"F{i}.ttf")
+    assert len(docs.signature_fonts(tmp)) == docs.MAX_SIGNATURE_FONTS
+    _sh.rmtree(outside)
+with tempfile.TemporaryDirectory() as tmp:     # empty folder -> built-in fallback
+    assert docs.signature_fonts(Path(tmp))[0]["file"] == docs.SCRIPT_FONT.name
+
+
 def canvas_png(draw=True, background=None):
     img = Image.new("RGBA", (600, 200), background or (0, 0, 0, 0))
     if draw:

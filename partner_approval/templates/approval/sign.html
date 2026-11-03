@@ -57,8 +57,16 @@
     <div data-panel="typed" class="{{ 'on' if mode == 'typed' }}">
       <label class="fl" for="typed_name">Full name</label>
       <input type="text" name="typed_name" id="typed_name" maxlength="80" value="{{ typed if typed is not none else req.data.partner_name }}" autocomplete="name">
-      <div class="typed" id="typed-preview" aria-hidden="true">{{ typed if typed is not none else req.data.partner_name }}</div>
-      <p class="muted" style="margin:6px 0 0">Preview of your signature. Latin and Vietnamese letters are supported; otherwise please draw.</p>
+      {% set shown = typed if typed is not none else req.data.partner_name %}
+      <fieldset class="fonts" id="fonts" role="radiogroup" aria-label="Signature style">
+        <legend>Choose a signature style</legend>
+        {% for f in fonts %}
+        <label class="fopt"><input type="radio" name="font" value="{{ f.id }}"{{ ' checked' if f.id == font }}>
+          <span class="sig" data-sig style="font-family:'sig-{{ f.id }}',cursive">{{ shown }}</span>
+          <span class="fl2">{{ f.label }}<span class="tick" aria-hidden="true">✓</span></span></label>
+        {% endfor %}
+      </fieldset>
+      <p class="muted" style="margin:8px 0 0">This is how your signature appears on the agreement. Latin and Vietnamese letters are supported; otherwise please draw.</p>
     </div>
     <label class="agree"><input type="checkbox" name="agree" value="1" id="agree">
       <span>I have read and agree to the terms of this Partnership Agreement, and I agree that my electronic signature is as valid as my handwritten signature.</span></label>
@@ -127,8 +135,8 @@
   document.querySelectorAll('[data-mode]').forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.mode); }); });
   window.addEventListener('resize', size); size();
 
-  var tn = document.getElementById('typed_name'), tp = document.getElementById('typed-preview');
-  tn.addEventListener('input', function () { tp.textContent = tn.value || ' '; });
+  var tn = document.getElementById('typed_name'), sigs = document.querySelectorAll('[data-sig]');
+  tn.addEventListener('input', function () { sigs.forEach(function (s) { s.textContent = tn.value || ' '; }); });
 
   var err = document.getElementById('sign-err'), btn = document.getElementById('sign-submit');
   document.getElementById('sign-form').addEventListener('submit', function (e) {

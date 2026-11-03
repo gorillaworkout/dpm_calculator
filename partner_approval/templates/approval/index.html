@@ -4,11 +4,15 @@
 {% block wide %} wide{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
-<div class="pa-head"><h1>Partner <span>Approval</span></h1><span class="beta">Beta · test only</span></div>
-<p class="pa-meta">Submit a Sales Partner Request (Agreement, Special MIB, Dowgrade, Remove - Exit) and follow its status here.</p>
-<div class="pa-bar"><p class="hint"><b style="color:var(--ink)">My requests</b> · {{ requests|length }} total</p>
+<header class="pa-top">
+  <div class="pa-titles">
+    <div class="pa-head"><h1>Partner <span>Approval</span></h1><span class="beta">Beta · test only</span></div>
+    <p class="pa-meta">Submit a Sales Partner Request (Agreement, Special MIB, Dowgrade, Remove - Exit) and follow its status here.</p>
+  </div>
   <div class="btns">{% if is_admin %}<a class="btn btn-secondary" href="{{ url_for('partner_approval.admin_list') }}">Admin: review requests</a>{% endif %}
-    <a class="btn btn-primary" href="{{ url_for('partner_approval.new') }}">+ New request</a></div></div>
+    <a class="btn btn-primary" href="{{ url_for('partner_approval.new') }}">+ New request</a></div>
+</header>
+<div class="pa-card-h" style="margin:0 0 8px"><h3>My requests · {{ requests|length }}</h3></div>
 <section class="pa-card pa-table">
 {% if requests %}
 <table class="pa">

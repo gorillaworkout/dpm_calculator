@@ -961,6 +961,26 @@ without LibreOffice.
   `pypdfium2`, installed with `pdfplumber`) with Open/Download PDF buttons. The
   partner draws (Undo/Clear), types their name, or uploads a signed PDF/JPG/PNG,
   and must tick the consent box.
+- **Typed signature styles:** the partner picks one of the fonts in
+  `partner_approval/static/signature_fonts/` (each option previews their name).
+  The server renders the signature with the chosen font: the id must match a
+  file in that folder (letters, digits, `-`, `_`; `.ttf`/`.otf`; no symlinks;
+  max 6), anything else is refused. The style is written to the activity log.
+  The current fonts (Great Vibes, Allura, Dancing Script, all OFL) are
+  placeholders: drop the custom TTFs in that folder and remove the old ones, no
+  restart needed. See `signature_fonts/README.md`.
+
+### Admin pages (v1.34)
+
+- All approval pages use the light Dupoin theme (scoped to the approval pages;
+  DPM/KVB pages are unchanged). Each request page has a compact header: the
+  reference, a status pill and the actions on the right (36px buttons). A strip
+  under it says what happens next.
+- **Signed – Under Review:** the signed agreement is shown first, as page images
+  (`/approval/admin/<id>/signed/page/<n>.png`, admin only, `no-store`) with
+  Open/Download, the signing time, method and signer IP. **Mark Completed** is
+  the primary action; **Request re-sign** and **Reject** open a dialog. The
+  reject reason and re-sign note are typed only in those dialogs.
 
 ### Security (v1.34)
 

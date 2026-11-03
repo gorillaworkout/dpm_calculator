@@ -10,7 +10,8 @@
 <title>{% block title %}Partnership Agreement · Dupoin Markets{% endblock %}</title>
 <script nonce="{{ csp_nonce() }}">document.documentElement.className='js';</script>
 <style>
-@font-face{font-family:"Great Vibes";src:url("{{ url_for('partner_sign.static', filename='GreatVibes-Regular.ttf') }}") format("truetype");font-display:swap}
+{% for f in fonts|default([]) %}@font-face{font-family:"sig-{{ f.id }}";src:url("{{ url_for('partner_sign.static', filename='signature_fonts/' ~ f.file) }}");font-display:swap}
+{% endfor %}
 :root{--teal:#2EB5C4;--teal-d:#1A8A96;--teal-dd:#146f79;--ink:#1A1F24;--mute:#5B6B73;--line:#DCE4E7;--soft:#E6F7F9;--bg:#F4F7F8;--bad:#B42318}
 *{box-sizing:border-box}
 html,body{margin:0}
@@ -71,7 +72,17 @@ input[type=text]{width:100%;height:42px;padding:0 12px;border:1px solid #C9D4D8;
 input[type=file]{width:100%;padding:10px;border:1.5px dashed #B5C3C8;border-radius:10px;background:#FCFDFD;font:inherit;font-size:14px}
 input[type=file]::file-selector-button{height:32px;padding:0 12px;margin-right:12px;border:1px solid #C9D4D8;border-radius:7px;background:#fff;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
 label.fl{display:block;font-size:13px;font-weight:600;color:var(--mute);margin:0 0 6px}
-.typed{font-family:"Great Vibes",cursive;font-size:48px;line-height:1.2;color:#0F2A5C;min-height:86px;border:1.5px dashed #B5C3C8;border-radius:10px;background:#FCFDFD;margin:10px 0 0;padding:14px 18px 6px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.fonts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:12px 0 0;padding:0;border:0}
+.fonts legend{padding:0;margin:0 0 6px;font-size:13px;font-weight:600;color:var(--mute)}
+.fopt{position:relative;display:flex;flex-direction:column;gap:2px;min-width:0;padding:10px 14px 8px;border:1.5px solid #D5DEE1;border-radius:10px;background:#FCFDFD;cursor:pointer;transition:border-color .12s,background .12s}
+.fopt:hover{border-color:#9CCFD6}
+.fopt input{position:absolute;opacity:0;pointer-events:none}
+.fopt:has(input:checked){border-color:var(--teal-d);background:var(--soft);box-shadow:0 0 0 3px rgba(46,181,196,.15)}
+.fopt:has(input:focus-visible){outline:2px solid var(--teal-d);outline-offset:2px}
+.fopt .sig{font-size:34px;line-height:1.35;color:#0F2A5C;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-height:46px}
+.fopt .fl2{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--mute);font-weight:600}
+.fopt .tick{display:none;width:16px;height:16px;border-radius:50%;background:var(--teal-d);color:#fff;font-size:11px;line-height:16px;text-align:center}
+.fopt:has(input:checked) .tick{display:inline-block}
 .agree{display:flex;gap:10px;align-items:flex-start;margin:18px 0 0;padding:14px 16px;background:#F7FAFA;border:1px solid var(--line);border-radius:10px;font-size:14px;cursor:pointer}
 .agree input{margin:2px 0 0;width:18px;height:18px;accent-color:var(--teal-d);flex:none}
 .submitrow{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;flex-wrap:wrap}
@@ -94,7 +105,7 @@ footer{max-width:880px;margin:0 auto;padding:0 20px 36px;color:#8A979D;font-size
   .steps li{font-size:12px} .steps li:not(:last-child)::after{margin:0 6px}
   .top img{height:30px} .top .tag span{display:none}
   .submitrow .btn,.btns.stack .btn{flex:1}
-  .typed{font-size:40px}
+  .fopt .sig{font-size:30px}
 }
 </style>
 </head>

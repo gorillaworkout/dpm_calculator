@@ -2,10 +2,11 @@
 {% block title %}New partner request (Beta) · Dupoin DPM Tools{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
+<a class="pa-back" href="{{ url_for('partner_approval.index') }}">← My requests</a>
 <div class="pa-head"><h1>Sales Partner <span>Request</span></h1><span class="beta">Beta · test only</span></div>
-<p class="lede">The same form as Lark "Sales PartnerRequest". The fields change with the request type. Fields marked <span class="req">*</span> are required.</p>
+<p class="lede" style="margin:6px 0 16px">The same form as Lark "Sales PartnerRequest". The fields change with the request type. Fields marked <span class="req">*</span> are required.</p>
 {% if errors %}<div class="note bad" role="alert" style="margin:0 0 18px">Please fix the {{ errors|length }} field{{ 's' if errors|length > 1 }} marked below.</div>{% endif %}
-<form id="pa-form" class="pa-form" method="post" action="{{ url_for('partner_approval.submit') }}" novalidate>
+<form id="pa-form" class="pa-form pa-card" style="padding:4px 22px 18px" method="post" action="{{ url_for('partner_approval.submit') }}" novalidate>
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <input type="hidden" name="confirmed" value="0" id="confirmed">
   <input type="hidden" name="submit_key" value="{{ submit_key }}">

@@ -21,7 +21,10 @@ import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SCRIPT_FONT = HERE / "static" / "GreatVibes-Regular.ttf"
+SIGNATURE_FONTS = HERE / "static" / "signature_fonts"
+SCRIPT_FONT = SIGNATURE_FONTS / "GreatVibes-Regular.ttf"     # fallback if the folder is empty
+MAX_SIGNATURE_FONTS = 6
+_FONT_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}\.(ttf|otf)$")
 MAX_SIGNATURE_BYTES = 2 * 1024 * 1024
 
 
@@ -384,18 +387,59 @@ def drawn_signature(data_url):
     return _crop(img, "Please draw your signature first.")
 
 
-def typed_signature(name):
-    """Typed name rendered in a script font -> PNG bytes."""
+def _font_label(stem):
+    stem = re.sub(r"^\d+[-_]", "", stem)                         # "1-Foo" -> "Foo" (sort prefix)
+    stem = re.sub(r"[-_](Regular|VariableFont.*|Variable)$", "", stem, flags=re.I)
+    stem = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", stem)              # CamelCase -> words
+    return " ".join(stem.replace("_", " ").replace("-", " ").split()) or "Script"
+
+
+def signature_fonts(folder=None):
+    """Fonts offered on the 'Type name' tab: [{id, label, file}], first = default.
+
+    Only plain file names (letters, digits, - and _) ending in .ttf/.otf directly
+    inside the folder count; symlinks and anything else are ignored."""
+    folder = Path(folder or SIGNATURE_FONTS)
+    out = []
+    if folder.is_dir():
+        for f in sorted(folder.iterdir(), key=lambda p: p.name.lower()):
+            if _FONT_FILE.match(f.name) and f.is_file() and not f.is_symlink():
+                out.append({"id": f.stem, "label": _font_label(f.stem), "file": f.name})
+    if not out and SCRIPT_FONT.is_file():
+        out.append({"id": SCRIPT_FONT.stem, "label": _font_label(SCRIPT_FONT.stem),
+                    "file": SCRIPT_FONT.name})
+    return out[:MAX_SIGNATURE_FONTS]
+
+
+def signature_font_path(font_id=None, folder=None):
+    """Path of an offered font. Unknown / empty id -> the default font.
+    The id is only ever matched against the folder listing, never joined as a path."""
+    folder = Path(folder or SIGNATURE_FONTS)
+    fonts = signature_fonts(folder)
+    if not fonts:
+        raise SignatureError("Typed signatures are not available. Please draw your signature.")
+    pick = next((f for f in fonts if f["id"] == font_id), None) if font_id else fonts[0]
+    if pick is None:
+        raise SignatureError("Choose one of the signature styles.")
+    base = folder if (folder / pick["file"]).is_file() else SCRIPT_FONT.parent
+    path = (base / pick["file"]).resolve()
+    if path.parent != base.resolve():
+        raise SignatureError("Choose one of the signature styles.")
+    return path
+
+
+def typed_signature(name, font_id=None, folder=None):
+    """Typed name rendered in the chosen script font -> PNG bytes."""
     from PIL import Image, ImageDraw, ImageFont
     name = " ".join((name or "").split())
     if len(name) < 2:
         raise SignatureError("Please type your full name.")
     if len(name) > 80:
         raise SignatureError("The name is too long.")
-    font = ImageFont.truetype(str(SCRIPT_FONT), 96)
+    font = ImageFont.truetype(str(signature_font_path(font_id, folder)), 96)
     if _missing_glyphs(font, name):
-        raise SignatureError("The signature font cannot show some letters of this name. "
-                             "Please draw your signature instead.")
+        raise SignatureError("This signature style cannot show some letters of your name. "
+                             "Please choose another style or draw your signature.")
     left, top, right, bottom = font.getbbox(name)
     img = Image.new("RGBA", (right - left + 80, bottom - top + 80), (255, 255, 255, 0))
     ImageDraw.Draw(img).text((40 - left, 40 - top), name, font=font, fill=(16, 32, 96, 255))

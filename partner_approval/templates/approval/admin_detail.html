@@ -6,23 +6,20 @@
 {% include "approval/_style.html" %}
 <style>.modal.t{display:none}.modal.t:target{display:grid}</style>
 <a class="pa-back" href="{{ url_for('partner_approval.admin_list') }}">← All requests</a>
-<div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta · admin</span></div>
-<p class="pa-meta">{{ types[req.request_type] }} · <b style="color:var(--ink)">{{ req.partner_name }}</b>{% if req.role %} · {{ req.role }}{% endif %} · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
-
 {% set can_reject = 'rejected' in allowed %}
 {% set can_resign = agreement and template and 'resign' in allowed %}
 {% set can_retry = req.status in ('approved', 'resign') and agreement and template and not link %}
-<div class="pa-bar" id="actions">
-  <p class="hint">
-  {% if req.status == 'pending' %}
-    {% if agreement %}{% if template %}Approving creates the agreement from <b>{{ template }}</b> and a signing link{{ ' and e-mails it to the partner' if smtp_ready else ' (e-mail is not configured: copy the link)' }}.{% else %}Agreement template for {{ req.role }} not ready yet: approving records the approval only.{% endif %}{% else %}No agreement for this request type: approving completes it.{% endif %}
-  {% elif req.status == 'signed' %}Check the signed agreement below, then mark the request completed.
-  {% elif req.status in ('approved', 'resign') %}{% if link %}Waiting for the partner to sign.{% else %}No signing link yet.{% endif %}
-  {% else %}No actions: the request is {{ req.status_label }}.{% endif %}
-  </p>
-  <div class="btns">
-    {% if can_reject %}<a class="btn btn-danger" href="#reject-modal" role="button">Reject</a>{% endif %}
-    {% if can_resign %}<a class="btn btn-secondary" href="#resign-modal" role="button">Request re-sign</a>{% endif %}
+{% set email_failed = smtp_ready and link and not link.expired and req.email_note and not email_ok %}
+{% set method = {'drawn':'Drawn on screen','typed':'Typed name','upload':'Uploaded signed copy'}.get(req.signed_kind, req.signed_kind) %}
+
+<header class="pa-top">
+  <div class="pa-titles">
+    <div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta · admin</span></div>
+    <p class="pa-meta">{{ types[req.request_type] }} · <b>{{ req.partner_name }}</b>{% if req.role %} · {{ req.role }}{% endif %} · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
+  </div>
+  <div class="btns" id="actions">
+    {% if can_reject %}<a class="btn btn-danger" href="#reject-modal" role="button" id="reject-btn">Reject</a>{% endif %}
+    {% if can_resign %}<a class="btn btn-secondary" href="#resign-modal" role="button" id="resign-btn">Request re-sign</a>{% endif %}
     {% if can_retry %}
     <form method="post" action="{{ url_for('partner_approval.retry', rid=req.id) }}" class="once">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -31,51 +28,82 @@
     {% if req.status == 'signed' %}
     <form method="post" action="{{ url_for('partner_approval.complete', rid=req.id) }}" class="once">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button type="submit" class="btn btn-primary">Mark Completed</button>
+      <button type="submit" class="btn btn-primary" id="complete-btn">Mark Completed</button>
     </form>{% endif %}
     {% if req.status == 'pending' %}
     <form method="post" action="{{ url_for('partner_approval.approve', rid=req.id) }}" class="once">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="btn btn-primary" id="approve-btn">Approve</button>
     </form>{% endif %}
+    {% if req.status == 'completed' and files.signed_file %}
+    <a class="btn btn-secondary" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file') }}">Download signed agreement</a>{% endif %}
   </div>
-</div>
+</header>
+
+{% if req.status == 'pending' %}
+<div class="pa-strip" id="next-step"><span class="ic">i</span><span class="t">
+  {% if agreement %}{% if template %}Approving creates the agreement from <b>{{ template }}</b> and a signing link{{ ' and e-mails it to the partner' if smtp_ready else ' (e-mail is not configured: copy the link)' }}.{% else %}Agreement template for {{ req.role }} not ready yet: approving records the approval only.{% endif %}{% else %}No agreement for this request type: approving completes it.{% endif %}</span></div>
+{% elif req.status == 'signed' %}
+<div class="pa-strip" id="next-step"><span class="ic">✓</span><span class="t"><b>Signed by the partner{% if req.signed_at %} on {{ wib(req.signed_at, '%d %b %Y, %H:%M WIB') }}{% endif %}.</b> Check the signed agreement below, then mark the request completed.</span></div>
+{% elif email_failed %}
+<div class="pa-strip warn" id="next-step"><span class="ic">!</span><span class="t"><b>The e-mail to the partner was not delivered.</b> {{ 'Use “Resend email” in the Signing link card, or copy' if smtp_ready else 'Copy' }} the link and send it yourself.</span></div>
+{% elif req.status in ('approved', 'resign') %}
+<div class="pa-strip{{ ' warn' if not link }}" id="next-step"><span class="ic">{{ 'i' if link else '!' }}</span><span class="t">
+  {% if link %}{% if link.expired %}<b>The signing link has expired.</b> Use “Request re-sign” to send a new link.{% else %}<b>Waiting for the partner to sign.</b> {{ ('The link was opened ' ~ link.opened ~ '.') if link.opened else 'The link has not been opened yet.' }}{% if not smtp_ready %} E-mail is not configured: copy the link and send it to the partner.{% endif %}{% endif %}
+  {% elif agreement and not template %}Agreement template for {{ req.role }} not ready yet. The request stays approved; no signing link was made.
+  {% elif agreement %}<b>No signing link yet.</b> Retry creating the agreement.{% else %}Approved.{% endif %}</span></div>
+{% elif req.status == 'completed' %}
+<div class="pa-strip ok" id="next-step"><span class="ic">✓</span><span class="t"><b>Completed</b>{% if completed %} on {{ wib(completed['at'], '%d %b %Y, %H:%M WIB') }} by {{ completed['actor'] }}{% endif %}. No further actions.</span></div>
+{% elif req.status == 'rejected' %}
+<div class="pa-strip bad" id="next-step"><span class="ic">×</span><span class="t"><b>Rejected:</b> {{ req.reject_reason }}</span></div>
+{% endif %}
 
 {% if req.agreement_note %}<div class="note bad" role="alert" style="margin:0 0 16px" id="agreement-note">{{ req.agreement_note }}</div>{% endif %}
-{% if req.status == 'rejected' %}<div class="note bad" style="margin:0 0 16px">Rejected: {{ req.reject_reason }}</div>{% endif %}
 
 <div class="pa-grid">
   <div>
+    {% set show_signed = files.signed_file and req.status in ('signed', 'completed') %}
+    {% if show_signed %}
+    <section class="pa-card feature" id="signed-doc">
+      <div class="pa-card-h"><h3>Signed agreement</h3><span class="btns">
+        {% if req.signed_file.endswith('.pdf') or req.signed_file.endswith('.png') or req.signed_file.endswith('.jpg') %}<a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" target="_blank" rel="noopener">Open</a>{% endif %}
+        <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file') }}">Download</a>
+        {% if files.signed_docx %}<a class="btn btn-ghost btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_docx') }}">.docx</a>{% endif %}</span></div>
+      {% if req.signed_at %}
+      <dl class="sigmeta">
+        <div><dt>Signed</dt><dd>{{ wib(req.signed_at, '%d %b %Y, %H:%M:%S WIB') }}</dd></div>
+        <div><dt>Method</dt><dd>{{ method }}</dd></div>
+        <div><dt>Signer IP</dt><dd>{{ req.signer_ip }}</dd></div>
+      </dl>{% endif %}
+      {% if signed_pages %}
+      <div class="docview" aria-label="Signed agreement pages">
+        {% for n in range(1, signed_pages + 1) %}<img src="{{ url_for('partner_approval.admin_signed_page', rid=req.id, n=n) }}" alt="Signed agreement, page {{ n }}" loading="{{ 'eager' if n < 3 else 'lazy' }}">{% endfor %}
+      </div>
+      {% elif req.signed_file.endswith('.pdf') %}
+      <iframe class="preview" title="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}"></iframe>
+      {% else %}
+      <div class="docview"><img alt="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}"></div>
+      {% endif %}
+      {% if req.signer_ua %}<p class="mini ua">Browser: {{ req.signer_ua }}</p>{% endif %}
+    </section>
+    {% endif %}
+
     <section class="pa-card" id="details">
       <h3>Request details</h3>
       {{ details_card(details) }}
     </section>
 
-    {% if files.signed_file or files.agreement_pdf or files.agreement_docx %}
+    {% if files.agreement_pdf or files.agreement_docx or (files.signed_file and not show_signed) %}
     <section class="pa-card" id="documents">
-      <h3>Documents</h3>
-      {% if req.signed_at %}
-      <dl class="kv" style="margin:0 0 10px">
-        <dt>Signed</dt><dd>{{ wib(req.signed_at, '%d %b %Y, %H:%M:%S WIB') }} · {{ {'drawn':'drawn on screen','typed':'typed name','upload':'uploaded signed copy'}.get(req.signed_kind, req.signed_kind) }}</dd>
-        <dt>Signer IP</dt><dd>{{ req.signer_ip }}</dd>
-        <dt>Browser</dt><dd style="color:var(--mute);font-size:12px">{{ req.signer_ua }}</dd>
-      </dl>{% endif %}
+      <h3>{{ 'Agreement sent for signature' if show_signed else 'Documents' }}</h3>
       <div class="doclist">
-        {% if files.signed_file %}<div class="row"><span>Signed agreement <span class="pill ok">final</span></span><span class="btns">
-          <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" target="_blank" rel="noopener">View</a>
+        {% if files.signed_file and not show_signed %}<div class="row"><span>Previous signed copy{% if req.signed_at %} <span class="mini">· {{ wib(req.signed_at, '%d %b %Y, %H:%M WIB') }}</span>{% endif %}</span><span class="btns">
           <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file') }}">Download</a></span></div>{% endif %}
-        {% if files.signed_docx %}<div class="row"><span>Signed agreement (.docx)</span><span class="btns">
-          <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_docx') }}">Download</a></span></div>{% endif %}
-        {% if files.agreement_pdf %}<div class="row"><span>Agreement sent for signature (PDF)</span><span class="btns">
+        {% if files.agreement_pdf %}<div class="row"><span>Agreement (PDF)</span><span class="btns">
           <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='agreement_pdf', inline=1) }}" target="_blank" rel="noopener">View</a></span></div>{% endif %}
         {% if files.agreement_docx %}<div class="row"><span>Agreement (.docx)</span><span class="btns">
           <a class="btn btn-secondary btn-sm" href="{{ url_for('partner_approval.admin_file', rid=req.id, kind='agreement_docx') }}">Download</a></span></div>{% endif %}
       </div>
-      {% if files.signed_file and req.signed_file.endswith('.pdf') %}
-      <iframe class="preview" title="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}"></iframe>
-      {% elif files.signed_file %}
-      <img alt="Signed file" src="{{ url_for('partner_approval.admin_file', rid=req.id, kind='signed_file', inline=1) }}" style="max-width:100%;margin-top:12px;border-radius:10px;border:1px solid var(--line)">
-      {% endif %}
     </section>
     {% endif %}
   </div>
@@ -88,11 +116,11 @@
       <div class="linkrow"><input id="sign-url" type="text" readonly value="{{ link.url }}" aria-label="Signing link">
         <button type="button" class="btn btn-secondary btn-sm" id="copy-btn">Copy</button></div>
       <p class="mini">{{ 'Expired' if link.expired else 'Valid until' }} {{ link.expires }} · single use{% if link.opened %} · opened {{ link.opened }}{% endif %}</p>
-      {% if req.email_note %}<p class="mini {{ '' if email_ok else 'bad' }}" id="email-note">{{ '✓ ' if email_ok else '⚠ ' }}{{ req.email_note }}</p>{% endif %}
+      {% if req.email_note %}<p class="mini {{ 'ok' if email_ok else 'bad' }}" id="email-note">{{ '✓ ' if email_ok else '⚠ ' }}{{ req.email_note }}</p>{% endif %}
       {% if not link.expired %}
-      <form method="post" action="{{ url_for('partner_approval.resend', rid=req.id) }}" class="once" style="margin:10px 0 0">
+      <form method="post" action="{{ url_for('partner_approval.resend', rid=req.id) }}" class="once mini-actions">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button type="submit" class="btn {{ 'btn-primary' if not email_ok and smtp_ready else 'btn-secondary' }} btn-sm" id="resend-btn"{{ ' disabled title="SMTP is not configured"'|safe if not smtp_ready }}>Resend email</button>
+        <button type="submit" class="btn {{ 'btn-primary' if email_failed and smtp_ready else 'btn-secondary' }} btn-sm" id="resend-btn"{{ ' disabled title="SMTP is not configured"'|safe if not smtp_ready }}>Resend email</button>
       </form>{% elif can_resign %}<p class="mini">Use “Request re-sign” to make a new link.</p>{% endif %}
     </section>
     {% endif %}
@@ -108,8 +136,8 @@
   <form class="sheet once" method="post" action="{{ url_for('partner_approval.reject', rid=req.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h3 id="reject-title">Reject {{ req.ref }}?</h3>
-    <p>The sales user sees this reason. Any open signing link stops working.</p>
-    <label for="reason">Reason</label>
+    <p>The sales user sees this reason{{ ". Any open signing link stops working" if link }}. This cannot be undone.</p>
+    <label for="reason">Reason <span class="req">*</span></label>
     <textarea id="reason" name="reason" rows="3" maxlength="1000" required placeholder="e.g. UID does not match the CRM"></textarea>
     <div class="btns"><a class="btn btn-ghost" href="#">Cancel</a><button type="submit" class="btn btn-danger solid">Reject request</button></div>
   </form>
@@ -120,7 +148,7 @@
   <form class="sheet once" method="post" action="{{ url_for('partner_approval.resign', rid=req.id) }}">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <h3 id="resign-title">Request re-sign</h3>
-    <p>Creates a new single-use link{{ ' and e-mails it' if smtp_ready }}. The current link stops working.</p>
+    <p>Creates a new agreement and single-use link{{ ' and e-mails it to the partner' if smtp_ready }}. {{ 'The current link stops working.' if link else 'The current signature is kept in the history.' }}</p>
     <label for="resign-note">Note to the partner (optional)</label>
     <textarea id="resign-note" name="note" rows="3" maxlength="1000" placeholder="e.g. Please sign again and initial page 2"></textarea>
     <div class="btns"><a class="btn btn-ghost" href="#">Cancel</a><button type="submit" class="btn btn-primary">Send new link</button></div>

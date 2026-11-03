@@ -354,16 +354,53 @@ assert not PA.SETTINGS.smtp_ready
 
 url2 = f"/sign/{t2['token']}"
 assert "Please sign &lt;again&gt;" in anon.get(url2).get_data(as_text=True)
-# typed signature (Vietnamese name in the script font)
-r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1",
+# the typed tab offers every font in signature_fonts/, each preview in its own @font-face
+page = anon.get(url2).get_data(as_text=True)
+for fid in ("Allura-Regular", "DancingScript-Regular", "GreatVibes-Regular"):
+    assert f'name="font" value="{fid}"' in page and f"signature_fonts/{fid}.ttf" in page, fid
+assert anon.get("/sign/static/signature_fonts/Allura-Regular.ttf").status_code == 200
+# an unknown / path-like font id is refused and nothing is signed
+for bad in ("../../app", "Allura-Regular.ttf", "/etc/passwd", "nope"):
+    r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": bad,
+                                        "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
+    assert r.status_code == 400 and "Choose one of the signature styles" in r.get_data(as_text=True), bad
+    assert req(rid)["status"] == "resign" and latest_token(rid)["used_at"] is None
+# typed signature (Vietnamese name) in the chosen style
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1", "font": "Allura-Regular",
                                     "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid)
 assert s["status"] == "signed" and s["signed_kind"] == "typed"
+assert any("typed name, style Allura" in (a["note"] or "") for a in PA.STORE.audit(rid)), PA.STORE.audit(rid)
+# under review: compact header actions, textareas only inside the modals, no dark gradients
+d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+head = d[d.index('class="pa-top"'):d.index('id="next-step"')]
+assert "Mark Completed" in head and 'href="#resign-modal"' in head and 'href="#reject-modal"' in head
+assert "Signed by the partner" in d and 'id="signed-doc"' in d
+body = d[d.index('<main'):]
+assert "<textarea" not in body.split('<div class="modal t"')[0]
+assert body.count("<textarea") == 2
+assert "gradient(" not in d[d.index("/* Partner Approval"):d.index("</style>", d.index("/* Partner Approval"))]
+# the signed PDF is shown as page images (admin only, never cached)
+from PIL import Image as _Img  # noqa: E402
+_pdf = PA.SETTINGS.files / s["signed_file"]
+_Img.new("RGB", (595, 842), "white").save(_pdf, "PDF")
+img_url = f"/approval/admin/{rid}/signed/page/1.png"
+assert img_url in admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+r = admin.get(img_url)
+assert r.status_code == 200 and r.data.startswith(docs.PNG_MAGIC) and r.mimetype == "image/png"
+assert r.headers["Cache-Control"] == "private, no-store" and r.headers["X-Content-Type-Options"] == "nosniff"
+assert admin.get(f"/approval/admin/{rid}/signed/page/2.png").status_code == 404
+assert admin.get(f"/approval/admin/{rid}/signed/page/0.png").status_code == 404
+assert sales.get(img_url).status_code == 403
+assert anon.get(img_url, headers=HTML).status_code in (302, 401)
 assert (PA.SETTINGS.files / f"{rid:06d}" / "signature.png").read_bytes().startswith(docs.PNG_MAGIC)
 r = admin.post(f"/approval/admin/{rid}/complete", data={"csrf_token": atok})
 assert req(rid)["status"] == "completed"
-assert "Completed" in admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+d = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
+assert "Completed" in d and "by boss" in d and "No further actions" in d
+assert "Mark Completed" not in d and "#reject-modal" not in d and "<textarea" not in d
+assert "Download signed agreement" in d and admin.get(img_url).status_code == 200
 r = admin.get(f"/approval/admin/{rid}/file/signed_file")
 assert r.status_code == 200
 
@@ -377,7 +414,8 @@ r = anon.get(f"/sign/{t3}")
 assert r.status_code == 410 and "expired" in r.get_data(as_text=True)
 r = spost(anon, f"/sign/{t3}/sign", data={"mode": "typed", "agree": "1", "typed_name": "Third Partner"})
 assert r.status_code == 410 and req(rid3)["status"] == "approved"
-assert "Expired" in admin.get(f"/approval/admin/{rid3}").get_data(as_text=True)
+d = admin.get(f"/approval/admin/{rid3}").get_data(as_text=True)
+assert "Expired" in d and "The signing link has expired" in d and 'href="#resign-modal"' in d
 # admin makes a new link; the old one now says "replaced"
 admin.post(f"/approval/admin/{rid3}/resign", data={"csrf_token": atok, "note": ""})
 t3b = latest_token(rid3)["token"]
@@ -416,10 +454,17 @@ assert r.status_code == 200 and r.data.startswith(b"\xff\xd8\xff")
 
 # --------------------------------------------------- reject needs a reason
 rid4 = submit(sales, {**AGREEMENT, "partner_name": "Fourth"})
+d = admin.get(f"/approval/admin/{rid4}").get_data(as_text=True)          # pending: compact header
+head = d[d.index('class="pa-top"'):d.index('id="next-step"')]
+assert 'id="approve-btn"' in head and 'href="#reject-modal"' in head and "Mark Completed" not in head
+assert "<textarea" not in d[d.index("<main"):].split('<div class="modal t"')[0]
 admin.post(f"/approval/admin/{rid4}/reject", data={"csrf_token": atok, "reason": "  "})
 assert req(rid4)["status"] == "pending"
 admin.post(f"/approval/admin/{rid4}/reject", data={"csrf_token": atok, "reason": "UID does not match"})
 assert req(rid4)["status"] == "rejected" and req(rid4)["reject_reason"] == "UID does not match"
+d = admin.get(f"/approval/admin/{rid4}").get_data(as_text=True)
+assert 'class="pa-strip bad"' in d and "UID does not match" in d
+assert "approve-btn" not in d and "#reject-modal" not in d and "<textarea" not in d
 assert "UID does not match" in sales.get(f"/approval/{rid4}").get_data(as_text=True)
 assert admin.post(f"/approval/admin/{rid4}/approve", data={"csrf_token": atok}).status_code == 302
 assert req(rid4)["status"] == "rejected"
