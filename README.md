@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.33 · 2026-11-02`.
+required) show the running version, for example `DW Calculator v1.34 · 2026-11-03`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.33)
+### Tests (`test_*.py`, v1.34)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -897,7 +897,7 @@ python3 hitung_dw.py file.xlsx --sheet D Withdrawal
 
 ---
 
-## Partner Approval (Beta, v1.33)
+## Partner Approval (Beta, v1.34)
 
 Test-only, DPM-only. Sales fill the "Sales PartnerRequest" form at `/approval`
 (the same fields and conditional rules as the Lark form). The admin approves or
@@ -940,7 +940,57 @@ one marks it Completed.
 | `DW_PUBLIC_BASE_URL` | `https://dw-calculator.gorillaworkout.id` | base URL used in signing links |
 | `DW_SOFFICE` | `soffice` on PATH | path to LibreOffice |
 | `DW_SMTP_HOST`, `DW_SMTP_PORT`, `DW_SMTP_USER`, `DW_SMTP_PASSWORD`, `DW_SMTP_FROM`, `DW_SMTP_TLS` (`starttls`/`ssl`/`none`) | unset | outgoing e-mail |
+| `DW_SMTP_FROM_NAME` | `Dupoin Markets` | display name of the sender (ignored when `DW_SMTP_FROM` is already `Name <addr>`) |
+| `DW_SMTP_REPLY_TO` | unset | optional Reply-To address shown in the e-mail footer |
 
 `approval.db` and `approval_files/` hold partner data. Keep them out of git and
-back them up like `users.db`. Tests: `test_partner_approval.py` and
-`test_partner_approval_docs.py`. Both run without LibreOffice.
+back them up like `users.db`. Tests: `test_partner_approval.py`,
+`test_partner_approval_docs.py` and `test_partner_approval_security.py`. All run
+without LibreOffice.
+
+### E-mail and signing page (v1.34)
+
+- The e-mail ("Dupoin Markets – Partnership Agreement for Signature") is a
+  branded HTML table layout with inline CSS plus a plain-text part. The logo is
+  loaded from `DW_PUBLIC_BASE_URL/sign/static/dupoin-logo.png`. Re-sign e-mails
+  use the same template.
+- If sending fails, the request **stays approved**. The admin page shows the
+  error, a Copy button for the link, and **Resend email**, which re-sends the
+  same link (at most once a minute, logged in the activity).
+- The signing page shows the agreement as page images (rendered with
+  `pypdfium2`, installed with `pdfplumber`) with Open/Download PDF buttons. The
+  partner draws (Undo/Clear), types their name, or uploads a signed PDF/JPG/PNG,
+  and must tick the consent box.
+
+### Security (v1.34)
+
+- **Links:** 256-bit random tokens. Lookup is by SHA-256 hash with a constant-time
+  compare. A link is single-use, expires (`DW_SIGN_LINK_DAYS`), is revoked when
+  a new link is made or the request is rejected, and only works while the
+  request is Approved/Re-sign. The plain token is also kept so the admin can
+  copy the link.
+- **Brute force:** 20 unknown links or 30 sign/upload posts per IP in 15 minutes
+  return 429 (counted in SQLite, so all gunicorn workers share the count). The
+  IP is read from `CF-Connecting-IP`/`X-Real-IP`/`X-Forwarded-For`: bind
+  gunicorn to `127.0.0.1` so these cannot be forged.
+- **CSRF:** every admin/user POST needs the session token. The public sign and
+  upload forms carry an HMAC of the link (`Origin` is useless there because of
+  `no-referrer`).
+- **Headers on `/sign/*`:** `no-store`, `Referrer-Policy: no-referrer`,
+  `X-Robots-Tag: noindex`, `nosniff`, `X-Frame-Options: DENY` and a nonce CSP with
+  `frame-ancestors 'none'` (the PDF and page images allow `'self'` so the page
+  can embed them).
+- **Uploads:** checked by content (PDF header + `%%EOF`, PNG/JPEG verified by
+  Pillow, ≤ 60 MP, ≤ `MAX_UPLOAD`), saved as `signed_upload.<ext>` under
+  `DW_APPROVAL_DIR` (never under `static/`), and served only to admins with
+  `nosniff`, `no-store` and an explicit content type. Signed-file downloads are
+  logged.
+- **State machine:** status changes are checked on the server inside a
+  `BEGIN IMMEDIATE` transaction, so a double click or two admins cannot approve
+  twice. A form submission carries a one-time key, so a double submit creates
+  one request.
+- **E-mail:** addresses must fully match a strict pattern. Headers have CR/LF
+  and control characters removed. User text is HTML-escaped in pages and e-mail.
+- **Logs:** sign-page errors are logged as `/sign/***`. SMTP errors stored in the
+  audit log have the password and link removed. Do not enable gunicorn's
+  `--access-logfile` (it would contain the link), or redact `/sign/...` in it.

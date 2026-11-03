@@ -44,6 +44,16 @@ def fake_convert(docx_path, pdf_path, soffice="", timeout=180):
 docs.docx_to_pdf = fake_convert
 
 
+def sign_csrf(token):
+    with app.test_request_context():
+        return PA._sign_csrf(token)
+
+
+def spost(client, path, data=None, **kw):
+    """POST to a public sign form with its per-link CSRF field, like the page does."""
+    return client.post(path, data={**(data or {}), "csrf": sign_csrf(path.split("/")[2])}, **kw)
+
+
 def sign_in(username, password):
     c = app.test_client()
     r = c.post("/login", data={"username": username, "password": password})
@@ -219,8 +229,8 @@ r = anon.get(url)
 assert r.status_code == 200
 assert r.headers["Cache-Control"] == "no-store" and r.headers["Referrer-Policy"] == "no-referrer"
 body = r.get_data(as_text=True)
-for s in ("Test Partner", "X0000001", "Option A", "Option B", "Draw signature", "Type your name",
-          "I agree", "Download PDF"):
+for s in ("Test Partner", "X0000001", "Review", "Draw", "Type name", "Upload signed copy",
+          "Undo", "Clear", "I have read and agree", "Open PDF", "Download PDF", 'name="csrf"'):
     assert s in body, s
 r = anon.get(url + "/agreement.pdf")
 assert r.status_code == 200 and r.data.startswith(b"%PDF")
@@ -239,18 +249,18 @@ def drawn_data_url():
 
 
 # no "I agree" / blank signature are refused and do not use the link
-r = anon.post(url + "/sign", data={"mode": "draw", "signature": drawn_data_url()})
+r = spost(anon, url + "/sign", data={"mode": "draw", "signature": drawn_data_url()})
 assert r.status_code == 400 and "I agree" in r.get_data(as_text=True)
 blank = Image.new("RGBA", (200, 80), (0, 0, 0, 0))
 buf = io.BytesIO()
 blank.save(buf, "PNG")
-r = anon.post(url + "/sign", data={"mode": "draw", "agree": "1",
+r = spost(anon, url + "/sign", data={"mode": "draw", "agree": "1",
               "signature": "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()})
 assert r.status_code == 400 and "draw your signature" in r.get_data(as_text=True)
 assert latest_token(rid)["used_at"] is None
 
 # drawn signature
-r = anon.post(url + "/sign", data={"mode": "draw", "agree": "1", "signature": drawn_data_url()},
+r = spost(anon, url + "/sign", data={"mode": "draw", "agree": "1", "signature": drawn_data_url()},
               headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1", "User-Agent": "TestBrowser/1.0"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 assert "signed.pdf" not in r.get_data(as_text=True)                  # partner gets no file
@@ -265,7 +275,7 @@ assert docs.company_column_blank(PA.SETTINGS.files / s["signed_docx"])
 for path in (url, url + "/agreement.pdf"):
     r = anon.get(path)
     assert "Already submitted" in r.get_data(as_text=True), path
-r = anon.post(url + "/sign", data={"mode": "typed", "agree": "1", "typed_name": "Again"})
+r = spost(anon, url + "/sign", data={"mode": "typed", "agree": "1", "typed_name": "Again"})
 assert "Already submitted" in r.get_data(as_text=True) and req(rid)["signed_kind"] == "drawn"
 
 # admin review
@@ -320,7 +330,8 @@ try:
     assert (server.host, server.port) == ("smtp.test.invalid", 2525)
     assert server.calls == ["starttls", ("login", "mailer", "pw")]
     assert msg["To"] == "Test Partner <partner@example.com>"
-    assert "ready to sign" in msg["Subject"]
+    assert msg["Subject"] == "Dupoin Markets \u2013 Partnership Agreement for Signature"
+    assert msg["From"] == "Dupoin <no-reply@example.com>"
     text = msg.get_body(("plain",)).get_content()
     html = msg.get_body(("html",)).get_content()
     assert f"/sign/{t2['token']}" in text and f"/sign/{t2['token']}" in html
@@ -344,7 +355,7 @@ assert not PA.SETTINGS.smtp_ready
 url2 = f"/sign/{t2['token']}"
 assert "Please sign &lt;again&gt;" in anon.get(url2).get_data(as_text=True)
 # typed signature (Vietnamese name in the script font)
-r = anon.post(url2 + "/sign", data={"mode": "typed", "agree": "1",
+r = spost(anon, url2 + "/sign", data={"mode": "typed", "agree": "1",
                                     "typed_name": "L\u00ea Th\u00e0nh T\u00e2m"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid)
@@ -364,7 +375,7 @@ with sqlite3.connect(PA.SETTINGS.db) as con:
     con.execute("UPDATE tokens SET expires_at=? WHERE token=?", (time.time() - 1, t3))
 r = anon.get(f"/sign/{t3}")
 assert r.status_code == 410 and "expired" in r.get_data(as_text=True)
-r = anon.post(f"/sign/{t3}/sign", data={"mode": "typed", "agree": "1", "typed_name": "Third Partner"})
+r = spost(anon, f"/sign/{t3}/sign", data={"mode": "typed", "agree": "1", "typed_name": "Third Partner"})
 assert r.status_code == 410 and req(rid3)["status"] == "approved"
 assert "Expired" in admin.get(f"/approval/admin/{rid3}").get_data(as_text=True)
 # admin makes a new link; the old one now says "replaced"
@@ -377,16 +388,23 @@ assert anon.get(f"/sign/{t3b}").status_code == 200
 
 # ------------------------------------------------------------- uploads
 up = f"/sign/{t3b}/upload"
-r = anon.post(up, data={"file": (io.BytesIO(b"MZ\x90\x00 not a pdf"), "signed.pdf")},
+r = spost(anon, up, data={"file": (io.BytesIO(b"MZ\x90\x00 not a pdf"), "signed.pdf")},
               content_type="multipart/form-data")
 assert r.status_code == 400 and "PDF, JPG or PNG" in r.get_data(as_text=True)
-r = anon.post(up, data={"file": (io.BytesIO(b"%PDF-" + b"0" * (20 * 1024 * 1024)), "big.pdf")},
+r = spost(anon, up, data={"file": (io.BytesIO(b"%PDF-" + b"0" * (20 * 1024 * 1024)), "big.pdf")},
               content_type="multipart/form-data")
 assert r.status_code == 413
-r = anon.post(up, data={}, content_type="multipart/form-data")
+r = spost(anon, up, data={}, content_type="multipart/form-data")
 assert r.status_code == 400
 assert latest_token(rid3)["used_at"] is None and req(rid3)["status"] == "resign"
-r = anon.post(up, data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0 jpeg bytes"), "photo.exe")},
+# magic bytes alone are not enough: the image must really decode
+r = spost(anon, up, data={"file": (io.BytesIO(b"\xff\xd8\xff\xe0 jpeg bytes"), "photo.jpg")},
+          content_type="multipart/form-data")
+assert r.status_code == 400 and "PDF, JPG or PNG" in r.get_data(as_text=True)
+from PIL import Image  # noqa: E402
+_jpg = io.BytesIO()
+Image.new("RGB", (40, 20), "white").save(_jpg, "JPEG")
+r = spost(anon, up, data={"file": (io.BytesIO(_jpg.getvalue()), "photo.exe")},
               content_type="multipart/form-data", headers={"CF-Connecting-IP": "198.51.100.9"})
 assert r.status_code == 200 and "Thank you" in r.get_data(as_text=True)
 s = req(rid3)

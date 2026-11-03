@@ -1,7 +1,13 @@
 {% extends "approval/_sign_base.html" %}
-{% block title %}Thank you · Dupoin{% endblock %}
+{% from "approval/_sign_steps.html" import steps %}
+{% block title %}Thank you · Dupoin Markets{% endblock %}
 {% block body %}
-<div class="card"><h1>Thank you</h1>
-<p>Your signed agreement has been received. Dupoin will review it and contact you if anything else is needed.</p>
-<p class="muted">You can close this page. This link cannot be used again.</p></div>
+{{ steps(3) }}
+<section class="card result">
+  <div class="ic ok"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+  <h1>Thank you{% if req %}, {{ req.data.partner_name }}{% endif %}</h1>
+  <p>Your signed agreement has been received. Dupoin Markets will review it and contact you if anything else is needed.</p>
+  {% if req %}<dl><dt>Reference</dt><dd>{{ req.ref }}</dd>{% if req.signed_at %}<dt>Signed</dt><dd>{{ wib(req.signed_at, '%d %B %Y, %H:%M WIB') }}</dd>{% endif %}</dl>{% endif %}
+  <p class="muted" style="margin-top:18px">You can close this page. This link cannot be used again.</p>
+</section>
 {% endblock %}

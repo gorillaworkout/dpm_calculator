@@ -6,6 +6,7 @@ type) and the server-side validation, so the two cannot drift apart.
 """
 import datetime as dt
 import re
+import unicodedata
 
 # Request type key -> label. "Dowgrade" is the source form's own spelling.
 REQUEST_TYPES = {
@@ -82,8 +83,17 @@ FIELDS = [
 ]
 FIELD = {f["name"]: f for f in FIELDS}
 
-_EMAIL = re.compile(r"^[^@\s<>\"']{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,}$")
-_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Plain address only: no display name, no commas/semicolons (= no extra recipients).
+_EMAIL = re.compile(r"^[A-Za-z0-9.!#$%&*+/=?^_`{|}~-]{1,64}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,188}[A-Za-z0-9])?"
+                    r"\.[A-Za-z]{2,24}$")
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
+# Bidi overrides/isolates and line/paragraph separators can make a name or
+# address look different from what is stored (and from what is signed).
+_SPOOF = re.compile("[\u202a-\u202e\u2066-\u2069\u2028\u2029\ufeff]")
+
+
+def valid_email(value):
+    return bool(value) and len(value) <= 254 and _EMAIL.fullmatch(value) is not None
 
 
 def fields_for(rtype):
@@ -95,7 +105,8 @@ def is_required(field, rtype):
 
 
 def _clean(value, multiline):
-    value = _CTRL.sub("", (value or "").replace("\r\n", "\n").replace("\r", "\n"))
+    value = unicodedata.normalize("NFC", value or "")
+    value = _SPOOF.sub("", _CTRL.sub("", value.replace("\r\n", "\n").replace("\r", "\n")))
     if not multiline:
         value = " ".join(value.split())
     return value.strip()
@@ -139,7 +150,7 @@ def validate(form):
                 errors[name] = f"{f['label']} must be a date (YYYY-MM-DD)."
                 continue
         elif kind == "email":
-            if not _EMAIL.match(raw):
+            if not valid_email(raw):
                 errors[name] = f"{f['label']} is not a valid e-mail address."
                 continue
         data[name] = raw
@@ -204,3 +215,36 @@ def summary(data):
                   f"Desk Accountable: {g('desk', '')}",
                   f"Create agreement: {g('create_agreement') or '-'}"]
     return "\n".join(lines)
+
+
+DETAIL_SECTIONS = (
+    ("Request", ("contract_type", "sales_team", "sales_uid", "region", "desk", "effective_date",
+                 "onboard_date", "submission_date", "new_position", "downgrade_type",
+                 "create_agreement", "team_upline", "background", "allowance_scheme",
+                 "remarks")),
+    ("Partner", ("partner_name", "role", "uid", "passport", "partner_email", "address")),
+)
+
+
+def details(data):
+    """[(section, [(label, value, wide)])] for the label/value cards."""
+    out = []
+    for title, names in DETAIL_SECTIONS:
+        rows = []
+        for name in names:
+            fd = FIELD[name]
+            if name not in data:
+                continue
+            value = data.get(name) or ""
+            if fd["kind"] == "date" and value:
+                value = us_date(value)
+            elif name == "contract_type":
+                value = AGREEMENT_TYPE_LABEL.get(value, value)
+            elif name == "sales_team":
+                value = value.replace(" Team", "")
+            rows.append((fd["label"].replace(" ONLY", "").replace("Do u want to create agreement?",
+                                                                    "Create agreement"),
+                         value or "\u2014", fd["kind"] == "textarea" or len(value) > 60))
+        if rows:
+            out.append((title, rows))
+    return out

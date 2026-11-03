@@ -1,1 +1,9 @@
 {% macro badge(r) %}<span class="st st-{{ r.status }}">{{ r.status_label }}</span>{% endmacro %}
+{% macro details_card(details, title=None) %}
+{% for section, rows in details %}
+<div class="lv-sub">{{ section }}</div>
+<dl class="lv">
+  {% for label, value, wide in rows %}<div class="{{ 'wide' if wide }}"><dt>{{ label }}</dt><dd>{{ value }}</dd></div>{% endfor %}
+</dl>
+{% endfor %}
+{% endmacro %}

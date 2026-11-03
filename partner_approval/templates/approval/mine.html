@@ -1,14 +1,16 @@
 {% extends "base.html" %}
-{% from "approval/_status.html" import badge %}
+{% from "approval/_status.html" import badge, details_card %}
 {% block title %}{{ req.ref }} · Partner Approval (Beta){% endblock %}
+{% block wide %} wide{% endblock %}
 {% block body %}
 {% include "approval/_style.html" %}
+<a class="pa-back" href="{{ url_for('partner_approval.index') }}">← My requests</a>
 <div class="pa-head"><h1>{{ req.ref }}</h1>{{ badge(req) }}<span class="beta">Beta</span></div>
-<p class="lede">{{ types[req.request_type] }} · {{ req.partner_name }} · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
-{% if req.status == 'rejected' and req.reject_reason %}<div class="note bad" style="margin:0 0 18px">Rejected: {{ req.reject_reason }}</div>{% endif %}
-<pre style="color:var(--ink);max-height:none">{{ summary }}</pre>
-<h3 style="margin-top:28px">History</h3>
-{% include "approval/_audit.html" %}
-<p><a href="{{ url_for('partner_approval.index') }}" style="color:#9db8ff">← My requests</a>
-{% if is_admin %} · <a href="{{ url_for('partner_approval.admin_detail', rid=req.id) }}" style="color:#9db8ff">Open in admin</a>{% endif %}</p>
+<p class="pa-meta">{{ types[req.request_type] }} · <b style="color:var(--ink)">{{ req.partner_name }}</b> · submitted {{ wib(req.created_at) }} by {{ req.created_by }}</p>
+{% if is_admin %}<div class="pa-bar"><p class="hint">You are an admin: review this request on the admin page.</p><div class="btns"><a class="btn btn-secondary" href="{{ url_for('partner_approval.admin_detail', rid=req.id) }}">Open in admin</a></div></div>{% else %}<div style="height:16px"></div>{% endif %}
+{% if req.status == 'rejected' and req.reject_reason %}<div class="note bad" style="margin:0 0 16px">Rejected: {{ req.reject_reason }}</div>{% endif %}
+<div class="pa-grid">
+  <section class="pa-card"><h3>Request details</h3>{{ details_card(details) }}</section>
+  <aside><section class="pa-card"><h3>History</h3>{% include "approval/_audit.html" %}</section></aside>
+</div>
 {% endblock %}

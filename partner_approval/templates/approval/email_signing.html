@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en" xmlns="http://www.w3.org/1999/xhtml" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<meta name="color-scheme" content="light">
+<meta name="supported-color-schemes" content="light">
+<title>{{ subject }}</title>
+<!--[if mso]><style>table,td,div,p,a{font-family:Arial,Helvetica,sans-serif!important}</style><![endif]-->
+<style>
+@media only screen and (max-width:620px){
+  .container{width:100%!important}
+  .px{padding-left:22px!important;padding-right:22px!important}
+  .btn a{display:block!important}
+}
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:#f2f5f7;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%">
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#f2f5f7">{{ preheader }}</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f2f5f7">
+<tr><td align="center" style="padding:28px 12px">
+  <table role="presentation" class="container" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;border:1px solid #e3e8ec;border-radius:10px">
+    <tr><td style="height:5px;line-height:5px;font-size:0;background-color:#2EB5C4;border-radius:10px 10px 0 0">&nbsp;</td></tr>
+    <tr><td class="px" style="padding:26px 40px 8px 40px">
+      <img src="{{ logo_url }}" width="106" height="44" alt="Dupoin" style="display:block;border:0;outline:none;text-decoration:none;height:44px;width:106px;font-family:Arial,Helvetica,sans-serif;font-size:26px;font-weight:bold;color:#2EB5C4">
+    </td></tr>
+    <tr><td class="px" style="padding:18px 40px 0 40px;font-family:Arial,Helvetica,sans-serif;color:#1A1F24">
+      <p style="margin:0 0 6px 0;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#1A8A96;font-weight:bold">Partnership Agreement</p>
+      <h1 style="margin:0 0 18px 0;font-size:22px;line-height:30px;font-weight:bold;color:#1A1F24">{{ heading }}</h1>
+      <p style="margin:0 0 14px 0;font-size:15px;line-height:24px">Dear {{ name }},</p>
+      <p style="margin:0 0 14px 0;font-size:15px;line-height:24px">{{ intro }}</p>
+      {% if note %}
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px 0">
+        <tr><td style="padding:12px 16px;background-color:#E6F7F9;border-left:4px solid #2EB5C4;font-size:14px;line-height:22px;color:#1A1F24">
+          <b>Note from Dupoin:</b> {{ note }}
+        </td></tr>
+      </table>
+      {% endif %}
+      <p style="margin:0 0 22px 0;font-size:15px;line-height:24px">Please review the agreement and sign it online. You can sign on screen, or download the PDF, sign it by hand and upload the signed copy.</p>
+    </td></tr>
+    <tr><td class="px btn" align="center" style="padding:0 40px 8px 40px">
+      <!--[if mso]>
+      <v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" xmlns:w="urn:schemas-microsoft-com:office:word" href="{{ link }}" style="height:46px;v-text-anchor:middle;width:280px;" arcsize="14%" stroke="f" fillcolor="#1A8A96">
+        <w:anchorlock/><center style="color:#ffffff;font-family:Arial,sans-serif;font-size:16px;font-weight:bold;">Review &amp; Sign Agreement</center>
+      </v:roundrect>
+      <![endif]-->
+      <!--[if !mso]><!-- -->
+      <a href="{{ link }}" target="_blank" style="display:inline-block;background-color:#1A8A96;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:bold;line-height:46px;text-align:center;text-decoration:none;width:280px;border-radius:6px;-webkit-text-size-adjust:none">Review &amp; Sign Agreement</a>
+      <!--<![endif]-->
+    </td></tr>
+    <tr><td class="px" align="center" style="padding:6px 40px 24px 40px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:20px;color:#5B6B73">
+      This link is personal and can be used once. It expires on <b style="color:#1A1F24">{{ expires }}</b>.
+    </td></tr>
+    <tr><td class="px" style="padding:0 40px 26px 40px;font-family:Arial,Helvetica,sans-serif">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+        <tr><td style="padding:14px 16px;background-color:#f7f9fa;border:1px solid #e3e8ec;border-radius:6px;font-size:12px;line-height:19px;color:#5B6B73">
+          If the button does not work, copy and paste this link into your browser:<br>
+          <a href="{{ link }}" target="_blank" style="color:#1A8A96;word-break:break-all;text-decoration:underline">{{ link }}</a>
+        </td></tr>
+      </table>
+    </td></tr>
+    <tr><td class="px" style="padding:0 40px 30px 40px;font-family:Arial,Helvetica,sans-serif;font-size:15px;line-height:24px;color:#1A1F24">
+      Kind regards,<br><b>Dupoin Markets</b> Partnerships Team
+    </td></tr>
+    <tr><td class="px" style="padding:20px 40px 24px 40px;border-top:1px solid #e3e8ec;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:19px;color:#7a8a92">
+      <b style="color:#5B6B73">Dupoin Markets Ltd</b><br>
+      {{ address }}<br><br>
+      This is an automated message. Please do not reply to this e-mail{% if reply_to %}; for questions write to <a href="mailto:{{ reply_to }}" style="color:#1A8A96">{{ reply_to }}</a>{% endif %}.
+      If you were not expecting it, you can safely ignore it.
+    </td></tr>
+  </table>
+</td></tr>
+</table>
+</body>
+</html>

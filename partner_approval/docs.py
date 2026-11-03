@@ -393,10 +393,22 @@ def typed_signature(name):
     if len(name) > 80:
         raise SignatureError("The name is too long.")
     font = ImageFont.truetype(str(SCRIPT_FONT), 96)
+    if _missing_glyphs(font, name):
+        raise SignatureError("The signature font cannot show some letters of this name. "
+                             "Please draw your signature instead.")
     left, top, right, bottom = font.getbbox(name)
     img = Image.new("RGBA", (right - left + 80, bottom - top + 80), (255, 255, 255, 0))
     ImageDraw.Draw(img).text((40 - left, 40 - top), name, font=font, fill=(16, 32, 96, 255))
     return _crop(img, "Please type your full name.")
+
+
+def _missing_glyphs(font, text):
+    """Characters the font would draw as the empty 'tofu' box."""
+    def mask(ch):
+        m = font.getmask(ch)
+        return m.size, bytes(m)
+    tofu = {mask("\uffff"), mask("\U0010fffd")}
+    return [ch for ch in set(text) if not ch.isspace() and mask(ch) in tofu]
 
 
 def _crop(img, empty_message):
@@ -430,3 +442,70 @@ def sniff_upload(head):
         if head.startswith(magic):
             return ext
     return None
+
+
+def check_upload(blob):
+    """File type of a signed upload, checked by content. None = refused.
+
+    The magic bytes decide the type (never the file name); images must also
+    decode and stay below a sane pixel count, PDFs must have a PDF trailer.
+    """
+    ext = sniff_upload(blob[:16])
+    if ext is None:
+        return None
+    if ext == "pdf":
+        return ext if b"%%EOF" in blob[-2048:] else None
+    from PIL import Image
+    try:
+        with Image.open(io.BytesIO(blob)) as img:
+            if img.width * img.height > 60_000_000:
+                return None
+            img.verify()
+    except Exception:  # noqa: BLE001 - anything unreadable is refused
+        return None
+    return ext
+
+
+# ------------------------------------------------------------- page previews
+MAX_PREVIEW_PAGES = 40
+
+
+def pdf_previews(pdf_path, out_dir, width=1240):
+    """Render each PDF page to out_dir/page-<n>.png for the signing page.
+
+    Mobile browsers often cannot show an embedded PDF, page images always work.
+    Uses pypdfium2 (installed with pdfplumber). Returns the number of pages
+    rendered, 0 when previews are not available -- the page then falls back to
+    the embedded PDF and the Open / Download buttons.
+    """
+    out_dir = Path(out_dir)
+    try:
+        import pypdfium2 as pdfium
+        doc = pdfium.PdfDocument(str(pdf_path))
+    except Exception:  # noqa: BLE001 - previews are optional
+        return 0
+    tmp = Path(tempfile.mkdtemp(prefix="preview-", dir=str(out_dir.parent)))
+    try:
+        n = min(len(doc), MAX_PREVIEW_PAGES)
+        for i in range(n):
+            page = doc[i]
+            scale = width / max(page.get_width(), 1)
+            img = page.render(scale=scale).to_pil().convert("RGB")
+            img.save(tmp / f"page-{i + 1}.png", "PNG", optimize=True)
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+        tmp.rename(out_dir)
+        return n
+    except Exception:  # noqa: BLE001
+        shutil.rmtree(tmp, ignore_errors=True)
+        return 0
+    finally:
+        doc.close()
+
+
+def preview_count(out_dir):
+    out_dir = Path(out_dir)
+    n = 0
+    while (out_dir / f"page-{n + 1}.png").is_file():
+        n += 1
+    return n

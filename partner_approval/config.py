@@ -10,6 +10,8 @@ DW_PUBLIC_BASE_URL      base of the signing link (default https://dw-calculator.
 DW_SOFFICE              path to LibreOffice soffice (default: found on PATH)
 DW_SMTP_HOST / DW_SMTP_PORT / DW_SMTP_USER / DW_SMTP_PASSWORD / DW_SMTP_FROM
 DW_SMTP_TLS             starttls (default) | ssl | none
+DW_SMTP_FROM_NAME       display name of the sender (default "Dupoin Markets")
+DW_SMTP_REPLY_TO        optional Reply-To address (default: none)
 """
 import os
 from dataclasses import dataclass, field
@@ -59,5 +61,7 @@ def load():
         soffice=env("DW_SOFFICE") or "",
         smtp={"host": env("DW_SMTP_HOST") or "", "port": int(port) if port.isdigit() else 587,
               "user": env("DW_SMTP_USER") or "", "password": env("DW_SMTP_PASSWORD") or "",
-              "from": env("DW_SMTP_FROM") or "", "tls": tls},
+              "from": (env("DW_SMTP_FROM") or "").strip(), "tls": tls,
+              "from_name": (env("DW_SMTP_FROM_NAME") or "Dupoin Markets").strip(),
+              "reply_to": (env("DW_SMTP_REPLY_TO") or "").strip()},
     )

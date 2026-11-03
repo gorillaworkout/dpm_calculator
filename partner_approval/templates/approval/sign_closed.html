@@ -1,11 +1,22 @@
 {% extends "approval/_sign_base.html" %}
-{% block title %}Link not available · Dupoin{% endblock %}
+{% block title %}Link not available · Dupoin Markets{% endblock %}
 {% block body %}
-<div class="card">
-{% if state == 'used' %}<h1>Already submitted</h1><p>This agreement has already been submitted with this link. Thank you.</p>
-{% elif state == 'expired' %}<h1>This link has expired</h1><p>Please ask your Dupoin contact for a new signing link.</p>
-{% elif state == 'revoked' %}<h1>This link was replaced</h1><p>A newer signing link was sent to you. Please use the newest link.</p>
-{% elif state == 'closed' %}<h1>This link is no longer active</h1><p>Please contact your Dupoin contact.</p>
-{% else %}<h1>Link not valid</h1><p>Please check that you opened the full link from the e-mail.</p>{% endif %}
-</div>
+{% set info = {
+  'used': ('ok', 'Already submitted', 'This agreement has already been submitted with this link. Thank you.'),
+  'expired': ('warn', 'This link has expired', 'For your security, signing links are valid for a limited time. Please ask your Dupoin Markets contact to send you a new link.'),
+  'revoked': ('warn', 'This link was replaced', 'A newer signing link was sent to you. Please open the most recent e-mail from Dupoin Markets.'),
+  'closed': ('warn', 'This link is no longer active', 'This agreement can no longer be signed with this link. Please contact your Dupoin Markets representative.'),
+  'limited': ('bad', 'Too many attempts', 'Please wait 15 minutes and try again, or contact your Dupoin Markets representative.'),
+  'too_large': ('bad', 'The file is too large', 'Please go back and upload a smaller file (PDF, JPG or PNG).'),
+  'error': ('bad', 'Something went wrong', 'Your signature was not lost. Please try again in a few minutes, or contact your Dupoin Markets representative.'),
+}.get(state, ('bad', 'Link not valid', 'Please check that you opened the full link from the e-mail.')) %}
+<section class="card result" id="state-{{ state }}">
+  <div class="ic {{ info[0] }}">
+  {% if info[0] == 'ok' %}<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>
+  {% elif state == 'expired' %}<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+  {% else %}<svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7.5v5.5M12 16.5v.5"/></svg>{% endif %}
+  </div>
+  <h1>{{ info[1] }}</h1>
+  <p>{{ info[2] }}</p>
+</section>
 {% endblock %}
