@@ -42,7 +42,7 @@
 
 {% if req.status == 'pending' %}
 <div class="pa-strip" id="next-step"><span class="ic">i</span><span class="t">
-  {% if agreement %}{% if template %}Approving creates the agreement from <b>{{ template }}</b> and a signing link{{ ' and e-mails it to the partner' if smtp_ready else ' (e-mail is not configured: copy the link)' }}.{% else %}Agreement template for {{ req.role }} not ready yet: approving records the approval only.{% endif %}{% else %}No agreement for this request type: approving completes it.{% endif %}</span></div>
+  {% if agreement %}{% if template %}Approving creates the agreement from <b>{{ template }}</b>{% if template_from %} <span class="muted" id="template-note">(template sementara, dari {{ template_from }}: there is no {{ req.role }}.docx yet; the role wording is changed to {{ req.role }})</span>{% endif %} and a signing link{{ ' and e-mails it to the partner' if smtp_ready else ' (e-mail is not configured: copy the link)' }}.{% else %}Agreement template for {{ req.role }} not ready yet: approving records the approval only.{% endif %}{% else %}No agreement for this request type: approving completes it.{% endif %}</span></div>
 {% elif req.status == 'signed' %}
 <div class="pa-strip" id="next-step"><span class="ic">✓</span><span class="t"><b>Signed by the partner{% if req.signed_at %} on {{ wib(req.signed_at, '%d %b %Y, %H:%M WIB') }}{% endif %}.</b> Check the signed agreement below, then mark the request completed.</span></div>
 {% elif email_failed %}
@@ -56,6 +56,9 @@
 <div class="pa-strip ok" id="next-step"><span class="ic">✓</span><span class="t"><b>Completed</b>{% if completed %} on {{ wib(completed['at'], '%d %b %Y, %H:%M WIB') }} by {{ completed['actor'] }}{% endif %}. No further actions.</span></div>
 {% elif req.status == 'rejected' %}
 <div class="pa-strip bad" id="next-step"><span class="ic">×</span><span class="t"><b>Rejected:</b> {{ req.reject_reason }}</span></div>
+{% endif %}
+{% if agreement and template_from and req.status != 'pending' %}
+<p class="muted" id="template-note" style="margin:6px 2px 0;font-size:12.5px">Template sementara, dari {{ template_from }}.docx: there is no {{ req.role }}.docx yet, so the {{ template_from }} agreement is used with the role wording changed to {{ req.role }}. Add {{ req.role }}.docx to the templates folder to use the real one (admins only).</p>
 {% endif %}
 
 {% if req.agreement_note %}<div class="note bad" role="alert" style="margin:0 0 16px" id="agreement-note">{{ req.agreement_note }}</div>{% endif %}

@@ -218,7 +218,9 @@ def _issue_agreement(req, actor, resign_note=None, regenerate=True):
     token = STORE.new_token(rid, SETTINGS.link_days)
     tok = STORE.token(token)
     STORE.update(rid, agreement_note=None)
-    STORE.log(rid, actor, f"Signing link created ({template.name}), valid until "
+    borrowed = docs.template_info(SETTINGS.templates, data.get("role"))[1]
+    used = template.name + (f", temporary template for {data.get('role')}" if borrowed else "")
+    STORE.log(rid, actor, f"Signing link created ({used}), valid until "
                           f"{wib(tok['expires_at'])}")
     _email_link(rid, data, token, tok["expires_at"], actor, resign_note)
     return token
@@ -328,13 +330,13 @@ def admin_detail(rid):
         link = {"url": _link(tok["token"]), "expires": wib(tok["expires_at"]),
                 "expired": tok["expires_at"] < time.time() or bool(tok["revoked_at"]),
                 "opened": wib(tok["opened_at"]) if tok["opened_at"] else None}
-    template = docs.template_for(SETTINGS.templates, req["data"].get("role"))
+    template, borrowed = docs.template_info(SETTINGS.templates, req["data"].get("role"))
     note = req.get("email_note") or ""
     return render_template(
         "approval/admin_detail.html", req=req, summary=forms.summary(req["data"]),
         details=forms.details(req["data"]), email_ok=note.startswith("Email sent"),
         allowed=TRANSITIONS.get(req["status"], ()), audit=STORE.audit(rid), link=link, agreement=_agreement_applies(req),
-        template=template.name if template else None, smtp_ready=SETTINGS.smtp_ready,
+        template=template.name if template else None, template_from=borrowed, smtp_ready=SETTINGS.smtp_ready,
         files={k: bool(_abs(req.get(k))) for k in
                ("agreement_pdf", "agreement_docx", "signed_file", "signed_docx",
                 "pif_pdf", "pif_docx")},
