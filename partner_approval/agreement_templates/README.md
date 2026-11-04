@@ -2,11 +2,33 @@
 
 One Word file per role, named after the role: `CM.docx`, `BM.docx`, `RM.docx`,
 `MIB.docx`, `NCIB.docx`, `RD.docx`. `CM`, `BM` and `RM` are here (v1.35).
-Approving an Agreement / Special Terms request for a role without a file here
-(MIB, NCIB, RD) still works, the request is Approved, but the admin sees
-"Agreement template for <role> not ready yet" and no signing link is made.
-Drop the file in (or point `DW_APPROVAL_TEMPLATES` at another folder) and click
-"Retry agreement" on the request.
+
+**Temporary templates (v1.37).** Until their own file exists, a role borrows
+one (`TEMPLATE_FALLBACK` in `docs.py`, easy to change):
+
+| Role | Uses   | Why |
+|------|--------|-----|
+| MIB  | RM.docx | individual sales role: own customers + referral rebate, no team target, no reporting line |
+| NCIB | RM.docx | same as MIB |
+| RD   | CM.docx | most senior template, with a team target and a reporting clause |
+
+The filler swaps the role wording: the title ("Relationship Manager" →
+"Master IB" / "NCIB", "Country Manager" → "Regional Director"), "the RM"/"a
+RM's" → "the MIB"/"an MIB's", and for RD the CM line "report directly to the
+Regional Director, or in their absence, to the Director of Business
+Development" becomes "report directly to the Director of Business
+Development". **Not changed (check before real use):** the targets
+(CM's $200,000 team target applies to RD), the allowance table and rebates,
+CM duties ("Support Relationship Managers and Master IBs"), "RM/BM" in CM's
+fraud line, "Employee" in RM's arbitration clause. NCIB has no confirmed long
+title, so "NCIB" is used. Admins see "template sementara (dari RM/CM)"; the
+partner does not.
+
+Dropping in `MIB.docx`, `NCIB.docx` or `RD.docx` (or pointing
+`DW_APPROVAL_TEMPLATES` at another folder) replaces the borrowed one at once,
+no code change. Requests already signed keep their PDF. If no template is found
+at all, the request is still Approved with "Agreement template for <role> not
+ready yet" and a "Retry agreement" button.
 
 The filler looks for these labels, so keep them in a new template:
 

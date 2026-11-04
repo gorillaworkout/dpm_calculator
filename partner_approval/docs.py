@@ -42,15 +42,121 @@ class SignatureError(ValueError):
 
 
 # ------------------------------------------------------------------ templates
-def template_for(templates_dir, role):
-    """The .docx for a role (CM.docx, BM.docx, ...) or None when not ready yet."""
-    if not role or not re.fullmatch(r"[A-Za-z]{1,10}", role) or role.upper() == "PIF":
-        return None                      # PIF.docx is the admin-only form, not an agreement
+# Roles that have no Word file yet borrow the closest existing one (Bayu, 4 Nov
+# 2026: "template yang belum ada pakai template yang ada dulu aja"). A real file
+# always wins: drop MIB.docx / NCIB.docx / RD.docx into the templates folder and
+# it is used from the next approval on, with no code change. To change a choice,
+# edit this dict; to stop borrowing for a role, remove its entry.
+TEMPLATE_FALLBACK = {
+    "MIB": "RM",    # introducing broker: individual sales role, client and referral
+    "NCIB": "RM",   # rebates, no team target, no reporting line -> Relationship Manager
+    "RD": "CM",     # senior management with a team target -> Country Manager
+}
+
+# What each template calls its party, and what each role is called in a borrowed
+# template. "Master IB" is how CM.docx itself names MIBs; NCIB has no confirmed
+# long title, so the abbreviation is the defined term ("referred to as "NCIB"").
+TEMPLATE_TITLES = {"CM": "Country Manager", "BM": "Business Manager",
+                   "RM": "Relationship Manager"}
+ROLE_TITLES = {"MIB": "Master IB", "NCIB": "NCIB", "RD": "Regional Director"}
+
+
+def _real_template(templates_dir, role):
     for name in (f"{role}.docx", f"{role.upper()}.docx", f"{role.lower()}.docx"):
         p = Path(templates_dir) / name
         if p.is_file():
             return p
     return None
+
+
+def template_info(templates_dir, role):
+    """(path, borrowed_from) for a role: borrowed_from is None for the role's own
+    file, or the role whose file is used for now (e.g. "RM"). (None, None) when
+    there is nothing to use."""
+    if not role or not re.fullmatch(r"[A-Za-z]{1,10}", role) or role.upper() == "PIF":
+        return None, None                # PIF.docx is the admin-only form, not an agreement
+    own = _real_template(templates_dir, role)
+    if own is not None:
+        return own, None
+    src = TEMPLATE_FALLBACK.get(role.upper())
+    borrowed = _real_template(templates_dir, src) if src else None
+    return (borrowed, src) if borrowed is not None else (None, None)
+
+
+def template_for(templates_dir, role):
+    """The .docx for a role (CM.docx, BM.docx, ...): its own file, else the
+    TEMPLATE_FALLBACK one, else None."""
+    return template_info(templates_dir, role)[0]
+
+
+def role_swaps(template, role):
+    """[(old, new), ...] that turn a borrowed template's role wording into the
+    request's role. Empty when the template is the role's own file."""
+    src = Path(template).stem.upper()
+    role = (role or "").upper()
+    if not role or src == role or src not in TEMPLATE_TITLES or role not in ROLE_TITLES:
+        return []
+    title, abbr = ROLE_TITLES[role], role
+    an = "an" if abbr[0] in "AEFHILMNORSX" else "a"   # spoken letters: "an MIB", "an NCIB", "a RD"
+    swaps = []
+    if src == "CM" and role == "RD":
+        # CM says "report directly to the Regional Director, or in their absence,
+        # to the Director of Business Development": an RD cannot report to itself.
+        swaps.append(("report directly to the Regional Director, or in their absence, to the "
+                      "Director of Business Development",
+                      "report directly to the Director of Business Development"))
+    swaps += [(TEMPLATE_TITLES[src], title),
+              (f"a {src}'s", f"{an} {abbr}'s"),
+              (f"the {src} ", f"the {abbr} "), (f"the {src}.", f"the {abbr}.")]
+    return swaps
+
+
+def _replace_across_runs(paragraph, old, new):
+    """Replace `old` in a paragraph even when Word split it over several runs.
+    The replacement takes the formatting of the run where the match starts."""
+    changed = 0
+    while True:
+        runs = paragraph.runs
+        text = "".join(r.text for r in runs)
+        i = text.find(old)
+        if i < 0 or not runs:
+            return changed
+        j, pos = i + len(old), 0
+        first = True
+        for r in runs:
+            a, b = pos, pos + len(r.text)
+            pos = b
+            if b <= i or a >= j:
+                continue
+            lo, hi = max(a, i) - a, min(b, j) - a
+            r.text = r.text[:lo] + (new if first else "") + r.text[hi:]
+            first = False
+        changed += 1
+
+
+def _all_paragraphs(doc):
+    def walk(container):
+        for p in container.paragraphs:
+            yield p
+        for t in container.tables:
+            for row in t.rows:
+                for c in row.cells:
+                    yield from walk(c)
+    yield from walk(doc)
+    for sec in doc.sections:
+        for part in (sec.header, sec.footer):
+            yield from walk(part)
+
+
+def swap_role_wording(doc, swaps):
+    """Apply role_swaps() to every paragraph (body, tables, headers, footers)."""
+    n = 0
+    if swaps:
+        for p in _all_paragraphs(doc):
+            for old, new in swaps:
+                if old in p.text:
+                    n += _replace_across_runs(p, old, new)
+    return n
 
 
 def long_date(iso_or_date):
@@ -178,6 +284,8 @@ def fill_agreement(template, data, out_path, sign_date=None, signature_png=None)
     from docx.shared import Inches
 
     doc = Document(str(template))
+    swaps = role_swaps(template, data.get("role"))
+    swapped = swap_role_wording(doc, swaps)
     values = {
         "effective_date": long_date(data.get("effective_date")),
         "region": data.get("region", ""),
@@ -261,6 +369,8 @@ def fill_agreement(template, data, out_path, sign_date=None, signature_png=None)
         para.add_run().add_picture(io.BytesIO(signature_png), width=Inches(1.9))
         filled.append("signature")
 
+    if swapped:
+        filled.append("role_wording")
     cp = doc.core_properties
     cp.author = "Dupoin Markets Ltd"
     cp.last_modified_by = "DW Calculator"

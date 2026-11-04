@@ -202,7 +202,7 @@ assert r.status_code == 302
 a = req(rid)
 assert a["status"] == "approved", a
 assert a["email_note"] == "Email not sent: SMTP not configured"
-assert CONVERTED == ["pif.docx", "agreement.docx"]           # PIF (admin only) + agreement
+assert CONVERTED == ["pif.docx", "agreement.docx"], (CONVERTED, a["pif_note"])          # PIF (admin only) + agreement
 t1 = latest_token(rid)
 assert len(t1["token"]) >= 43                                  # token_urlsafe(32)
 assert abs((t1["expires_at"] - t1["created_at"]) - 14 * 86400) < 5
@@ -215,12 +215,27 @@ assert len(rows("SELECT * FROM tokens WHERE request_id=?", rid)) == 1
 audit = admin.get(f"/approval/admin/{rid}").get_data(as_text=True)
 assert "WIB" in audit and "boss" in audit and "Submitted" in audit
 
-# -------------------------------------------------- role with no template
+# ------------------------- role with no own template: borrowed one (v1.37)
+pending_page = admin.get(f"/approval/admin/{xss_rid}").get_data(as_text=True)
+assert "template sementara, dari RM" in pending_page and "RM.docx" in pending_page
 r = admin.post(f"/approval/admin/{xss_rid}/approve", data={"csrf_token": atok})
 b = req(xss_rid)
-assert b["status"] == "approved" and b["agreement_note"] == "Agreement template for NCIB not ready yet"
-assert not rows("SELECT * FROM tokens WHERE request_id=?", xss_rid)
-assert "Agreement template for NCIB not ready yet" in admin.get(f"/approval/admin/{xss_rid}").get_data(as_text=True)
+assert b["status"] == "approved" and not b["agreement_note"], b["agreement_note"]
+xss_tok = rows("SELECT token FROM tokens WHERE request_id=?", xss_rid)
+assert len(xss_tok) == 1                                         # signing link made
+from docx import Document  # noqa: E402
+ncib_doc = Document(str(PA.SETTINGS.files / b["agreement_docx"]))
+ncib_text = "\n".join(pp.text for pp in ncib_doc.paragraphs)
+assert "referred to as “NCIB”" in ncib_text and "Relationship Manager" not in ncib_text
+ncib_admin = admin.get(f"/approval/admin/{xss_rid}").get_data(as_text=True)
+assert 'id="template-note"' in ncib_admin and "Template sementara, dari RM.docx" in ncib_admin
+assert any("temporary template for NCIB" in (a_["note"] or "") for a_ in PA.STORE.audit(xss_rid))
+# never shown to the partner; the requester's page has no admin note either
+sign_body = anon.get(f"/sign/{xss_tok[0][0]}").get_data(as_text=True)
+for word in ("sementara", "RM.docx", "temporary", "Relationship Manager", "template-note"):
+    assert word not in sign_body, word
+mine_body = sales.get(f"/approval/{xss_rid}").get_data(as_text=True)
+assert "sementara" not in mine_body and "template-note" not in mine_body
 assert req(xss_rid)["pif_pdf"]                    # PIF does not need the agreement template
 
 # ------------------------------------- PIF: Agreement only, admin only (v1.35)
@@ -259,7 +274,7 @@ assert admin.post(f"/approval/admin/{rid}/pif", data={"csrf_token": atok}).statu
 assert CONVERTED == ["pif.docx"]
 assert admin.post(f"/approval/admin/{rid}/pif", data={}).status_code in (400, 403)
 
-# --------------------------------- Special Terms: MIB only, no MIB template yet
+# ------------- Special Terms: MIB only, agreement from the borrowed template (v1.37)
 r = sales.post("/approval/new", data={**AGREEMENT, "request_type": "special_terms", "role": "CM",
                                       "csrf_token": csrf(sales), "confirmed": "1"})
 assert r.status_code == 400 and "Special Terms requests are for the MIB role only." in r.get_data(as_text=True)
@@ -268,8 +283,14 @@ st_rid = submit(sales, {**AGREEMENT, "request_type": "special_terms", "role": "M
 CONVERTED.clear()
 admin.post(f"/approval/admin/{st_rid}/approve", data={"csrf_token": atok})
 st = req(st_rid)
-assert st["status"] == "approved" and st["agreement_note"] == "Agreement template for MIB not ready yet"
-assert st["request_type"] == "special_terms" and not st["pif_pdf"] and CONVERTED == []   # no PIF
+assert st["status"] == "approved" and not st["agreement_note"], st["agreement_note"]
+assert st["request_type"] == "special_terms" and not st["pif_pdf"]
+assert CONVERTED == ["agreement.docx"]                       # agreement, no PIF
+assert st["agreement_pdf"] == f"{st_rid:06d}/agreement.pdf"
+assert len(rows("SELECT * FROM tokens WHERE request_id=?", st_rid)) == 1   # signing link
+mib_text = "\n".join(pp.text for pp in Document(str(PA.SETTINGS.files / st["agreement_docx"])).paragraphs)
+assert "referred to as “Master IB”" in mib_text and "Special Partner" in mib_text
+assert "Relationship Manager" not in mib_text
 assert admin.get(f"/approval/admin/{st_rid}/file/pif_pdf").status_code == 404
 assert admin.post(f"/approval/admin/{st_rid}/pif", data={"csrf_token": atok}).status_code == 409
 assert "Special Terms" in admin.get(f"/approval/admin/{st_rid}").get_data(as_text=True)

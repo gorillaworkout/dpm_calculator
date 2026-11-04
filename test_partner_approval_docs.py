@@ -165,8 +165,73 @@ assert "New Position: MIB" in s and "Type of Downgrade: Downgrade CRM Role" in s
 assert docs.template_for(CM.parent, "CM") == CM
 for role in ("BM", "RM"):                                          # v1.35
     assert docs.template_for(CM.parent, role) == CM.parent / f"{role}.docx", role
-for role in ("MIB", "NCIB", "RD", "PIF"):                         # PIF is not an agreement
-    assert docs.template_for(CM.parent, role) is None, role
+assert docs.template_for(CM.parent, "PIF") is None                # PIF is not an agreement
+
+# -------------------------- roles without their own file borrow one (v1.37)
+import shutil as _sh  # noqa: E402
+import tempfile as _tf  # noqa: E402
+EXPECT_FALLBACK = {"MIB": "RM", "NCIB": "RM", "RD": "CM"}
+assert docs.TEMPLATE_FALLBACK == EXPECT_FALLBACK
+for role, src in EXPECT_FALLBACK.items():
+    assert docs.template_info(CM.parent, role) == (CM.parent / f"{src}.docx", src), role
+    assert docs.template_for(CM.parent, role) == CM.parent / f"{src}.docx", role
+for role in ("CM", "BM", "RM"):                                     # own files, not borrowed
+    assert docs.template_info(CM.parent, role)[1] is None, role
+assert docs.template_info(CM.parent, "PIF") == (None, None)
+assert docs.template_info(CM.parent, "XYZ") == (None, None)
+# a real MIB.docx / NCIB.docx / RD.docx wins as soon as it is in the folder
+tmpl = Path(_tf.mkdtemp())
+for n in ("CM", "BM", "RM"):
+    _sh.copy(CM.parent / f"{n}.docx", tmpl / f"{n}.docx")
+_sh.copy(CM.parent / "BM.docx", tmpl / "MIB.docx")               # stand-in "real" MIB file
+assert docs.template_info(tmpl, "MIB") == (tmpl / "MIB.docx", None)
+assert docs.template_info(tmpl, "NCIB") == (tmpl / "RM.docx", "RM")
+assert docs.role_swaps(tmpl / "MIB.docx", "MIB") == []              # own file: no rewording
+# nothing to borrow -> None, as before
+(tmpl / "RM.docx").unlink()
+assert docs.template_info(tmpl, "NCIB") == (None, None)
+
+ROLE_DATA = {"partner_name": "Dummy Partner", "region": "Testland", "passport": "X0000000",
+             "address": "1 Example Street", "uid": "999999", "effective_date": "2026-11-01"}
+
+
+def _filled_text(role, template=None):
+    template = template or docs.template_for(CM.parent, role)
+    out = Path(_tf.mkdtemp()) / "a.docx"
+    filled = docs.fill_agreement(template, {**ROLE_DATA, "role": role}, out)
+    d = Document(str(out))
+    return filled, "\n".join(p_.text for p_ in docs._all_paragraphs(d)), d
+
+
+from docx import Document  # noqa: E402
+for role, title in (("MIB", "Master IB"), ("NCIB", "NCIB")):
+    filled, text, d = _filled_text(role)
+    assert "role_wording" in filled and "uid" in filled and "partner_name" in filled, filled
+    assert "Relationship Manager" not in text and not re.search(r"\bRM\b", text), role
+    assert f"referred to as “{title}”" in text and f"SIGNED by the {title}" in text, role
+    assert f"an {role}'s customer" in text and f"disbursed to the {role} prior" in text, role
+    assert "Dummy Partner" in text and "999999" in text
+    heads = [c.text.strip() for c in docs._signature_table(d)[0].rows[0].cells]
+    assert heads[0] == "SIGNED by the Company" and heads[-1] == f"SIGNED by the {title}", heads
+filled, text, d = _filled_text("RD")
+assert "Country Manager" not in text and not re.search(r"\bCM\b", text)
+assert "referred to as “Regional Director”" in text and "SIGNED by the Regional Director" in text
+assert "The Regional Director will report directly to the Director of Business Development." in text
+assert "report directly to the Regional Director" not in text
+assert "disbursed to the RD prior" in text
+# subordinate wording in CM.docx is about other roles and stays as written
+assert "Support Relationship Managers and Master IBs" in text and "the part of the RM/BM" in text
+# the real roles keep their own template wording untouched
+for role, title in (("CM", "Country Manager"), ("BM", "Business Manager"), ("RM", "Relationship Manager")):
+    filled, text, _ = _filled_text(role)
+    assert "role_wording" not in filled and f"referred to as “{title}”" in text, role
+# a label split over several runs is still replaced, keeping the first run's format
+doc = Document()
+para = doc.add_paragraph()
+for chunk in ("the Relat", "ionship Man", "ager is"):
+    para.add_run(chunk).bold = True
+assert docs.swap_role_wording(doc, [("Relationship Manager", "Master IB")]) == 1
+assert para.text == "the Master IB is" and all(r.bold for r in para.runs if r.text)
 assert docs.template_for(CM.parent, "../CM") is None
 
 # The committed template is blank and has no staff names in its metadata.

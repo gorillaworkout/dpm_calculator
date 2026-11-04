@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.36 · 2026-11-03`.
+required) show the running version, for example `DW Calculator v1.37 · 2026-11-04`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.36)
+### Tests (`test_*.py`, v1.37)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -948,11 +948,15 @@ one marks it Completed.
   `/kvb`. Admin pages and actions are for admins only.
 - **Agreement templates:** `partner_approval/agreement_templates/<ROLE>.docx`.
   `CM.docx`, `BM.docx` and `RM.docx` exist (v1.35). MIB, NCIB and RD have no
-  template yet: approving one still works (the request is Approved, not
-  blocked), with the note "Agreement template for <role> not ready yet", no
-  signing link and a **Retry agreement** button for when the file is added.
-  Special Terms is MIB-only, so a Special Terms approval makes no agreement
-  until `MIB.docx` exists. See `agreement_templates/README.md`.
+  file yet, so since v1.37 they **borrow** one (`TEMPLATE_FALLBACK` in
+  `partner_approval/docs.py`): MIB → RM, NCIB → RM, RD → CM. The role title in
+  the agreement is changed to the real role (Master IB / NCIB / Regional
+  Director), so approving makes an agreement and a signing link as usual,
+  Special Terms (MIB) included. Admins see "template sementara (dari RM/CM)";
+  the partner never does. A real `MIB.docx` / `NCIB.docx` / `RD.docx` is used
+  automatically as soon as it is in the folder. If no template at all is
+  found, the old "not ready yet" note and **Retry agreement** button remain.
+  See `agreement_templates/README.md`.
 - **The company signature column is never filled**, not even after the partner
   signs. The partner's signature goes in the "SIGNED by the <role>" cell
   (Country Manager / Business Manager / Relationship Manager).
