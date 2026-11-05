@@ -85,9 +85,10 @@ try:
     r = c.post("/upload/begin", data={"bytes": str(100 * 1024 * 1024)})
     assert r.status_code == 507, (r.status_code, r.data)
     low = r.data.lower()
-    assert b"temporary storage" in low or b"penyimpanan sementara" in low
-    assert b"try again" in low or b"coba lagi" in low
-    assert b"vpn" not in low or b"bukan masalah vpn" in low
+    assert b"temporary storage" in low or b"busy processing another upload" in low
+    assert b"start the upload again" in low or b"try again" in low or b"wait" in low
+    assert b"vpn" not in low
+    assert b"penyimpanan" not in low
     assert {p.name for p in (JOBS / "staging").iterdir()} == before
 finally:
     chunked._write_manifest = original_write_manifest
@@ -264,7 +265,7 @@ chunked.shutil.disk_usage = _hampir_penuh
 try:
     r = c.post("/tool/segregate", data={"upload_id": uid}, content_type="multipart/form-data")
     assert r.status_code == 400, r.status_code
-    assert b"was not deleted" in r.data
+    assert b"was not deleted" in r.data or b"The upload was not deleted" in r.data
     assert part.is_file() and part.read_bytes() == payload
     assert stage_dir.is_dir()
 finally:

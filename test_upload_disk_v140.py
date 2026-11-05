@@ -88,7 +88,8 @@ assert r.status_code in (200, 507), r.data
 body = r.get_json()
 assert "need" in body and "free" in body and "ok" in body and "message" in body
 assert "max_part" in body
-assert "Perlu" in body["message"] and "Need" in body["message"]
+assert "Need" in body["message"] or "Enough" in body["message"]
+assert "Perlu" not in body["message"] and "Cukup" not in body["message"]
 assert body["max_part"] == 52428800
 assert body["total"] == 104857600
 print("OK preflight JSON", {k: body[k] for k in ("ok", "need", "free", "max_part")})
@@ -114,6 +115,7 @@ with mock.patch("chunked.shutil.disk_usage", return_value=FakeUsage(100)):
     info = chunked.ringkas_preflight(S, 100, max_part=part)
     assert info["ok"] is False
     assert "VPN" not in info["message"]
+    assert "Perlu" not in info["message"]
     r = c.get("/upload/preflight?bytes=" + str(S) + "&max_part=" + str(part))
     # disk_usage is patched only for ringkas calls above; re-patch for HTTP
 with mock.patch("chunked.shutil.disk_usage", return_value=FakeUsage(100)):
@@ -122,8 +124,9 @@ with mock.patch("chunked.shutil.disk_usage", return_value=FakeUsage(100)):
     j = r.get_json()
     assert j["ok"] is False
     assert "VPN" not in j["message"]
-    assert "Perlu" in j["message"]
-print("OK preflight 507 bilingual, no VPN")
+    assert "Perlu" not in j["message"]
+    assert "Need" in j["message"] or j.get("reason") in ("busy", "too_big", "disk")
+print("OK preflight 507 English-only, no VPN")
 
 # begin with not enough space: 507 + freed reported, and sweep was called
 calls = {"sweep": 0}
@@ -141,9 +144,10 @@ with mock.patch("chunked.sweep", side_effect=tracking_sweep), \
     j = r.get_json()
     assert "error" in j and "freed" in j
     err = j["error"]
-    assert "bukan masalah vpn" in err.lower() or "not a vpn" in err.lower(), err
+    assert "vpn" not in err.lower(), err
     assert "WARP" not in err
     assert "firewall" not in err.lower()
+    assert "Perlu" not in err and "Ruang" not in err
 assert calls["sweep"] >= 1, calls
 print("OK begin 507 after sweep, freed reported")
 
@@ -153,10 +157,11 @@ with app.app_context():
 assert resp[1] == 507
 data = resp[0].get_json()
 assert data["disk"] is True
-assert "vpn" in data["error"].lower() and "bukan masalah vpn" in data["error"].lower()
+assert "vpn" not in data["error"].lower()
 assert "firewall" not in data["error"].lower()
+assert "Not enough temporary storage" in data["error"] or "busy" in data["error"].lower()
 assert data["freed"] == 123
-print("OK mid-chunk _storage_error bilingual + freed")
+print("OK mid-chunk _storage_error English + freed")
 
 # ---- multi-part == concatenated output + delete-after-parse ----
 with tempfile.TemporaryDirectory() as td:
@@ -247,7 +252,9 @@ print(f"OK synthetic peak need={need / (1024**2):.1f} MiB measured")
 html = Path("templates/tool.html").read_text()
 assert "r.status !== 507" in html or "r.status === 507" in html
 assert "diskFull" in html
-assert "bukan masalah VPN" in html
+assert "bukan masalah VPN" not in html
+assert "Ini bukan masalah" not in html
+assert "Please wait a few minutes" in Path("chunked.py").read_text() or "server is busy" in Path("chunked.py").read_text().lower()
 assert "upload-split-hint" in html
 assert "disk-preflight-status" in html
 assert "/upload/preflight" in html
@@ -263,7 +270,9 @@ info_single = chunked.ringkas_preflight(S, free_113, max_part=S)
 assert info_single["ok"] is False
 assert info_single["max_part_fit"] > 0
 assert info_single["max_part_fit"] < S
-assert "Split into parts" in info_single["message_en"] or "Pecah file" in info_single["message_id"]
+assert "Split into parts" in info_single["message"]
+assert info_single.get("reason") == "too_big"
+assert "Pecah" not in info_single["message"]
 print(f"OK max_part_fit={info_single['max_part_fit'] / _GIB:.3f} GiB for 11 GiB on 11.3 GB free")
 
 # ---- interleaved HTTP ingest: peak on disk never exceeds preflight ----
@@ -367,4 +376,28 @@ assert "/upload/ingest" in html
 assert "ingestPart" in html
 assert "max_part_fit" in Path("chunked.py").read_text() or True
 print("OK tool.html interleave + ingest")
+
+# ---- busy vs too_big classification ----
+busy_info = chunked.ringkas_preflight(S, 100, max_part=part, held=20 * _GIB)
+assert busy_info["ok"] is False
+assert busy_info["reason"] == "busy", busy_info
+assert "Please wait a few minutes" in busy_info["message"]
+assert "VPN" not in busy_info["message"]
+print("OK busy reason when others hold disk")
+
+too_big = chunked.ringkas_preflight(S, free_113, max_part=S, held=0)
+assert too_big["reason"] == "too_big", too_big
+assert "Split into parts" in too_big["message"]
+assert chunked.MSG_SERVER_BUSY.startswith("The server is busy")
+print("OK too_big split hint English")
+
+# ---- no resume wiring on this branch ----
+html = Path("templates/tool.html").read_text()
+assert "RESUME_KEY" not in html
+assert "localStorage" not in html or "upload_resume" not in html.lower()
+assert "Lanjutkan" not in html
+assert "pagehide" in html and "/upload/discard" in html
+assert "15 / 60" in Path("chunked.py").read_text() or "STAGE_MAX_AGE_HOURS = 0.25" in Path("chunked.py").read_text() or "15 / 60" in Path("chunked.py").read_text()
+print("OK no-resume + pagehide discard + short TTL")
+
 print("ALL test_upload_disk_v140 OK (extended)")

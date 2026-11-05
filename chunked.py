@@ -52,8 +52,9 @@ from upload_limits import MAX_FILES
 
 CHUNK_SUFFIXES = (".csv", ".xlsx", ".xlsm")
 # Idle time since the last chunk, not the age of the staging directory.
-# A 10 GB upload can take several hours as long as chunks keep arriving.
-STAGE_MAX_AGE_HOURS = 1
+# With no resume, abandoned staging is discarded promptly (same as cleanup's
+# UPLOAD_IDLE_SECONDS, default 15 minutes).
+STAGE_MAX_AGE_HOURS = 15 / 60
 _GIB = 1024 * 1024 * 1024
 # Deal-index overhead measured on this code (journal off, no sqlite temp file,
 # workbook deleted as soon as it is inside the zip — the index and the workbook
@@ -133,7 +134,16 @@ def max_part_fit(ukuran, bebas, freed=0, staged=0):
     return max(0, efektif - ekstra)
 
 
-def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None):
+MSG_SERVER_BUSY = (
+    "The server is busy processing another upload right now. "
+    "Please wait a few minutes and start the upload again."
+)
+
+
+def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None, busy=False):
+    """English-only disk shortage text. When busy, prefer the wait message."""
+    if busy:
+        return MSG_SERVER_BUSY
     perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part)
     if max_part is None:
         max_part = ukuran
@@ -146,31 +156,22 @@ def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None):
     persen = f"{OVERHEAD_PER_BYTE * 100:.2f}%"
     if sudah_tersimpan:
         return (
-            f"Ruang disk tidak cukup untuk memproses upload ini. "
             f"Not enough free disk space to process this upload. "
-            f"File sudah di server / The file is already on the server. "
-            f"Indeks deal butuh sekitar {gb(perlu)} lagi "
-            f"({persen} dari total, plus {gb(MARGIN_DISK)} untuk hasil) / "
+            f"The file is already on the server. "
             f"The deal index needs about {gb(perlu)} more "
             f"({persen} of the total, plus {gb(MARGIN_DISK)} for the result). "
-            f"Hanya {gb(bebas)} yang kosong / Only {gb(bebas)} is free. "
-            f"Upload tidak dihapus / The upload was not deleted. "
-            f"Ini bukan masalah VPN/internet — ruang disk penuh. / "
-            f"This is not a VPN or internet problem — the disk is full."
+            f"Only {gb(bebas)} is free. "
+            f"The upload was not deleted. "
+            f"Please wait if another upload is using the server, then start the upload again."
         )
     return (
-        f"Ruang disk tidak cukup untuk upload ini. "
         f"Not enough free disk space for this upload. "
-        f"Perlu sekitar {gb(perlu)} kosong "
-        f"(bagian terbesar {gb(max_part)} + indeks ~{persen} dari total "
-        f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin) / "
         f"About {gb(perlu)} free is needed "
-        f"(largest part {gb(max_part)} + index ~{persen} of total "
+        f"(largest part {gb(max_part)} GB + index ~{persen} of total "
         f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin). "
-        f"Hanya {gb(bebas)} yang kosong / Only {gb(bebas)} is free. "
-        f"Tidak ada file yang disimpan / No file was saved. "
-        f"Ini bukan masalah VPN/internet — ruang disk penuh. / "
-        f"This is not a VPN or internet problem — the disk is full."
+        f"Only {gb(bebas)} is free. No file was saved. "
+        f"Please wait if another upload is using the server, or split into smaller parts, "
+        f"then start the upload again."
     )
 
 
@@ -179,16 +180,18 @@ def teks_dibersihkan(freed):
             f"({freed / _GIB:.1f} GB freed); nothing else can be removed right now.")
 
 
-def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None, max_part=None):
+def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None, max_part=None, busy=False):
     """None when the job volume can hold the run, otherwise a message for the user."""
     bebas = shutil.disk_usage(path).free
     if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part):
-        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan, max_part=max_part)
+        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan, max_part=max_part, busy=busy)
+        if busy:
+            return pesan
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=None):
+def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=None, busy=False):
     """Room check once staged bytes are already on this volume.
 
     ukuran_baru still has to be written (a small form upload). Staged bytes
@@ -200,18 +203,26 @@ def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=Non
     perlu = ruang_dibutuhkan(total, sudah_tersimpan=True, max_part=max_part) + max(0, ukuran_baru)
     bebas = shutil.disk_usage(path).free
     if bebas < perlu:
-        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0, max_part=max_part)
+        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0, max_part=max_part,
+                           busy=busy)
+        if busy:
+            return pesan
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, staged=0):
-    """JSON-ready preflight numbers and bilingual message.
+def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, staged=0, held=0):
+    """JSON-ready preflight numbers and English-only message.
 
     Peak is modelled over the whole interleaved lifecycle (upload one part,
-    ingest+delete, repeat, then zip): max_part + index(S) + margin. When the
-    caller did not split (max_part == total) and that peak does not fit, the
-    message suggests splitting and quotes max_part_fit for the current free space.
+    ingest+delete, repeat, then zip): max_part + index(S) + margin.
+
+    When the peak does not fit:
+      * held > 0 and the peak WOULD fit once that other work frees disk -> reason
+        "busy" (wait and start again).
+      * unsplit file that is too big even for the idle free space -> reason
+        "too_big" with a split hint quoting max_part_fit (~8 GB typical).
+      * otherwise a plain not-enough message (English only; no VPN advice).
     """
     if max_part is None:
         max_part = ukuran
@@ -220,43 +231,60 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
     # Count bytes already staged for this check so a leftover upload does not
     # look like free space the new run can spend twice.
     efektif = max(0, bebas + max(0, int(freed)) - max(0, int(staged)))
+    held = max(0, int(held))
     ok = ukuran <= max_upload and perlu <= efektif
     fit = max_part_fit(ukuran, bebas, freed=freed, staged=staged)
+    idle_free = efektif + held
+    fit_idle = max(0, idle_free - int(ukuran * OVERHEAD_PER_BYTE) - MARGIN_DISK)
+
     def gb(n):
         return round(n / _GIB, 2)
-    msg_id = (
-        f"{'Cukup' if ok else 'Tidak cukup'} ruang disk. "
-        f"Perlu {gb(perlu)} GB (bagian terbesar {gb(max_part)} + indeks "
-        f"{OVERHEAD_PER_BYTE*100:.2f}% dari total {gb(ukuran)} + margin "
-        f"{gb(MARGIN_DISK)}). Kosong {gb(efektif)} GB. Batas upload "
-        f"{gb(max_upload)} GB."
-    )
-    msg_en = (
-        f"{'Enough' if ok else 'Not enough'} free disk. "
-        f"Need {gb(perlu)} GB (largest part {gb(max_part)} + index "
-        f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} + margin "
-        f"{gb(MARGIN_DISK)}). Free {gb(efektif)} GB. Upload limit "
-        f"{gb(max_upload)} GB."
-    )
-    # Single-file (or unsplit) case that does not fit: tell them to split.
-    if (not ok) and max_part >= ukuran and ukuran > 0 and fit > 0 and fit < ukuran:
-        msg_id += (
-            f" Pecah file menjadi beberapa bagian, masing-masing paling besar "
-            f"{gb(fit)} GB agar muat di ruang kosong saat ini."
+
+    reason = "ok"
+    if ok:
+        msg = (
+            f"Enough free disk. Need {gb(perlu)} GB (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Free {gb(efektif)} GB. Upload limit "
+            f"{gb(max_upload)} GB."
         )
-        msg_en += (
-            f" Split into parts of at most {gb(fit)} GB each so the peak fits "
-            f"the free space available now."
+    elif held > 0 and perlu <= idle_free:
+        reason = "busy"
+        msg = MSG_SERVER_BUSY
+    elif max_part >= ukuran and ukuran > 0 and fit_idle > 0 and fit_idle < ukuran:
+        reason = "too_big"
+        msg = (
+            f"Not enough free disk for this file as one upload. "
+            f"Need about {gb(perlu)} GB free (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Only {gb(efektif)} GB is free now. "
+            f"Split into parts of at most {gb(fit_idle)} GB each, select every part "
+            f"together, then start the upload again."
         )
-    elif (not ok) and max_part >= ukuran and ukuran > 0 and fit <= 0:
-        msg_id += (
-            " Ruang kosong terlalu kecil bahkan untuk satu bagian kecil "
-            f"(indeks + margin saja sudah {gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
+    elif held > 0:
+        reason = "busy"
+        msg = MSG_SERVER_BUSY
+    else:
+        reason = "disk"
+        msg = (
+            f"Not enough free disk. Need {gb(perlu)} GB (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Free {gb(efektif)} GB. Upload limit "
+            f"{gb(max_upload)} GB."
         )
-        msg_en += (
-            " Free space is too small even for a tiny part "
-            f"(index + margin alone need {gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
-        )
+        if max_part >= ukuran and ukuran > 0 and fit <= 0:
+            msg += (
+                " Free space is too small even for a tiny part "
+                f"(index + margin alone need "
+                f"{gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
+            )
+        elif max_part >= ukuran and ukuran > 0 and 0 < fit < ukuran:
+            reason = "too_big"
+            msg += (
+                f" Split into parts of at most {gb(fit)} GB each so the peak fits "
+                f"the free space available now."
+            )
+
     return {
         "ok": ok,
         "need": perlu,
@@ -264,28 +292,29 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
         "free_raw": bebas,
         "max_upload": max_upload,
         "max_part": max_part,
-        "max_part_fit": fit,
+        "max_part_fit": fit if reason != "too_big" else max(fit, fit_idle),
         "total": ukuran,
         "freed": max(0, int(freed)),
         "staged": max(0, int(staged)),
-        "message": msg_id + " / " + msg_en,
-        "message_id": msg_id,
-        "message_en": msg_en,
+        "held": held,
+        "reason": reason,
+        "message": msg,
+        "message_en": msg,
     }
 
-def _storage_error(freed=None):
-    pesan = (
-        "Ruang penyimpanan sementara tidak cukup di server. "
-        "Not enough temporary storage on the server for this upload. "
-        "Tidak ada file yang disimpan / No file was saved. "
-        "Ini bukan masalah VPN/internet — ruang disk penuh. "
-        "This is not a VPN or internet problem — the disk is full. "
-        "Coba lagi setelah upload lain selesai, atau hubungi admin. "
-        "Try again after the previous upload finishes, or contact the administrator."
-    )
-    if freed is not None:
-        pesan += teks_dibersihkan(freed)
-    body = {"error": pesan, "disk": True}
+def _storage_error(freed=None, busy=False):
+    if busy:
+        pesan = MSG_SERVER_BUSY
+    else:
+        pesan = (
+            "Not enough temporary storage on the server for this upload. "
+            "No file was saved. "
+            "Please wait a few minutes if another upload is using the server, "
+            "then start the upload again."
+        )
+        if freed is not None:
+            pesan += teks_dibersihkan(freed)
+    body = {"error": pesan, "disk": True, "reason": "busy" if busy else "disk"}
     if freed is not None:
         body["freed"] = freed
     return jsonify(body), 507
@@ -523,17 +552,17 @@ def pesan_antrean(blockers, user, ahead=()):
         nama = sorted({b["user"] for b in lain if b.get("user")})
         apa = "; ".join(sorted({(f"{b['user']}: " if b.get('user') else "") + _apa(b) for b in lain}))
         if nama:
-            pesan = (f"Server sedang dipakai oleh {', '.join(nama)}. The server is currently "
-                     f"processing another user's file ({apa}). Your run is queued and will start "
-                     "automatically when it finishes.")
+            pesan = (f"The server is currently processing another user's file ({apa}). "
+                     "Your run is queued and will start automatically when it finishes.")
         else:
             pesan = ("The server is currently processing another user's file. Your run is "
                      "queued and will start automatically when it finishes.")
         return pesan, blocked_by, job_url
     depan = sorted({u for u in ahead if u and u != user})
     if depan:
-        return (f"Server sedang dipakai oleh {', '.join(depan)}. Waiting behind their queued "
-                "upload; yours starts automatically after it.", blocked_by, job_url)
+        return (f"The server is currently processing another user's queued upload "
+                f"({', '.join(depan)}). Yours starts automatically after it.",
+                blocked_by, job_url)
     return ("The server is currently processing another user's file. Your run is queued and "
             "will start automatically when it finishes.", blocked_by, job_url)
 
@@ -562,6 +591,36 @@ def _sudah_ada(entry, seq, data, sidik, target):
     with open(target, "rb") as fh:
         fh.seek(-len(data), 2)
         return fh.read() == data
+
+
+
+def bytes_held_by_others(jobs_dir, user=None, keep_upload=None):
+    """Disk bytes held by other users' active staging and locked jobs.
+
+    Used to tell 'server busy, wait' apart from 'this file is too big even when
+    the server is idle'. The caller's own staging is counted separately as
+    `staged` and is not included here.
+    """
+    held = 0
+    root = Path(jobs_dir) / "staging"
+    if root.is_dir():
+        for stage in root.iterdir():
+            if not stage.is_dir() or stage.name == keep_upload:
+                continue
+            m = _read_manifest(stage) or {}
+            owner = m.get("user")
+            if user and owner == user:
+                continue
+            try:
+                held += sum(f.stat().st_size for f in stage.rglob("*") if f.is_file())
+            except OSError:
+                pass
+    for job_id in cleanup.active_jobs(jobs_dir):
+        info = cleanup._read_json(Path(jobs_dir) / f"{job_id}.json") or {}
+        if user and info.get("user") == user:
+            continue
+        held += cleanup._size(Path(jobs_dir) / job_id)
+    return held
 
 
 def register(app, jobs_dir):
@@ -647,7 +706,12 @@ def register(app, jobs_dir):
                     except OSError:
                         pass
         bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
-        info = ringkas_preflight(requested, bebas, max_part=max_part, staged=staged)
+        held = bytes_held_by_others(jobs_dir, user=user)
+        # Also treat live blockers (fresh heartbeat / locked job) as "busy" even
+        # when their on-disk size is still small — another upload is using the server.
+        if held <= 0 and cleanup.all_blockers(jobs_dir):
+            held = max(held, 1)
+        info = ringkas_preflight(requested, bebas, max_part=max_part, staged=staged, held=held)
         return jsonify(info), (200 if info["ok"] else 507)
 
     @app.post("/upload/begin")
@@ -712,8 +776,13 @@ def register(app, jobs_dir):
             cleanup.queue_leave(jobs_dir, ticket)
             if salah:
                 bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
-                info = ringkas_preflight(requested, bebas, max_part=max_part, freed=freed)
-                return jsonify({"error": salah, "freed": freed, **info}), 507
+                held = bytes_held_by_others(jobs_dir, user=user)
+                if held <= 0 and blockers:
+                    held = max(held, 1)
+                info = ringkas_preflight(requested, bebas, max_part=max_part, freed=freed, held=held)
+                err = info["message"] if info.get("reason") in ("busy", "too_big") else salah
+                # Prefer English classified message; strip bilingual leftovers from cek_ruang.
+                return jsonify({"error": err, "freed": freed, **info}), 507
             upload_id = uuid.uuid4().hex
             stage = _stage_root(jobs_dir) / upload_id
             try:
@@ -726,7 +795,8 @@ def register(app, jobs_dir):
                                         "last_chunk": sekarang})
             except OSError:
                 shutil.rmtree(stage, ignore_errors=True)
-                return _storage_error()
+                busy = bool(cleanup.all_blockers(jobs_dir))
+                return _storage_error(busy=busy)
         return jsonify({"id": upload_id, "freed": freed})
 
     @app.post("/upload/queue/leave")
@@ -916,5 +986,6 @@ def register(app, jobs_dir):
                 _write_manifest(stage, manifest)
             except OSError:
                 shutil.rmtree(stage, ignore_errors=True)
-                return _storage_error()
+                busy = bool(cleanup.all_blockers(jobs_dir))
+                return _storage_error(busy=busy)
             return jsonify({"received": manifest["bytes"]})

@@ -31,7 +31,7 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
-    <p class="hint upload-split-hint" id="upload-split-hint">File besar boleh dipecah per bulan (export MT5/MT4 per bulan), lalu pilih semua bagian sekaligus — hasilnya sama seperti satu file digabung. / Large exports can be split by month; select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total.</p>
+    <p class="hint upload-split-hint" id="upload-split-hint">Large exports can be split by month (MT5/MT4 monthly export); select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total (max part ~8 GB).</p>
     <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="mt4-accounts">MT4 account types <span class="opt">— required when any MT4 file is uploaded</span></label>
     <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
@@ -52,7 +52,7 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
-    <p class="hint upload-split-hint" id="upload-split-hint">File besar boleh dipecah per bulan (export MT5 per bulan), lalu pilih semua bagian sekaligus — hasilnya sama seperti satu file digabung. / Large exports can be split by month; select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total.</p>
+    <p class="hint upload-split-hint" id="upload-split-hint">Large exports can be split by month (MT5 monthly export); select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total (max part ~8 GB).</p>
     <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
     <div id="equity-drop" class="dropzone" tabindex="0" role="button">
@@ -198,7 +198,7 @@
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'file-remove repick';
-      b.textContent = 'Pilih ulang file ini / Re-select this file';
+      b.textContent = 'Re-select this file';
       b.setAttribute('aria-label', 'Re-select ' + file.name);
       b.addEventListener('click', function (event) {
         event.stopPropagation();
@@ -445,16 +445,13 @@
     // re-exported, re-downloaded under the same name, or synced by OneDrive after it was
     // picked, every read fails with NotReadableError. Only picking it again helps.
     function unreadableText(name) {
-      return 'File "' + name + '" tidak bisa dibaca browser — file berubah atau diganti setelah dipilih, ' +
-        'masih terbuka di Excel, atau file OneDrive/Google Drive online-only. Tutup file, salin ke folder ' +
-        'lokal, lalu klik "Pilih ulang file ini" dan pilih file itu lagi; file lain tetap terpilih. ' +
-        '(The browser could not read this file: it changed or was replaced after you picked it, is ' +
+      return 'The browser could not read "' + name + '": it changed or was replaced after you picked it, is ' +
         'open/locked in another program, or is an online-only OneDrive/Google Drive file. Close it, copy it ' +
-        'to a local folder, click "Re-select this file" and pick it again; the other files stay selected.)';
+        'to a local folder, click "Re-select this file" and pick it again; the other files stay selected.';
     }
     function unreadableShort(err) {
       return 'tidak bisa dibaca / cannot be read (' + ((err && err.name) || 'Error') + '). ' +
-        'Pilih ulang file ini / Re-select this file.';
+        'Re-select this file.';
     }
     function fileReadError(name, cause) {
       var e = new Error(unreadableText(name));
@@ -525,10 +522,9 @@
     function preflightText(bad) {
       return bad.map(function (b) {
         return b.why === 'changed'
-          ? 'File "' + b.file.name + '" berubah setelah dipilih — pilih ulang file ini. ' +
-            '(This file changed on disk after you picked it; re-select it so the current version is uploaded.)'
+          ? 'File "' + b.file.name + '" changed on disk after you picked it; re-select it so the current version is uploaded.'
           : unreadableText(b.file.name) + ' [' + ((b.err && b.err.name) || 'Error') + ']';
-      }).join(' ') + ' Nothing was uploaded. / Belum ada yang dikirim.';
+      }).join(' ') + ' Nothing was uploaded.';
     }
     function isJson(r) {
       var ct = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
@@ -653,7 +649,7 @@
         return (context && context.file ? 'Upload stopped at file ' + context.fileIndex + ' of ' +
           context.fileCount + ', chunk ' + context.chunk + ' of ' + context.chunks + '. ' : '') +
           err.message + ' Nothing more was sent; the files already uploaded in this run were discarded. ' +
-          'After re-selecting, press Run again. / Setelah pilih ulang, tekan Run lagi.' + details;
+          'After re-selecting, press Run again.' + details;
       }
       if (err && err.sessionExpired) {
         return 'Session expired — please sign in again. ' + err.message +
@@ -667,10 +663,12 @@
       var diskish = (err && (err.diskFull || err.name === 'HTTP 507')) ||
         (err && err.message && /free disk|ruang disk|temporary storage|Not enough free disk/i.test(err.message));
       if (diskish) {
-        return where + (err && err.message ? err.message + ' ' : '') +
-          'Your selected files are still in the list. Free up space on the server ' +
-          '(or split the export into smaller monthly parts) and press Run again. ' +
-          'Ini bukan masalah VPN/internet. / This is not a VPN or internet problem.' + details;
+        var diskMsg = (err && err.message) ? err.message + ' ' : '';
+        // Prefer the server's classified English message (busy wait / split hint).
+        // Do not add VPN advice for disk errors; partial staging is discarded.
+        return where + diskMsg +
+          'Your selected files are still in the list. Wait a few minutes if the server is busy, ' +
+          'or split into smaller parts, then press Run again to start a fresh upload.' + details;
       }
       var reason = err && err.message && err.message !== 'Failed to fetch' && !/NetworkError|Load failed|network/i.test(err.message) && err.name !== 'TimeoutError'
         ? err.message + ' '
@@ -725,9 +723,10 @@
     }
     var activeContext = null;
     // The staged upload this tab owns until the processing route takes it over.
-    // Closing or leaving the tab discards it at once (best effort), so it neither
-    // holds disk nor waits for the idle cleanup. A page kept in the back/forward
-    // cache (persisted) can come back and resume, so it is left alone.
+    // Closing or leaving the tab discards it at once (best effort), so abandoned
+    // staging neither holds disk nor waits for the idle cleanup. There is no
+    // resume: the user starts the upload again from scratch. A page kept in the
+    // back/forward cache (persisted) is left alone so a soft navigation can continue.
     var pageUpload = null;
     window.addEventListener('pagehide', function (ev) {
       if (!pageUpload || ev.persisted) return;
@@ -937,8 +936,7 @@
       var wrap = document.createElement('div');
       wrap.style.marginTop = '8px';
       wrap.appendChild(repickButton(file, function (fresh) {
-        wrap.textContent = 'Diganti / Replaced: ' + fresh.name + ' (' + size(fresh.size) + '). ' +
-          'Tekan Run lagi / Press Run again.';
+        wrap.textContent = 'Replaced: ' + fresh.name + ' (' + size(fresh.size) + '). Press Run again.';
       }));
       progressDetail.appendChild(wrap);
     }
@@ -1110,7 +1108,7 @@
           }
           pageUpload = null;
           if (err && err.preflight) {
-            updateProgress('Upload not started — re-select the file / pilih ulang file', err.message, 0, 'failed');
+            updateProgress('Upload not started — re-select the file', err.message, 0, 'failed');
             err.preflight.forEach(function (b) { addRepick(b.file); });
             form.b.disabled = false;
             form.b.textContent = 'Run & download result';
