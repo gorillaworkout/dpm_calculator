@@ -167,7 +167,7 @@ def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None, busy=False):
     return (
         f"Not enough free disk space for this upload. "
         f"About {gb(perlu)} free is needed "
-        f"(largest part {gb(max_part)} GB + index ~{persen} of total "
+        f"(largest part {gb(max_part)} + index ~{persen} of total "
         f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin). "
         f"Only {gb(bebas)} is free. No file was saved. "
         f"Please wait if another upload is using the server, or split into smaller parts, "
