@@ -350,6 +350,9 @@ def main():
                 sel.alignment = Alignment(wrap_text=False)
     for kol, w in zip("ABCDEFGHIJ", (10, 24, 10, 12, 13, 15, 12, 14, 34, 60)):
         ws.column_dimensions[kol].width = w
+    # Same 'How to fill rates' box as the KVB template (column L, past A-J).
+    import buat_template_kvb as _btk
+    _btk.tulis_fee_cara_isi(ws, kol_awal=12, baris_awal=3)
     ws.freeze_panes = "A4"
     ws.auto_filter.ref = f"A3:J{r}"
 

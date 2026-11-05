@@ -278,8 +278,10 @@ with tempfile.TemporaryDirectory() as tmp:
 # ------------------------------------------------------- template guides
 import buat_template_kvb as btk  # noqa: E402
 
-assert "3.5%; >5000 3.8%" in btk.FEE_PANDUAN and "WHOLE amount" in btk.FEE_PANDUAN
-assert "Remark is not read" in btk.FEE_PANDUAN
+assert any("3.5%; >5000 3.8%" == a for a, _ in btk.FEE_CARA_ISI)
+assert any("WHOLE amount" in b for _, b in btk.FEE_CARA_ISI)
+assert "Remark is not calculated" in btk.FEE_CATATAN
+assert "How to fill rates" in load_workbook(ROOT / "Template KVB Plus.xlsx")["Handling Fee"]["I1"].value
 guide = _teks(load_workbook(ROOT / "Template KVB Plus.xlsx")["Guide"])
 for s in ("3.5%; >5000 3.8%", "3.5%; >=5000 3.8%", "3.5%; >5k 3.8%; >20k 4%",
           "1.5%+50; >5000 1.2%+50", "Remark is NOT read"):
