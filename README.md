@@ -76,12 +76,16 @@ deploy and restart the app. A missing file shows `version unknown`.
 
 Before chunks start, the browser calls `GET /upload/preflight?bytes=&max_part=`
 (auth required). The response is bilingual (ID + EN) with `need` / `free` /
-largest part, using peak disk = `max(part) + ~20.54% of total + 256 MiB`.
-Deal Segregator can take several monthly export parts in one run; each part is
-parsed then deleted on the server so peak stays near the largest part, and the
-zip matches concatenating the parts first. HTTP 507 (disk full) is never
-retried and never shown as a VPN/internet problem. Stale staging is swept on
-`/upload/begin`.
+`max_part` / `max_part_fit`, using peak disk = `max(part) + ~20.54% of total +
+256 MiB` over the whole lifecycle. Deal Segregator **interleaves** upload and
+ingest: as soon as part *i* finishes uploading, `POST /upload/ingest` parses it
+into a durable job index and deletes the part file, then the browser uploads
+part *i+1*. Peak disk is therefore truly ~max(part)+index+margin at every
+moment (including during upload), not the sum of every part. The final form
+submit only zips the session. A single file that does not fit gets a split
+hint quoting `max_part_fit` for the free space available now. HTTP 507 (disk
+full) is never retried and never shown as a VPN/internet problem. Stale
+staging is swept on `/upload/begin`.
 
 ### Upload log (`/upload/*`)
 

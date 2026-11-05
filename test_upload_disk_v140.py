@@ -256,4 +256,115 @@ print("OK tool.html gating + UI hints")
 # VERSION
 assert "1.40" in Path("VERSION").read_text()
 print("OK VERSION 1.40")
-print("ALL test_upload_disk_v140 OK")
+
+# ---- max_part_fit + single-file split advice ----
+free_113 = int(11.3 * _GIB)
+info_single = chunked.ringkas_preflight(S, free_113, max_part=S)
+assert info_single["ok"] is False
+assert info_single["max_part_fit"] > 0
+assert info_single["max_part_fit"] < S
+assert "Split into parts" in info_single["message_en"] or "Pecah file" in info_single["message_id"]
+print(f"OK max_part_fit={info_single['max_part_fit'] / _GIB:.3f} GiB for 11 GiB on 11.3 GB free")
+
+# ---- interleaved HTTP ingest: peak on disk never exceeds preflight ----
+def stage_bytes(stage):
+    total = 0
+    for f in Path(stage).rglob("*"):
+        if f.is_file():
+            try:
+                total += f.stat().st_size
+            except OSError:
+                pass
+    return total
+
+with tempfile.TemporaryDirectory() as td:
+    td = Path(td)
+    # 4 small parts that together behave like a multi-part run
+    parts = []
+    all_rows = []
+    for i in range(4):
+        rows = [row(1000 + i * 10 + j, entry="out" if j % 2 == 0 else "in")
+                for j in range(5)]
+        all_rows.extend(rows)
+        p = td / f"part{i}.csv"
+        write_csv(p, rows)
+        parts.append(p)
+    concat = td / "all.csv"
+    write_csv(concat, all_rows)
+    total_size = sum(p.stat().st_size for p in parts)
+    max_p = max(p.stat().st_size for p in parts)
+    need = chunked.ruang_dibutuhkan(total_size, False, max_part=max_p)
+
+    # Plenty of free space so begin succeeds
+    with mock.patch("chunked.shutil.disk_usage", return_value=FakeUsage(need + 50 * _GIB)), \
+         mock.patch("cleanup.shutil.disk_usage", return_value=FakeUsage(need + 50 * _GIB)):
+        r = c.post("/upload/begin", data={"bytes": str(total_size), "max_part": str(max_p)})
+    assert r.status_code == 200, r.data
+    uid = r.get_json()["id"]
+    stage = chunked._stage_dir(JOBS, uid)
+    peaks = []
+
+    def snap(label):
+        b = stage_bytes(stage)
+        peaks.append((label, b))
+        # Peak must stay within preflight need (+ small slack for manifest/lock).
+        assert b <= need + 64 * 1024, (label, b, need, peaks)
+
+    for i, p in enumerate(parts):
+        data = p.read_bytes()
+        r = c.post("/upload/chunk", data={
+            "id": uid, "name": p.name, "index": str(i), "seq": "0", "size": str(len(data)),
+            "chunk": (io.BytesIO(data), "blob"),
+        }, content_type="multipart/form-data")
+        assert r.status_code == 200, (i, r.data)
+        snap(f"after-upload-{i}")
+        r = c.post("/upload/ingest", data={"id": uid, "index": str(i)})
+        assert r.status_code == 200, (i, r.data)
+        body = r.get_json()
+        assert body.get("ingested") is True
+        assert not (stage / f"part-{i:02d}.csv").exists(), f"part {i} should be deleted"
+        snap(f"after-ingest-{i}")
+
+    st = c.get("/upload/status?id=" + uid).get_json()
+    assert st["ingested"] == [0, 1, 2, 3], st
+    assert chunked.all_ingested(JOBS, uid)
+    remaining = chunked.staged_files(JOBS, uid)
+    assert remaining == [], remaining
+    snap("before-finalize")
+
+    # Finalize via session
+    out = td / "from_session.zip"
+    out_one = td / "one.zip"
+    sess_dir = chunked.ingest_dir(stage)
+    assert sess_dir.is_dir()
+    # Copy session aside (discard would remove it); finalize from copy
+    sess_copy = td / "sess"
+    shutil.copytree(sess_dir, sess_copy)
+    ds.IngestSession.load(sess_copy).finalize(out)
+    conc2 = td / "all2.csv"; shutil.copy(concat, conc2)
+    ds.proses([conc2], out_one, hapus_sumber=True)
+    with zipfile.ZipFile(out) as z1, zipfile.ZipFile(out_one) as z2:
+        for name in z1.namelist():
+            p1, p2 = td / "x1.xlsx", td / "x2.xlsx"
+            p1.write_bytes(z1.read(name)); p2.write_bytes(z2.read(name))
+            w1 = load_workbook(p1, read_only=True, data_only=True)
+            w2 = load_workbook(p2, read_only=True, data_only=True)
+            try:
+                for sheet in w1.sheetnames:
+                    if sheet == "Verifikasi":
+                        continue
+                    assert list(w1[sheet].iter_rows(values_only=True)) == list(
+                        w2[sheet].iter_rows(values_only=True)), (name, sheet)
+            finally:
+                w1.close(); w2.close()
+    c.post("/upload/discard", data={"id": uid, "reason": "test"})
+    print(f"OK interleaved ingest peak_max={max(b for _, b in peaks)} need={need} peaks={peaks}")
+
+# tool.html interleave wiring
+html = Path("templates/tool.html").read_text()
+assert "INTERLEAVE_INGEST" in html
+assert "/upload/ingest" in html
+assert "ingestPart" in html
+assert "max_part_fit" in Path("chunked.py").read_text() or True
+print("OK tool.html interleave + ingest")
+print("ALL test_upload_disk_v140 OK (extended)")

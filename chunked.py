@@ -11,11 +11,16 @@ Each file is one staging part. Chunks are appended to that part and then
 discarded from memory. There is never a second assembled copy beside the chunks.
 
 Flow:
-    GET  /upload/preflight?bytes=&max_part= -> need / free / max (auth)
+    GET  /upload/preflight?bytes=&max_part= -> need / free / max_part_fit (auth)
     POST /upload/begin                  -> {"id": "<hex>"}
     POST /upload/chunk  (repeat)        -> {"received": <bytes>}
-    GET  /upload/status?id=<hex>        -> what the server already has (resume)
-    POST /tool/<slug>   upload_id=<hex> -> the part is renamed into the job
+    POST /upload/ingest                 -> parse one finished part into the
+                                          job index, then delete the part file
+                                          (Deal Segregator interleaved path)
+    GET  /upload/status?id=<hex>        -> chunks + which parts are ingested
+    POST /tool/<slug>   upload_id=<hex> -> remaining parts renamed into the job;
+                                          if every part is already ingested, only
+                                          the session is finalized (zip/output)
 
 A chunk can reach the server while its acknowledgement is lost on the way back
 (office firewall, antivirus, Wi-Fi). The browser then sends the same chunk again.
@@ -113,6 +118,21 @@ def ruang_dibutuhkan(ukuran, sudah_tersimpan=False, max_part=None):
     return max_part + ekstra
 
 
+
+def max_part_fit(ukuran, bebas, freed=0, staged=0):
+    """Largest part that still fits: free - index(S) - margin (never negative).
+
+    Used when a single-file upload would exceed free space: the preflight message
+    tells the user to split, and quotes this as the max part size that would pass.
+    """
+    if ukuran < 0:
+        ukuran = 0
+    ukuran = int(ukuran)
+    efektif = max(0, int(bebas) + max(0, int(freed)) - max(0, int(staged)))
+    ekstra = int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK
+    return max(0, efektif - ekstra)
+
+
 def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None):
     perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part)
     if max_part is None:
@@ -186,7 +206,13 @@ def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=Non
 
 
 def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, staged=0):
-    """JSON-ready preflight numbers and bilingual message."""
+    """JSON-ready preflight numbers and bilingual message.
+
+    Peak is modelled over the whole interleaved lifecycle (upload one part,
+    ingest+delete, repeat, then zip): max_part + index(S) + margin. When the
+    caller did not split (max_part == total) and that peak does not fit, the
+    message suggests splitting and quotes max_part_fit for the current free space.
+    """
     if max_part is None:
         max_part = ukuran
     max_upload = MAX_TOTAL if max_upload is None else max_upload
@@ -195,6 +221,7 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
     # look like free space the new run can spend twice.
     efektif = max(0, bebas + max(0, int(freed)) - max(0, int(staged)))
     ok = ukuran <= max_upload and perlu <= efektif
+    fit = max_part_fit(ukuran, bebas, freed=freed, staged=staged)
     def gb(n):
         return round(n / _GIB, 2)
     msg_id = (
@@ -211,6 +238,25 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
         f"{gb(MARGIN_DISK)}). Free {gb(efektif)} GB. Upload limit "
         f"{gb(max_upload)} GB."
     )
+    # Single-file (or unsplit) case that does not fit: tell them to split.
+    if (not ok) and max_part >= ukuran and ukuran > 0 and fit > 0 and fit < ukuran:
+        msg_id += (
+            f" Pecah file menjadi beberapa bagian, masing-masing paling besar "
+            f"{gb(fit)} GB agar muat di ruang kosong saat ini."
+        )
+        msg_en += (
+            f" Split into parts of at most {gb(fit)} GB each so the peak fits "
+            f"the free space available now."
+        )
+    elif (not ok) and max_part >= ukuran and ukuran > 0 and fit <= 0:
+        msg_id += (
+            " Ruang kosong terlalu kecil bahkan untuk satu bagian kecil "
+            f"(indeks + margin saja sudah {gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
+        )
+        msg_en += (
+            " Free space is too small even for a tiny part "
+            f"(index + margin alone need {gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
+        )
     return {
         "ok": ok,
         "need": perlu,
@@ -218,6 +264,7 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
         "free_raw": bebas,
         "max_upload": max_upload,
         "max_part": max_part,
+        "max_part_fit": fit,
         "total": ukuran,
         "freed": max(0, int(freed)),
         "staged": max(0, int(staged)),
@@ -225,7 +272,6 @@ def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, st
         "message_id": msg_id,
         "message_en": msg_en,
     }
-
 
 def _storage_error(freed=None):
     pesan = (
@@ -313,11 +359,18 @@ def sweep(jobs_dir, max_age_hours=STAGE_MAX_AGE_HOURS):
             pass
 
 
-def staged_files(jobs_dir, upload_id):
-    """Return the finished staged file paths in the order the user picked them.
+def ingest_dir(stage):
+    """Directory holding the Deal Segregator IngestSession for this upload."""
+    return Path(stage) / "ingest"
 
-    Returns None when the id is unknown, which the caller reports as a plain
-    validation error -- a stale tab retrying an old upload must not 500.
+
+def staged_files(jobs_dir, upload_id):
+    """Return finished staged file paths still on disk (not yet ingested).
+
+    Parts already ingested and deleted are omitted. Returns None when the id is
+    unknown or the upload is incomplete (bytes short, or a non-ingested part
+    missing). An empty list means every part was ingested — the caller should
+    finalize the session instead of moving files.
     """
     stage = _stage_dir(jobs_dir, upload_id)
     if not stage or not stage.is_dir():
@@ -327,13 +380,31 @@ def staged_files(jobs_dir, upload_id):
         return None
     if manifest["bytes"] != manifest.get("declared_bytes"):
         return None
+    if not manifest.get("files"):
+        return None
     paths = []
     for entry in manifest["files"]:
+        if entry.get("ingested"):
+            continue
         p = stage / entry["stored"]
         if not p.is_file():
             return None
         paths.append((p, entry["original"]))
-    return paths or None
+    return paths
+
+
+def all_ingested(jobs_dir, upload_id):
+    """True when every declared part has been ingested into the session."""
+    stage = _stage_dir(jobs_dir, upload_id)
+    if not stage or not stage.is_dir():
+        return False
+    manifest = _read_manifest(stage) or {}
+    files = manifest.get("files") or []
+    if not files:
+        return False
+    if manifest.get("bytes") != manifest.get("declared_bytes"):
+        return False
+    return all(e.get("ingested") for e in files)
 
 
 def discard(jobs_dir, upload_id):
@@ -533,7 +604,12 @@ def register(app, jobs_dir):
                         "files": [{"index": e["index"], "chunks": e["chunks"],
                                    "bytes": e["bytes"],
                                    "name": e.get("original"),
-                                   "hashes": e.get("hashes")} for e in manifest["files"]]})
+                                   "hashes": e.get("hashes"),
+                                   "ingested": bool(e.get("ingested")),
+                                   "kind": e.get("ingest_kind")}
+                                  for e in manifest["files"]],
+                        "ingested": [e["index"] for e in manifest["files"]
+                                     if e.get("ingested")]})
 
     @app.get("/upload/preflight")
     def upload_preflight():
@@ -672,6 +748,79 @@ def register(app, jobs_dir):
         g.upload_note = f"discard ({request.form.get('reason') or 'client'})"
         discard(jobs_dir, upload_id)
         return jsonify({"discarded": True})
+
+
+    @app.post("/upload/ingest")
+    def upload_ingest():
+        """Parse one finished staged part into the Deal Segregator session, then delete it.
+
+        Sequential with the browser: upload part i fully, call this, then upload
+        part i+1. Peak disk is therefore ~max(part) + index + margin, not the sum
+        of every part. FX / account-type files should be ingested before deals.
+        """
+        import deal_segregator as ds
+        upload_id = (request.form.get("id") or "").strip()
+        stage = _stage_dir(jobs_dir, upload_id)
+        if stage and not stage.is_dir() and cleanup.superseded(stage):
+            return jsonify({"error": "This upload was replaced by a newer upload from your "
+                                     "account (another tab or a new attempt).",
+                            "superseded": True}), 410
+        if not stage or not stage.is_dir():
+            return jsonify({"error": "This upload has expired. Please pick the files again."}), 404
+        try:
+            index = int(request.form.get("index", ""))
+        except ValueError:
+            return jsonify({"error": "Malformed ingest request."}), 400
+        allow_mt4 = (request.form.get("allow_mt4") or "").strip() in ("1", "true", "yes")
+
+        with open(stage / ".lock", "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            manifest = _read_manifest(stage)
+            if manifest is None:
+                return jsonify({"error": "This upload is no longer valid. Please start again."}), 404
+            owner = manifest.get("user")
+            if owner and owner != _username():
+                return jsonify({"error": "This upload belongs to another account."}), 403
+            entries = {e["index"]: e for e in manifest["files"]}
+            entry = entries.get(index)
+            if entry is None:
+                return jsonify({"error": "That file has not been uploaded yet."}), 404
+            if entry.get("ingested"):
+                g.upload_note = f"ingest duplicate index={index}"
+                return jsonify({"ingested": True, "duplicate": True,
+                                "index": index, "name": entry.get("original"),
+                                "kind": entry.get("ingest_kind")})
+            target = stage / entry["stored"]
+            if not target.is_file():
+                return jsonify({"error": "The staged file is missing. Please start again."}), 404
+            # Part must be complete relative to its own bytes so far; the browser
+            # only calls ingest after the last chunk of that file has been acked.
+            state = ingest_dir(stage)
+            state.mkdir(parents=True, exist_ok=True)
+            try:
+                sess = ds.IngestSession.load(state, allow_mt4=allow_mt4)
+                rec = sess.ingest(target, hapus=True, original_name=entry.get("original"))
+            except SystemExit as exc:
+                pesan = str(exc) or "STOP: ingest failed."
+                g.upload_note = f"ingest STOP index={index}"
+                return jsonify({"error": pesan, "stop": True}), 400
+            except Exception as exc:
+                g.upload_note = f"ingest exception index={index}: {type(exc).__name__}"
+                return jsonify({"error": f"STOP: failed while ingesting "
+                                         f"{entry.get('original')}: {exc}"}), 500
+            entry["ingested"] = True
+            entry["ingest_kind"] = rec.get("kind")
+            entry["ingested_at"] = time.time()
+            # Part file is gone; keep manifest bytes as the cumulative received
+            # total (for resume / declared_bytes check) but do not count the
+            # deleted file toward disk.
+            manifest["last_chunk"] = time.time()
+            _write_manifest(stage, manifest)
+            g.upload_note = f"ingested index={index} kind={rec.get('kind')}"
+            return jsonify({"ingested": True, "index": index,
+                            "name": entry.get("original"), "kind": rec.get("kind"),
+                            "ingested_indexes": [e["index"] for e in manifest["files"]
+                                                 if e.get("ingested")]})
 
     @app.post("/upload/chunk")
     def upload_chunk():

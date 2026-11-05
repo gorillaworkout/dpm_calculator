@@ -837,6 +837,60 @@
       });
     }
 
+    // Deal Segregator interleaves upload→ingest→delete so peak is max(part)+index.
+    // Other tools still hold every file until the form submit, so their preflight
+    // must use the total as max_part (otherwise a passing check can fail mid-upload).
+    var INTERLEAVE_INGEST = {% if slug == 'segregate' %}true{% else %}false{% endif %};
+    var ALLOW_MT4_INGEST = {% if company == 'kvb' and slug == 'segregate' %}true{% else %}false{% endif %};
+
+    function sortForIngest(files) {
+      // accounts → FX → deals. Prefer the dedicated input fields, then sniff.
+      function rank(f) {
+        var input = f._inputName || '';
+        if (input === 'mt4_accounts') return 0;
+        if (input === 'equity' || /equity|fx/i.test(input)) return 1;
+        {% if company == 'kvb' and slug == 'segregate' %}
+        var kind = sniffed[f.name];
+        if (kind === 'accounts') return 0;
+        {% endif %}
+        // FX workbooks often named with FX / Client Equity; deals stay last.
+        var n = (f.name || '').toLowerCase();
+        if (/client\s*equity|\bfx\b|kurs|rate/.test(n)) return 1;
+        return 2;
+      }
+      return files.slice().sort(function (a, b) {
+        var d = rank(a) - rank(b);
+        if (d) return d;
+        return (a._ord || 0) - (b._ord || 0);
+      });
+    }
+
+    function ingestPart(id, fileIndex, fileName) {
+      var fd = new FormData();
+      fd.append('id', id);
+      fd.append('index', fileIndex);
+      if (ALLOW_MT4_INGEST) fd.append('allow_mt4', '1');
+      return fetch('/upload/ingest', {method: 'POST', body: fd,
+                                      credentials: 'same-origin', redirect: 'manual'})
+        .then(function (r) {
+          var login = loginResponse(r, location.origin);
+          if (login) throw sessionError(login);
+          return r.json().then(function (j) {
+            if (!r.ok) {
+              var err = new Error(j.error || ('Ingest failed (HTTP ' + r.status + ').'));
+              err.name = 'HTTP ' + r.status;
+              err.noRetry = true;
+              if (j.stop) err.stop = true;
+              throw err;
+            }
+            return j;
+          }, function () {
+            var err = new Error('Ingest failed (HTTP ' + r.status + ').');
+            err.noRetry = true; throw err;
+          });
+        });
+    }
+
     function diskPreflight(total, maxPart) {
       var q = '/upload/preflight?bytes=' + encodeURIComponent(total) +
               '&max_part=' + encodeURIComponent(maxPart == null ? total : maxPart);
@@ -860,7 +914,9 @@
       }, []);
       if (!files.length) { diskStatus.hidden = true; diskStatus.textContent = ''; return; }
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
-      var maxPart = files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0);
+      var maxPart = INTERLEAVE_INGEST
+        ? files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0)
+        : total;
       if (diskTimer) clearTimeout(diskTimer);
       diskTimer = setTimeout(function () {
         diskPreflight(total, maxPart).then(function (pf) {
@@ -898,9 +954,15 @@
         return;
       }
       {% endif %}
-      var files = inputs.reduce(function (all, input) {
-        return all.concat(Array.prototype.slice.call(input.files || []));
-      }, []);
+      var files = [];
+      inputs.forEach(function (input, ii) {
+        Array.prototype.slice.call(input.files || []).forEach(function (f, fi) {
+          // Tag for ingest sort without mutating the File object prototype broadly.
+          try { f._inputName = input.name || ''; f._ord = ii * 1000 + fi; } catch (e) {}
+          files.push(f);
+        });
+      });
+      if (INTERLEAVE_INGEST) files = sortForIngest(files);
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
       var fileCount = files.length;              // the account-type file is one of them
       var empty = files.filter(function (file) { return file.size === 0; });
@@ -932,7 +994,9 @@
         size(total) + ' total', 0, 'uploading');
       // Every file is read again (first and last 64 KB) before anything is sent, so a
       // stale or locked file is reported at once, by name, with nothing uploaded.
-      var maxPart = files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0);
+      var maxPart = INTERLEAVE_INGEST
+        ? files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0)
+        : total;
       preflight(files, function (f) { return checks[fileKey(f)]; },
                 function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); })
         .then(function (bad) {
@@ -961,12 +1025,14 @@
           var id = activeId = pageUpload = start.id;
 
           // Sequential on purpose: parallel chunks would race on the append and
-          // the server rejects anything out of order.
+          // the server rejects anything out of order. For Deal Segregator, each
+          // finished file is ingested (parsed into the index) and deleted before
+          // the next file starts uploading — peak disk stays ~max(part)+index.
           var chain = Promise.resolve();
           files.forEach(function (file, fileIndex) {
             var seq = 0;
-            var chunks = Math.ceil(file.size / CHUNK);
-            for (var off = 0; off < file.size; off += CHUNK) {
+            var chunks = Math.ceil(file.size / CHUNK) || 1;
+            for (var off = 0; off < file.size || (file.size === 0 && seq === 0); off += CHUNK) {
               (function (offset, mySeq) {
                 chain = chain.then(function () {
                   var label = 'File ' + (fileIndex + 1) + ' of ' + files.length + ': ' + file.name +
@@ -1001,6 +1067,18 @@
                     });
                 });
               })(off, seq++);
+              if (file.size === 0) break;
+            }
+            if (INTERLEAVE_INGEST) {
+              (function (fi, fname) {
+                chain = chain.then(function () {
+                  updateProgress('Processing on server…',
+                    'File ' + (fi + 1) + ' of ' + files.length + ': ' + fname +
+                    ' — parsing into the index and freeing disk · ' + elapsed(started),
+                    total ? sent / total * 100 : 100, 'processing');
+                  return ingestPart(id, fi, fname);
+                });
+              })(fileIndex, file.name);
             }
           });
 

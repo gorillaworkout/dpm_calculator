@@ -70,6 +70,7 @@ import datetime
 import re
 import shutil
 import sqlite3
+import pickle
 import tempfile
 import sys
 import traceback
@@ -895,7 +896,7 @@ class _DiskDeals:
             PRAGMA synchronous=OFF;
             PRAGMA temp_store=MEMORY;
             PRAGMA cache_size=-2048;
-            CREATE TABLE deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS deals (deal TEXT PRIMARY KEY) WITHOUT ROWID;
         """)
         self._pending = 0
 
@@ -1770,182 +1771,461 @@ def _hasil_agregat(kelompok):
     return hasil
 
 
-@_jaga
-def proses(paths_in, path_out: Path, allow_mt4=False,
-           mt4_accounts=None, hapus_sumber=False) -> dict:
-    """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
-    'out' and 'in' rows go to separate sheets of each workbook.
-    MT4 Raw Report files are accepted only when allow_mt4 is true (KVB).
-    Any MT4 Raw Report requires the account,account_type file (mt4_accounts or
-    uploaded among paths_in): CentAccount rows are USC (÷100), every other type
-    and any login missing from the file is USD."""
-    paths_in = [Path(p) for p in paths_in]
-    path_out = Path(path_out)
-    fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
-    rest = [p for p in paths_in if p not in fx_paths]
-    if mt4_accounts and not allow_mt4:
-        sys.exit("STOP: MT4 account types are only used on the KVB Deal Segregator (--allow-mt4).")
-    peta_paths = []
-    if mt4_accounts:
-        peta = Path(mt4_accounts)
-        if not peta.is_file():
-            sys.exit(f"STOP: MT4 account-type file not found: {peta}")
-        peta_paths.append(peta)
-    if allow_mt4:
-        sudah = {p.resolve() for p in peta_paths}
-        for path in rest:
-            if path.resolve() in sudah:
-                continue
-            if _adalah_peta_akun(path):
-                peta_paths.append(path)
-                sudah.add(path.resolve())
-    if len(peta_paths) > 1:
-        names = ", ".join(p.name for p in peta_paths)
-        sys.exit(f"STOP: upload only one MT4 account-type file. Found: {names}.")
-    akun, info_peta = baca_peta_akun_detail(peta_paths[0]) if peta_paths else ({}, None)
-    peta_resolved = {p.resolve() for p in peta_paths}
-    deal_paths = [p for p in rest if p.resolve() not in peta_resolved]
-    if len(fx_paths) > 1:
-        sys.exit("STOP: upload only one Client Equity FX workbook per run.")
-    if not deal_paths:
-        names = ", ".join(p.name for p in fx_paths) or "(none)"
-        sys.exit("STOP: no Deals History file was uploaded; only Client Equity FX / rate file(s) "
-                 f"were found: {names}. Upload the MT5 Deals History export together with the FX file.")
-    klasifikasi = [(path, _info_mt4(path)) for path in deal_paths]
-    mt4_paths = [path for path, info in klasifikasi if info]
-    if mt4_paths and not allow_mt4:
-        names = ", ".join(path.name for path in mt4_paths)
-        sys.exit(
-            "STOP: DPM Deal Segregator accepts MT5 Deals History only. "
-            f"MT4 Raw Report is not used on this page: {names}. "
-            "Upload MT4 on the KVB Deal Segregator."
-        )
-    if mt4_paths and not peta_paths:
-        names = ", ".join(path.name for path in mt4_paths)
-        sys.exit(
-            "STOP: the MT4 account-type file is required for MT4 Raw Report(s): "
-            f"{names}. Upload the account-type file (columns account, account_type, "
-            "optional GROUP) together with the MT4 file. CentAccount or a cent GROUP "
-            "(e.g. real\\Plus-10-cents) is USC (÷100); everything else is USD."
-        )
-    fx = {}
-    for path in fx_paths:
-        fx.update(baca_fx(path))
-    pakai_fx = bool(fx_paths)
-    kurs_kurang = defaultdict(int)
 
-    # Satu agregat. Platform ada di kunci hanya kalau run ini punya file MT4,
-    # supaya workbook MT5 saja tetap identik.
-    gabung = bool(mt4_paths)
-    harian = {"out": {}, "in": {}}
-    bulanan = {"out": {}, "in": {}}
-    login_unik = set()
-    login_mt4 = set()
-    dipakai = {"out": 0, "in": 0}
-    dipakai_mt4 = {"out": 0, "in": 0}
-    jumlah = {"out": defaultdict(float), "in": defaultdict(float)}
-    jumlah_mt4 = {"out": defaultdict(float), "in": defaultdict(float)}
+# ------------------------------------------------------------------ ingest session
+# Persistent across HTTP requests for interleaved upload→parse→delete.
+# Peak disk while uploading parts is ~max(part) + growing index, not sum(parts).
 
-    def pakai_baris(b, platform="mt5"):
-        if gabung:
+
+_SESSION_STATE = "session.pkl"
+_SESSION_DEALS = "deals.sqlite"
+_SESSION_DEALS_MT4 = "deals-mt4.sqlite"
+
+
+class IngestSession:
+    """Parse Deal Segregator inputs one file at a time into a durable index."""
+
+    def __init__(self, state_dir, allow_mt4=False):
+        self.state_dir = Path(state_dir)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.allow_mt4 = bool(allow_mt4)
+        self.fx = {}
+        self.fx_names = []
+        self.akun = {}
+        self.info_peta = None
+        self.peta_name = None
+        self.harian = {"out": {}, "in": {}}
+        self.bulanan = {"out": {}, "in": {}}
+        self.login_unik = set()
+        self.login_mt4 = set()
+        self.dipakai = {"out": 0, "in": 0}
+        self.dipakai_mt4 = {"out": 0, "in": 0}
+        self.jumlah = {"out": defaultdict(float), "in": defaultdict(float)}
+        self.jumlah_mt4 = {"out": defaultdict(float), "in": defaultdict(float)}
+        self.kurs_kurang = defaultdict(int)
+        self.per_file = []
+        self.input_names = []
+        self.deleted_names = []
+        self.gabung = False
+        self._deals = None
+        self._deals_mt4 = None
+
+    # -- persistence --------------------------------------------------------
+    def _open_deals(self):
+        if self._deals is None:
+            self._deals = _DiskDeals(self.state_dir / _SESSION_DEALS)
+        return self._deals
+
+    def _open_deals_mt4(self):
+        if self._deals_mt4 is None:
+            self._deals_mt4 = _DiskDeals(self.state_dir / _SESSION_DEALS_MT4)
+        return self._deals_mt4
+
+    def close(self):
+        if self._deals is not None:
+            self._deals.commit()
+            self._deals.close()
+            self._deals = None
+        if self._deals_mt4 is not None:
+            self._deals_mt4.commit()
+            self._deals_mt4.close()
+            self._deals_mt4 = None
+
+    def save(self):
+        self.close()
+        payload = {
+            "allow_mt4": self.allow_mt4,
+            "fx": self.fx,
+            "fx_names": self.fx_names,
+            "akun": self.akun,
+            "info_peta": self.info_peta,
+            "peta_name": self.peta_name,
+            "harian": self.harian,
+            "bulanan": self.bulanan,
+            "login_unik": self.login_unik,
+            "login_mt4": self.login_mt4,
+            "dipakai": self.dipakai,
+            "dipakai_mt4": self.dipakai_mt4,
+            "jumlah": {k: dict(v) for k, v in self.jumlah.items()},
+            "jumlah_mt4": {k: dict(v) for k, v in self.jumlah_mt4.items()},
+            "kurs_kurang": dict(self.kurs_kurang),
+            "per_file": self.per_file,
+            "input_names": self.input_names,
+            "deleted_names": self.deleted_names,
+            "gabung": self.gabung,
+        }
+        tmp = self.state_dir / (_SESSION_STATE + ".tmp")
+        tmp.write_bytes(pickle.dumps(payload, protocol=4))
+        tmp.replace(self.state_dir / _SESSION_STATE)
+
+    @classmethod
+    def load(cls, state_dir, allow_mt4=None):
+        state_dir = Path(state_dir)
+        pkl = state_dir / _SESSION_STATE
+        if not pkl.is_file():
+            sess = cls(state_dir, allow_mt4=bool(allow_mt4))
+            return sess
+        payload = pickle.loads(pkl.read_bytes())
+        sess = cls(state_dir, allow_mt4=payload.get("allow_mt4", bool(allow_mt4)))
+        if allow_mt4 is not None:
+            sess.allow_mt4 = bool(allow_mt4)
+        sess.fx = payload["fx"]
+        sess.fx_names = payload["fx_names"]
+        sess.akun = payload["akun"]
+        sess.info_peta = payload["info_peta"]
+        sess.peta_name = payload["peta_name"]
+        sess.harian = payload["harian"]
+        sess.bulanan = payload["bulanan"]
+        sess.login_unik = payload["login_unik"]
+        sess.login_mt4 = payload["login_mt4"]
+        sess.dipakai = payload["dipakai"]
+        sess.dipakai_mt4 = payload["dipakai_mt4"]
+        sess.jumlah = {"out": defaultdict(float, payload["jumlah"]["out"]),
+                       "in": defaultdict(float, payload["jumlah"]["in"])}
+        sess.jumlah_mt4 = {"out": defaultdict(float, payload["jumlah_mt4"]["out"]),
+                           "in": defaultdict(float, payload["jumlah_mt4"]["in"])}
+        sess.kurs_kurang = defaultdict(int, payload["kurs_kurang"])
+        sess.per_file = payload["per_file"]
+        sess.input_names = payload["input_names"]
+        sess.deleted_names = payload["deleted_names"]
+        sess.gabung = payload["gabung"]
+        return sess
+
+    def _pakai_baris(self, b, platform="mt5"):
+        pakai_fx = bool(self.fx)
+        if self.gabung:
             b["Platform"] = "MT4" if platform == "mt4" else "MT5"
         if platform == "mt4":
-            dipakai_t, jumlah_t, login_t = dipakai_mt4, jumlah_mt4, login_mt4
+            dipakai_t, jumlah_t, login_t = self.dipakai_mt4, self.jumlah_mt4, self.login_mt4
         else:
-            dipakai_t, jumlah_t, login_t = dipakai, jumlah, login_unik
+            dipakai_t, jumlah_t, login_t = self.dipakai, self.jumlah, self.login_unik
         e = b["Entry"]
         dipakai_t[e] += 1
         login_t.add(b["Login"])
         for kol in KOLOM_JUMLAH:
             jumlah_t[e][kol] += b[kol]
         if b.get("_mt4_usc"):
-            # Sudah dibagi 100. Jangan pakai kurs USC di Client Equity FX.
             if pakai_fx:
                 b["_kurs_kurang"] = False
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
                     b[target] = b[source]
         elif pakai_fx:
             key = (b["Date"], _norm(b["Currency"]))
-            pembagi = pembagi_usd(fx, b["Date"], b["Currency"])
+            pembagi = pembagi_usd(self.fx, b["Date"], b["Currency"])
             if pembagi is None:
                 b["_kurs_kurang"] = True
-                kurs_kurang[key] += 1
+                self.kurs_kurang[key] += 1
                 for name in KOLOM_USD:
                     b[name] = None
             else:
                 b["_kurs_kurang"] = False
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
                     b[target] = b[source] / pembagi
-        _tambah_agregat(harian[e], b, "hari", pakai_fx)
-        _tambah_agregat(bulanan[e], b, "bulan", pakai_fx)
+        _tambah_agregat(self.harian[e], b, "hari", pakai_fx)
+        _tambah_agregat(self.bulanan[e], b, "bulan", pakai_fx)
 
-    path_out.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
-        deals = _DiskDeals(Path(state_dir) / "deals.sqlite")
-        deals_mt4 = (_DiskDeals(Path(state_dir) / "deals-mt4.sqlite")
-                     if mt4_paths else None)
-        try:
-            per_file = []
-            dihapus_awal = []
-            for urutan, (path, info) in enumerate(klasifikasi, start=1):
+    def _promote_gabung(self):
+        """Flip to combined MT4+MT5 layout; backfill Platform on earlier MT5 rows.
+
+        Interleaved uploads may parse MT5 before MT4. Aggregates built without
+        Platform must be re-keyed so finalize can write KOLOM_HASIL_PLATFORM.
+        """
+        if self.gabung:
+            return
+        self.gabung = True
+        for store in (self.harian, self.bulanan):
+            for entry in ("out", "in"):
+                lama = store[entry]
+                if not lama:
+                    continue
+                baru = {}
+                for kunci, d in lama.items():
+                    if d.get("Platform"):
+                        baru[kunci] = d
+                        continue
+                    d = dict(d)
+                    d["Platform"] = "MT5"
+                    if isinstance(kunci, tuple) and kunci and kunci[0] not in ("MT4", "MT5"):
+                        kunci = ("MT5",) + kunci
+                    elif not (isinstance(kunci, tuple) and kunci and kunci[0] in ("MT4", "MT5")):
+                        kunci = ("MT5",) + (kunci if isinstance(kunci, tuple) else (kunci,))
+                    baru[kunci] = d
+                store[entry] = baru
+
+    def ingest(self, path, hapus=True, original_name=None, part_total=None):
+        """Parse one input into the session. Optionally delete it afterwards."""
+        path = Path(path)
+        name = original_name or path.name
+        if name not in self.input_names:
+            self.input_names.append(name)
+
+        def _part_label():
+            n = len(self.per_file) + 1
+            if part_total:
+                return f"part {n} of {part_total} ({name})"
+            return f"part {n} ({name})"
+
+        if _adalah_file_fx(path):
+            if self.fx_names:
+                sys.exit("STOP: upload only one Client Equity FX workbook per run.")
+            self.fx.update(baca_fx(path))
+            self.fx_names.append(name)
+            rec = {"kind": "fx", "nama": name, "rates": len(self.fx)}
+            if hapus:
                 try:
-                    if info:
-                        rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, akun)
-                    else:
-                        rec = _normalisasi_satu_file(path, deals, pakai_baris)
-                except KeyboardInterrupt:
-                    raise
-                except SystemExit as exc:
-                    # baca_file / MT4 readers exit with STOP; prefix the part number
-                    # so a later failure in a multi-part run is clear.
-                    pesan = str(exc)
-                    if pesan.startswith("STOP:") and f"part {urutan} of" not in pesan:
-                        sys.exit(
-                            f"STOP: failed while reading part {urutan} of {len(klasifikasi)} "
-                            f"({path.name}):\n{pesan}"
-                        )
-                    raise
-                except Exception as exc:
-                    # Name the part so a later failure in a multi-part run is clear.
-                    sys.exit(
-                        f"STOP: failed while reading part {urutan} of {len(klasifikasi)} "
-                        f"({path.name}): {exc}"
-                    )
-                per_file.append(rec)
-                # Process-and-delete: free this part before the next is parsed so
-                # peak disk is max(part) + growing index, not sum(parts) + index.
-                if hapus_sumber:
-                    try:
-                        path.unlink()
-                        dihapus_awal.append(path.name)
-                    except OSError:
-                        pass
-        finally:
-            deals.close()
-            if deals_mt4 is not None:
-                deals_mt4.close()
+                    path.unlink()
+                    self.deleted_names.append(name)
+                except OSError:
+                    pass
+            self.save()
+            return rec
 
-    berkas_mt5 = [r for r in per_file if r.get("platform") != "mt4"]
-    berkas_mt4 = [r for r in per_file if r.get("platform") == "mt4"]
-    ada_mt5, ada_mt4 = bool(berkas_mt5), bool(berkas_mt4)
-    total = sum(r["total"] for r in berkas_mt5)
-    entry_lain = sum(r["lain"] for r in berkas_mt5)
-    dup_out = sum(r["dup_out"] for r in berkas_mt5)
-    dup_in = sum(r["dup_in"] for r in berkas_mt5)
-    duplikat = dup_out + dup_in
-    if not (dipakai["out"] or dipakai["in"] or dipakai_mt4["out"] or dipakai_mt4["in"]):
-        if not ada_mt4:
+        if _adalah_peta_akun(path):
+            if not self.allow_mt4:
+                sys.exit("STOP: MT4 account types are only used on the KVB Deal Segregator (--allow-mt4).")
+            if self.peta_name:
+                sys.exit(f"STOP: upload only one MT4 account-type file. Found: {self.peta_name}, {name}.")
+            self.akun, self.info_peta = baca_peta_akun_detail(path)
+            self.peta_name = name
+            rec = {"kind": "accounts", "nama": name, "accounts": len(self.akun)}
+            if hapus:
+                try:
+                    path.unlink()
+                    self.deleted_names.append(name)
+                except OSError:
+                    pass
+            self.save()
+            return rec
+
+        info = _info_mt4(path)
+        if info:
+            if not self.allow_mt4:
+                sys.exit(
+                    "STOP: DPM Deal Segregator accepts MT5 Deals History only. "
+                    f"MT4 Raw Report is not used on this page: {name}. "
+                    "Upload MT4 on the KVB Deal Segregator."
+                )
+            if self.peta_name is None:
+                sys.exit(
+                    "STOP: the MT4 account-type file is required for MT4 Raw Report(s): "
+                    f"{name}. Upload the account-type file first (columns account, "
+                    "account_type, optional GROUP), then the MT4 file."
+                )
+            self._promote_gabung()
+            try:
+                rec = _normalisasi_mt4(path, info, self._open_deals_mt4(),
+                                       self._pakai_baris, self.akun)
+            except SystemExit as exc:
+                pesan = str(exc)
+                if pesan.startswith("STOP:") and "failed while reading part" not in pesan:
+                    sys.exit(
+                        f"STOP: failed while reading {_part_label()}:\n{pesan}"
+                    )
+                raise
+            except Exception as exc:
+                sys.exit(
+                    f"STOP: failed while reading {_part_label()}: {exc}"
+                )
+        else:
+            try:
+                rec = _normalisasi_satu_file(path, self._open_deals(), self._pakai_baris)
+            except SystemExit as exc:
+                pesan = str(exc)
+                if pesan.startswith("STOP:") and "failed while reading part" not in pesan:
+                    sys.exit(
+                        f"STOP: failed while reading {_part_label()}:\n{pesan}"
+                    )
+                raise
+            except Exception as exc:
+                sys.exit(
+                    f"STOP: failed while reading {_part_label()}: {exc}"
+                )
+        # Sets in rec are fine for pickle.
+        self.per_file.append(rec)
+        if hapus:
+            try:
+                path.unlink()
+                self.deleted_names.append(name)
+            except OSError:
+                pass
+        self.save()
+        return {"kind": "deals", "nama": name, "platform": rec.get("platform", "mt5"),
+                "total": rec.get("total", 0)}
+
+    def _apply_fx_late(self):
+        """If FX arrived after some deals, fill USD on daily rows and rebuild monthly."""
+        if not self.fx:
+            return
+        # Detect missing USD on any daily aggregate.
+        need = False
+        for e in ("out", "in"):
+            for d in self.harian[e].values():
+                if KOLOM_USD[0] not in d:
+                    need = True
+                    break
+            if need:
+                break
+        if not need:
+            return
+        for e in ("out", "in"):
+            for d in self.harian[e].values():
+                if KOLOM_USD[0] in d:
+                    continue
+                for name in KOLOM_USD:
+                    d[name] = 0.0
+                d["_kurs_kurang"] = 0
+                d["_ada_usd_valid"] = False
+                # One Date per daily row (Periode is the date).
+                tgl = d["Periode"]
+                cur = d["Currency"]
+                # Re-apply per "virtual row" using deal count — approximate; better
+                # path is client uploads FX first. Use average: convert totals.
+                pembagi = pembagi_usd(self.fx, tgl, cur)
+                if pembagi is None:
+                    d["_kurs_kurang"] = d["Deals"]
+                    self.kurs_kurang[(tgl, _norm(cur))] += d["Deals"]
+                    for name in KOLOM_USD:
+                        d[name] = None
+                else:
+                    d["_ada_usd_valid"] = True
+                    for source, target in zip(
+                            ("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                        d[target] = d[source] / pembagi
+        # Rebuild monthly from daily (with USD).
+        self.bulanan = {"out": {}, "in": {}}
+        for e in ("out", "in"):
+            for d in self.harian[e].values():
+                b = {
+                    "Login": d["Login"], "Date": d["Periode"], "Type": d["Type"],
+                    "Symbol": d["Symbol"], "Currency": d["Currency"],
+                    "Volume": d["Volume"], "Commission": d["Commission"],
+                    "Fee": d["Fee"], "Swap": d["Swap"], "Profit": d["Profit"],
+                    "_kurs_kurang": bool(d.get("_kurs_kurang")),
+                }
+                if d.get("Platform"):
+                    b["Platform"] = d["Platform"]
+                for name in KOLOM_USD:
+                    if name in d and d[name] is not None:
+                        b[name] = d[name]
+                # Expand to Deals rows for counting — use one synthetic add per deal
+                # weight by repeating _tambah_agregat Deals times via loop of 1 with amounts/Deals
+                # Simpler: add once with full amounts and Deals count manually.
+                kunci_bulan = (
+                    (b.get("Platform"),) if b.get("Platform") else ()) + (
+                    b["Login"], b["Date"].replace(day=1), b["Type"], b["Symbol"], b["Currency"])
+                # Use _tambah_agregat once then fix Deals count
+                deals_n = d["Deals"]
+                b_one = dict(b)
+                # Scale: add as single row with full sums; set Deals after
+                _tambah_agregat(self.bulanan[e], b_one, "bulan", True)
+                # Find the key and set Deals
+                periode = b["Date"].replace(day=1)
+                platform = b.get("Platform")
+                kunci = (b["Login"], periode, b["Type"], b["Symbol"], b["Currency"])
+                if platform:
+                    kunci = (platform,) + kunci
+                self.bulanan[e][kunci]["Deals"] = (
+                    self.bulanan[e][kunci]["Deals"] - 1 + deals_n)
+
+    def finalize(self, path_out, hapus_remaining=None):
+        """Write the zip/xlsx from the accumulated index. Returns the proses result dict."""
+        path_out = Path(path_out)
+        self.close()
+        # Re-open deals only if needed? Not needed for writing.
+        if not self.per_file and not self.fx_names:
             sys.exit(
-                "STOP: no row with Entry = 'out' or 'in' was found.\n"
-                f"Across {len(berkas_mt5)} Deals History file(s), {total} rows in total, "
-                f"all {entry_lain} with another/empty Entry.\n"
-                "Check that these files are the correct Deals History exports."
+                "STOP: no Deals History file was uploaded; only Client Equity FX / rate file(s) "
+                f"were found: {', '.join(self.fx_names) or '(none)'}. "
+                "Upload the MT5 Deals History export together with the FX file."
             )
 
-    h_out, h_in = _hasil_agregat(harian["out"]), _hasil_agregat(harian["in"])
-    b_out, b_in = _hasil_agregat(bulanan["out"]), _hasil_agregat(bulanan["in"])
+        self._apply_fx_late()
+        pakai_fx = bool(self.fx)
+        berkas_mt5 = [r for r in self.per_file if r.get("platform") != "mt4"]
+        berkas_mt4 = [r for r in self.per_file if r.get("platform") == "mt4"]
+        ada_mt5, ada_mt4 = bool(berkas_mt5), bool(berkas_mt4)
+        total = sum(r["total"] for r in berkas_mt5)
+        entry_lain = sum(r["lain"] for r in berkas_mt5)
+        dup_out = sum(r["dup_out"] for r in berkas_mt5)
+        dup_in = sum(r["dup_in"] for r in berkas_mt5)
+        duplikat = dup_out + dup_in
+        dipakai, dipakai_mt4 = self.dipakai, self.dipakai_mt4
+        jumlah, jumlah_mt4 = self.jumlah, self.jumlah_mt4
+        login_unik, login_mt4 = self.login_unik, self.login_mt4
+        kurs_kurang = self.kurs_kurang
 
-    ringkasan = {"Uploaded files": len(paths_in)}
+        if not (dipakai["out"] or dipakai["in"] or dipakai_mt4["out"] or dipakai_mt4["in"]):
+            if not ada_mt4:
+                sys.exit(
+                    "STOP: no row with Entry = 'out' or 'in' was found.\n"
+                    f"Across {len(berkas_mt5)} Deals History file(s), {total} rows in total, "
+                    f"all {entry_lain} with another/empty Entry.\n"
+                    "Check that these files are the correct Deals History exports."
+                )
+
+        h_out = _hasil_agregat(self.harian["out"])
+        h_in = _hasil_agregat(self.harian["in"])
+        b_out = _hasil_agregat(self.bulanan["out"])
+        b_in = _hasil_agregat(self.bulanan["in"])
+
+        # Build ringkasan the same way proses does (shared helper below).
+        ringkasan, yellow_labels = _ringkasan_dari_session(
+            self, berkas_mt5, berkas_mt4, ada_mt5, ada_mt4,
+            total, entry_lain, dup_out, dup_in, duplikat,
+            h_out, h_in, b_out, b_in, pakai_fx)
+
+        if hapus_remaining is not None or self.deleted_names:
+            ringkasan["Uploaded files on the server"] = (
+                "Deleted from the server during / after this run "
+                "(each deals part is removed right after it is parsed; "
+                "remaining inputs are removed once this result is ready). "
+                "The files on your computer are not changed."
+            )
+
+        path_out.parent.mkdir(parents=True, exist_ok=True)
+        if path_out.suffix.lower() == ".zip":
+            _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
+                       pakai_platform=ada_mt4)
+        elif pakai_fx:
+            sys.exit("STOP: Client Equity FX output must use a .zip filename.")
+        else:
+            _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
+                            pakai_platform=ada_mt4)
+
+        if hapus_remaining:
+            for path in hapus_remaining:
+                try:
+                    Path(path).unlink()
+                except OSError:
+                    pass
+
+        result = {"file_masuk": len(self.input_names), "total": total,
+                  "dipakai": dipakai["out"], "dipakai_in": dipakai["in"],
+                  "harian": len(h_out), "bulanan": len(b_out),
+                  "harian_in": len(h_in), "bulanan_in": len(b_in),
+                  "login_unik": len(login_unik)}
+        if pakai_fx:
+            result.update(pakai_fx=True, kurs_kurang=sum(kurs_kurang.values()))
+        if ada_mt4:
+            result.update(mt4_dipakai=dipakai_mt4["out"])
+        return result
+
+
+def _ringkasan_dari_session(sess, berkas_mt5, berkas_mt4, ada_mt5, ada_mt4,
+                            total, entry_lain, dup_out, dup_in, duplikat,
+                            h_out, h_in, b_out, b_in, pakai_fx):
+    """Verifikasi summary — kept in sync with the inline block that used to live in proses."""
+    dipakai, dipakai_mt4 = sess.dipakai, sess.dipakai_mt4
+    jumlah, jumlah_mt4 = sess.jumlah, sess.jumlah_mt4
+    login_unik, login_mt4 = sess.login_unik, sess.login_mt4
+    kurs_kurang = sess.kurs_kurang
+    per_file = sess.per_file
+    fx = sess.fx
+    akun = sess.akun
+    info_peta = sess.info_peta
+    peta_name = sess.peta_name
+
+    ringkasan = {"Uploaded files": len(sess.input_names)}
     yellow_labels = set()
     for r in per_file:
         if r.get("platform") == "mt4":
@@ -1972,11 +2252,11 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
             yellow_labels.add(f"  - {r['nama']}")
         _tulis_perbaikan(ringkasan, r)
         _tulis_tidak_terbaca(ringkasan, r)
-    if peta_paths:
+    if peta_name:
         n_cent = sum(1 for mata in akun.values() if mata == "USC")
         ip = info_peta
         if ip and ip["group_column"]:
-            ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
+            ringkasan[f"  - {peta_name} (MT4 account types)"] = (
                 f"{len(akun)} accounts (columns account, GROUP, account_type), "
                 f"{n_cent} USC, {len(akun) - n_cent} USD")
             ringkasan["MT4 cent rule"] = ATURAN_CENT
@@ -2008,11 +2288,11 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
                     f"Logins: {_daftar_login(ip['type_only_logins'])}")
                 yellow_labels.add(lbl)
         else:
-            ringkasan[f"  - {peta_paths[0].name} (MT4 account types)"] = (
+            ringkasan[f"  - {peta_name} (MT4 account types)"] = (
                 f"{len(akun)} accounts, {n_cent} CentAccount (USC), "
                 f"{len(akun) - n_cent} other types (USD)")
-    for path in fx_paths:
-        ringkasan[f"  - {path.name} (Client Equity FX)"] = f"FX table, {len(fx):,} date/currency rates"
+    for name in sess.fx_names:
+        ringkasan[f"  - {name} (Client Equity FX)"] = f"FX table, {len(fx):,} date/currency rates"
     ringkasan["USD conversion (Commission/Fee/Swap/Profit)"] = (
         f"applied using {len(fx):,} date/currency rates" if pakai_fx
         else "not applied — no Client Equity FX file uploaded")
@@ -2032,7 +2312,6 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
             "Duplicate non-empty Deal IDs (dropped)": duplikat,
             "Unique 'out' rows kept": dipakai["out"],
             "Unique 'in' rows kept": dipakai["in"],
-            # Label lists every grouping dimension, Currency included -- see _tambah_agregat.
             "Daily 'out' rows (Login+Date+Type+Symbol+Currency)": len(h_out),
             "Daily 'in' rows (same grouping, sheet 'Daily - In')": len(h_in),
             "Monthly Summary 'out' rows (Login+Month+Type+Symbol+Currency)": len(b_out),
@@ -2042,12 +2321,10 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
             "Total Profit ('in' rows)": round(jumlah["in"]["Profit"], 2),
             "Total Commission ('out' rows)": round(jumlah["out"]["Commission"], 2),
             "Total Commission ('in' rows)": round(jumlah["in"]["Commission"], 2),
-            # Volume is not money; keep source precision (do not round to 2 decimals).
             "Total Volume ('out' rows)": jumlah["out"]["Volume"],
             "Total Volume ('in' rows) - same trades as 'out'; do not add the two": jumlah["in"]["Volume"],
         })
     elif ada_mt5:
-        # Angka 'out'/'in' di sini tetap MT5 saja. Panjang sheet gabungan ada di blok MT4.
         ringkasan.update({
             "MT5 source rows": total,
             "Entry = out (before deduplication)": dipakai["out"] + dup_out,
@@ -2130,47 +2407,97 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
         label_beda = "MT4 account type and currency column disagree (cross-check only)"
         if ringkasan.get(label_beda) not in ("(none)", "", None):
             yellow_labels.add(label_beda)
+    return ringkasan, yellow_labels
 
-    if hapus_sumber:
-        # Keep the Verifikasi wording consistent whether parts were removed
-        # mid-parse or only after the zip was written.
-        ringkasan["Uploaded files on the server"] = (
-            "Deleted from the server during / after this run "
-            "(each deals part is removed right after it is parsed; "
-            "remaining inputs are removed once this result is ready). "
-            "The files on your computer are not changed."
+
+
+@_jaga
+def proses(paths_in, path_out: Path, allow_mt4=False,
+           mt4_accounts=None, hapus_sumber=False) -> dict:
+    """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
+
+    Uses IngestSession so multi-part runs (and the web interleaved upload path)
+    share one peak-disk model: parse each part into the index, then delete it.
+    """
+    paths_in = [Path(p) for p in paths_in]
+    path_out = Path(path_out)
+    # Validate / classify the same way as before, then ingest in order.
+    fx_paths = [p for p in paths_in if _adalah_file_fx(p)]
+    rest = [p for p in paths_in if p not in fx_paths]
+    if mt4_accounts and not allow_mt4:
+        sys.exit("STOP: MT4 account types are only used on the KVB Deal Segregator (--allow-mt4).")
+    peta_paths = []
+    if mt4_accounts:
+        peta = Path(mt4_accounts)
+        if not peta.is_file():
+            sys.exit(f"STOP: MT4 account-type file not found: {peta}")
+        peta_paths.append(peta)
+    if allow_mt4:
+        sudah = {p.resolve() for p in peta_paths}
+        for path in rest:
+            if path.resolve() in sudah:
+                continue
+            if _adalah_peta_akun(path):
+                peta_paths.append(path)
+                sudah.add(path.resolve())
+    if len(peta_paths) > 1:
+        names = ", ".join(p.name for p in peta_paths)
+        sys.exit(f"STOP: upload only one MT4 account-type file. Found: {names}.")
+    if len(fx_paths) > 1:
+        sys.exit("STOP: upload only one Client Equity FX workbook per run.")
+    peta_resolved = {p.resolve() for p in peta_paths}
+    deal_paths = [p for p in rest if p.resolve() not in peta_resolved]
+    if not deal_paths:
+        names = ", ".join(p.name for p in fx_paths) or "(none)"
+        sys.exit("STOP: no Deals History file was uploaded; only Client Equity FX / rate file(s) "
+                 f"were found: {names}. Upload the MT5 Deals History export together with the FX file.")
+    klasifikasi = [(path, _info_mt4(path)) for path in deal_paths]
+    mt4_paths = [path for path, info in klasifikasi if info]
+    if mt4_paths and not allow_mt4:
+        names = ", ".join(path.name for path in mt4_paths)
+        sys.exit(
+            "STOP: DPM Deal Segregator accepts MT5 Deals History only. "
+            f"MT4 Raw Report is not used on this page: {names}. "
+            "Upload MT4 on the KVB Deal Segregator."
+        )
+    if mt4_paths and not peta_paths:
+        names = ", ".join(path.name for path in mt4_paths)
+        sys.exit(
+            "STOP: the MT4 account-type file is required for MT4 Raw Report(s): "
+            f"{names}. Upload the account-type file (columns account, account_type, "
+            "optional GROUP) together with the MT4 file. CentAccount or a cent GROUP "
+            "(e.g. real\\Plus-10-cents) is USC (÷100); everything else is USD."
         )
 
-    if path_out.suffix.lower() == ".zip":
-        _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
-                   pakai_platform=ada_mt4)
-    elif pakai_fx:
-        sys.exit("STOP: Client Equity FX output must use a .zip filename.")
-    else:
-        _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
-                        pakai_platform=ada_mt4)
-
-    if hapus_sumber:
-        # The result is already on disk. Removing a source must not fail the run;
-        # the web job folder is cleaned up again after this process exits.
-        for path in list(paths_in) + ([Path(mt4_accounts)] if mt4_accounts else []):
-            if path.resolve() == path_out.resolve():
-                continue
+    path_out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
+        sess = IngestSession(state_dir, allow_mt4=allow_mt4)
+        # Known MT4 in this batch → Platform column from the first MT5 row.
+        if mt4_paths:
+            sess.gabung = True
+        # Helpers first so deals see FX / accounts while parsing.
+        for p in peta_paths:
+            # Keep mt4_accounts path if it was passed separately and hapus_sumber
+            # will clean it in finalize via hapus_remaining.
+            hapus = hapus_sumber and (mt4_accounts is None or Path(p).resolve() != Path(mt4_accounts).resolve())
+            # Always ingest accounts into session; delete with other sources if requested.
+            sess.ingest(p, hapus=False, original_name=p.name)
+        for p in fx_paths:
+            sess.ingest(p, hapus=False, original_name=p.name)
+        n_deals = len(klasifikasi)
+        for urutan, (path, _info) in enumerate(klasifikasi, start=1):
             try:
-                path.unlink()
-            except OSError:
-                pass
+                sess.ingest(path, hapus=hapus_sumber, original_name=path.name,
+                            part_total=n_deals)
+            except SystemExit:
+                raise
+        remaining = []
+        if hapus_sumber:
+            remaining = list(fx_paths) + list(peta_paths)
+            if mt4_accounts:
+                remaining.append(Path(mt4_accounts))
+        return sess.finalize(path_out, hapus_remaining=remaining if hapus_sumber else None)
 
-    result = {"file_masuk": len(paths_in), "total": total, "dipakai": dipakai["out"],
-              "dipakai_in": dipakai["in"],
-              "harian": len(h_out), "bulanan": len(b_out),
-              "harian_in": len(h_in), "bulanan_in": len(b_in),
-              "login_unik": len(login_unik)}
-    if pakai_fx:
-        result.update(pakai_fx=True, kurs_kurang=sum(kurs_kurang.values()))
-    if ada_mt4:
-        result.update(mt4_dipakai=dipakai_mt4["out"])
-    return result
 
 
 # ------------------------------------------------------------------------ tulis
@@ -2353,7 +2680,7 @@ def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_
 @_jaga
 def main():
     ap = argparse.ArgumentParser(description="Deal Segregator -- segregate Deals History per Login")
-    ap.add_argument("input", nargs="+", help="one or more Deals History files (.csv, .xlsx or .xlsm)")
+    ap.add_argument("input", nargs="*", help="one or more Deals History files (.csv, .xlsx or .xlsm)")
     ap.add_argument("-o", "--output", help="result .zip file (default: <input>-hasil.zip)")
     ap.add_argument("--allow-mt4", action="store_true",
                     help="accept an MT4 Manager Raw Report as well (KVB). DPM must leave this off.")
@@ -2365,8 +2692,28 @@ def main():
     ap.add_argument("--delete-input", action="store_true",
                     help="After the result is written, delete the input files. "
                          "The web app passes this. Omit it to leave the files in place.")
+    ap.add_argument("--from-session",
+                    help="Finalize an IngestSession directory created by interleaved "
+                         "/upload/ingest (no input files). Writes the zip/output only.")
     args = ap.parse_args()
 
+    if args.from_session:
+        if args.input:
+            sys.exit("STOP: --from-session does not take input files.")
+        state = Path(args.from_session)
+        if not state.is_dir():
+            sys.exit(f"STOP: session directory not found: {state}")
+        path_out = Path(args.output) if args.output else state / "hasil.zip"
+        sess = IngestSession.load(state, allow_mt4=args.allow_mt4)
+        ringkasan = sess.finalize(path_out)
+        print("=== STAGE 1 DONE ===")
+        for k, v in ringkasan.items():
+            print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")
+        print(f"Output: {path_out.resolve()}")
+        return
+
+    if not args.input:
+        sys.exit("STOP: no input files given.")
     paths_in = [Path(p) for p in args.input]
     n_files = len(paths_in) + (1 if args.mt4_accounts else 0)
     if n_files > MAX_FILES:
