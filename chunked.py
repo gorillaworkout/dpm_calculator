@@ -53,7 +53,7 @@ from upload_limits import MAX_FILES
 CHUNK_SUFFIXES = (".csv", ".xlsx", ".xlsm")
 # Idle time since the last chunk, not the age of the staging directory.
 # A 10 GB upload can take several hours as long as chunks keep arriving.
-STAGE_MAX_AGE_HOURS = 1
+STAGE_MAX_AGE_HOURS = 4  # match UPLOAD_IDLE_SECONDS default
 _GIB = 1024 * 1024 * 1024
 # Deal-index overhead measured on this code (journal off, no sqlite temp file,
 # workbook deleted as soon as it is inside the zip — the index and the workbook

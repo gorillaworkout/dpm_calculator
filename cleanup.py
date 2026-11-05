@@ -43,7 +43,7 @@ def _env_float(name, default):
         return float(default)
 
 
-UPLOAD_IDLE_SECONDS = _env_float("DW_UPLOAD_IDLE_SECONDS", 15 * 60)
+UPLOAD_IDLE_SECONDS = _env_float("DW_UPLOAD_IDLE_SECONDS", 4 * 3600)  # was 15 min; long enough to resume after refresh
 YOUNG_SECONDS = 60
 STATE_MAX_AGE_SECONDS = 7 * 24 * 3600
 QUEUE_TICKET_TTL = 30          # a waiting browser polls every few seconds

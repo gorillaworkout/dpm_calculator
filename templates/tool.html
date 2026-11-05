@@ -724,16 +724,109 @@
         .then(function (r) { return r.ok && isJson(r) ? r.json() : null; });
     }
     var activeContext = null;
-    // The staged upload this tab owns until the processing route takes it over.
-    // Closing or leaving the tab discards it at once (best effort), so it neither
-    // holds disk nor waits for the idle cleanup. A page kept in the back/forward
-    // cache (persisted) can come back and resume, so it is left alone.
+    // Staged upload this tab owns until processing takes over. Closing the tab
+    // no longer discards it: idle TTL (hours) cleans abandoned staging, and the
+    // browser can resume after refresh by re-selecting the same file(s).
     var pageUpload = null;
-    window.addEventListener('pagehide', function (ev) {
-      if (!pageUpload || ev.persisted) return;
-      var fd = new FormData(); fd.append('id', pageUpload); fd.append('reason', 'pagehide');
-      if (navigator.sendBeacon) navigator.sendBeacon('/upload/discard', fd);
-    });
+    var RESUME_KEY = 'dw_upload_resume:' + location.pathname;
+    var resumePending = null;   // {id, files:[{name,size,lastModified,fp}], total, maxPart}
+    var resumeReady = null;     // set after user confirms and re-selects matching files
+
+    function saveResume(state) {
+      try { localStorage.setItem(RESUME_KEY, JSON.stringify(state)); } catch (e) {}
+    }
+    function clearResume() {
+      try { localStorage.removeItem(RESUME_KEY); } catch (e) {}
+      resumePending = null; resumeReady = null;
+    }
+    function loadResume() {
+      try { return JSON.parse(localStorage.getItem(RESUME_KEY) || 'null'); }
+      catch (e) { return null; }
+    }
+    function sha256_16(buf) {
+      return crypto.subtle.digest('SHA-256', buf).then(function (dig) {
+        return Array.prototype.map.call(new Uint8Array(dig).slice(0, 8), function (b) {
+          return ('0' + b.toString(16)).slice(-2);
+        }).join('');
+      });
+    }
+    function fileFingerprint(file, probe) {
+      return {name: file.name, size: file.size, lastModified: file.lastModified || 0,
+              fp: probe && probe.fp ? probe.fp : null};
+    }
+    function fingerprintsMatch(saved, file, probe) {
+      if (!saved || !file) return false;
+      if (saved.name !== file.name || saved.size !== file.size) return false;
+      if (saved.lastModified && file.lastModified && saved.lastModified !== file.lastModified) return false;
+      if (saved.fp && probe && probe.fp && saved.fp !== probe.fp) return false;
+      return true;
+    }
+    // Optional File System Access API handle persistence (Chromium). Best-effort only.
+    function maybePersistHandles(files) {
+      if (!window.showOpenFilePicker || !files || !files.length) return;
+      // Handles are not available from <input type=file>; skip unless future UI uses picker.
+    }
+
+    var resumeBanner = null;
+    function hideResumeBanner() {
+      if (resumeBanner && resumeBanner.parentNode) resumeBanner.parentNode.removeChild(resumeBanner);
+      resumeBanner = null;
+    }
+    function showResumeBanner(saved, status) {
+      hideResumeBanner();
+      resumePending = saved;
+      var received = status && status.bytes != null ? status.bytes : 0;
+      var total = saved.total || 0;
+      var ingested = (status && status.ingested) ? status.ingested.length : 0;
+      var nFiles = saved.files && saved.files.length ? saved.files.length : 0;
+      var ingestNote = ingested
+        ? (' · ' + ingested + ' of ' + nFiles + ' already parsed into the index (will not re-upload)')
+        : '';
+      resumeBanner = document.createElement('div');
+      resumeBanner.className = 'note';
+      resumeBanner.id = 'upload-resume-banner';
+      resumeBanner.setAttribute('role', 'status');
+      resumeBanner.innerHTML =
+        '<strong>Lanjutkan upload sebelumnya? / Resume previous upload?</strong><br>' +
+        size(received) + ' of ' + size(total) + ' already on the server' +
+        (nFiles ? ' · ' + nFiles + ' file(s)' : '') + ingestNote +
+        '. Pilih ulang file yang sama, lalu tekan Lanjutkan / Re-select the same file(s), then press Resume.<br>' +
+        '<button type="button" id="resume-yes" class="btn" style="margin:8px 8px 0 0">Lanjutkan / Resume</button>' +
+        '<button type="button" id="resume-no" class="btn secondary" style="margin:8px 0 0 0">Buang / Discard</button>';
+      var host = document.getElementById('disk-preflight-status') || form;
+      if (host && host.parentNode) host.parentNode.insertBefore(resumeBanner, host);
+      else form.insertBefore(resumeBanner, form.firstChild);
+      document.getElementById('resume-yes').addEventListener('click', function () {
+        resumeReady = resumePending;
+        resumeBanner.innerHTML =
+          '<strong>Siap dilanjutkan / Ready to resume</strong> — pilih ulang file yang sama di kotak upload, lalu tekan Run. / ' +
+          'Re-select the same file(s) in the upload box, then press Run.<br>' +
+          '<span class="hint">Progress: ' + size(received) + ' / ' + size(total) + ' (paused until you continue)</span>';
+        updateProgress('Paused — re-select files to resume',
+          size(received) + ' of ' + size(total) + ' on server · waiting for the same file(s)',
+          total ? received / total * 100 : 0, 'retrying');
+      });
+      document.getElementById('resume-no').addEventListener('click', function () {
+        var id = saved.id;
+        clearResume();
+        hideResumeBanner();
+        if (id) {
+          var fd = new FormData(); fd.append('id', id); fd.append('reason', 'resume-discard');
+          fetch('/upload/discard', {method: 'POST', body: fd, credentials: 'same-origin'});
+        }
+        updateProgress('Previous upload discarded', 'Staging removed. Select files and press Run to start fresh.', 0, 'failed');
+      });
+    }
+
+    // On load: offer resume if staging still exists.
+    (function checkResumeOnLoad() {
+      var saved = loadResume();
+      if (!saved || !saved.id) return;
+      uploadStatus(saved.id).then(function (st) {
+        if (!st || st.bytes == null) { clearResume(); return; }
+        showResumeBanner(saved, st);
+      }, function () { clearResume(); });
+    })();
     var sendChunk = makeChunkSender({
       fetch: fetchWithTimeout, sleep: sleepTicking, waitOnline: waitOnline,
       online: function () { return navigator.onLine !== false; },
@@ -1017,12 +1110,100 @@
               de.need = pf.need; de.free = pf.free; de.freed = pf.freed;
               throw de;
             }
+            // If a prior upload is still offered and the re-selected files match,
+            // treat Run as Resume even when the user did not click the banner button.
+            if (!resumeReady && resumePending && resumePending.id) {
+              var sf0 = resumePending.files || [];
+              if (files.length === sf0.length) {
+                var allOk = true;
+                for (var j = 0; j < files.length; j++) {
+                  var cj = checks[fileKey(files[j])];
+                  if (!fingerprintsMatch(sf0[j], files[j], cj && cj.state === 'ok' ? {fp: cj.fp} : null)) {
+                    allOk = false; break;
+                  }
+                }
+                if (allOk) resumeReady = resumePending;
+              }
+            }
+            if (resumeReady && resumeReady.id) {
+              // Resume path: re-selected files must match saved fingerprints.
+              var savedFiles = resumeReady.files || [];
+              if (files.length !== savedFiles.length) {
+                var me = new Error('Jumlah file beda dari upload sebelumnya (' + savedFiles.length +
+                  '). Pilih file yang sama / File count differs from the previous upload (' +
+                  savedFiles.length + '). Select the same file(s).');
+                me.noRetry = true; throw me;
+              }
+              for (var i = 0; i < files.length; i++) {
+                var ck = checks[fileKey(files[i])];
+                if (!fingerprintsMatch(savedFiles[i], files[i], ck && ck.state === 'ok' ? {fp: ck.fp} : null)) {
+                  var me2 = new Error('File tidak cocok dengan upload sebelumnya: ' + files[i].name +
+                    ' / File does not match the previous upload: ' + files[i].name +
+                    '. Pilih ulang file yang sama (nama, ukuran, isi). / Re-select the same file(s).');
+                  me2.noRetry = true; throw me2;
+                }
+              }
+              updateProgress('Resuming previous upload…',
+                files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
+              return uploadStatus(resumeReady.id).then(function (st) {
+                if (!st) {
+                  clearResume();
+                  var gone = new Error('Upload sebelumnya sudah habis di server. Mulai lagi / Previous upload expired on the server. Start again.');
+                  gone.noRetry = true; throw gone;
+                }
+                // Verify first-chunk hash for each file that already has server bytes.
+                var checksHash = Promise.resolve();
+                (st.files || []).forEach(function (sf) {
+                  if (!sf.hashes || !sf.hashes.length || !files[sf.index]) return;
+                  checksHash = checksHash.then(function () {
+                    var f = files[sf.index];
+                    var piece = f.slice(0, Math.min(CHUNK, f.size));
+                    return (piece.arrayBuffer ? piece.arrayBuffer() : new Response(piece).arrayBuffer()).then(function (buf) {
+                      return sha256_16(buf).then(function (hex) {
+                        if (hex !== sf.hashes[0]) {
+                          var bad = new Error(
+                            'Isi file berubah sejak upload sebelumnya: ' + f.name +
+                            ' / File contents changed since the previous upload: ' + f.name +
+                            '. Mulai ulang / Start a new upload.');
+                          bad.noRetry = true; throw bad;
+                        }
+                      });
+                    });
+                  });
+                });
+                return checksHash.then(function () {
+                  hideResumeBanner();
+                  return {id: resumeReady.id, resume: true, status: st};
+                });
+
+              });
+            }
             updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
+            clearResume(); // new attempt — drop any stale resume record before begin
+            hideResumeBanner();
             return beginUpload(1, total, null, maxPart);
           });
         })
         .then(function (start) {
-          var id = activeId = pageUpload = start.id;
+          var id, already = {};
+          if (start && start.resume) {
+            id = activeId = pageUpload = start.id;
+            (start.status.files || []).forEach(function (f) {
+              already[f.index] = f;
+              sent += f.bytes || 0;
+            });
+            updateProgress('Resuming upload…',
+              mb(sent) + ' of ' + mb(total) + ' MB already on server · ' + elapsed(started),
+              total ? sent / total * 100 : 0, 'uploading');
+          } else {
+            id = activeId = pageUpload = start.id;
+            // Fresh upload replaces any prior resume record for this page.
+            var fps = files.map(function (f) {
+              var c = checks[fileKey(f)];
+              return fileFingerprint(f, c && c.state === 'ok' ? {fp: c.fp} : null);
+            });
+            saveResume({id: id, files: fps, total: total, maxPart: maxPart, savedAt: Date.now()});
+          }
 
           // Sequential on purpose: parallel chunks would race on the append and
           // the server rejects anything out of order. For Deal Segregator, each
@@ -1032,9 +1213,15 @@
           files.forEach(function (file, fileIndex) {
             var seq = 0;
             var chunks = Math.ceil(file.size / CHUNK) || 1;
+            var prior = already[fileIndex] || {};
+            var have = prior.ingested ? chunks : (prior.chunks || 0);
             for (var off = 0; off < file.size || (file.size === 0 && seq === 0); off += CHUNK) {
               (function (offset, mySeq) {
                 chain = chain.then(function () {
+                  if (mySeq < have) {
+                    // Already on server — skip without re-sending.
+                    return;
+                  }
                   var label = 'File ' + (fileIndex + 1) + ' of ' + files.length + ': ' + file.name +
                     ' · chunk ' + (mySeq + 1) + ' of ' + chunks;
                   currentContext = {file: file.name, fileObj: file, fileIndex: fileIndex + 1, fileCount: files.length,
@@ -1062,6 +1249,10 @@
                     }})
                     .then(function () {
                       sent += Math.min(CHUNK, file.size - offset);
+                      saveResume({id: id, files: files.map(function (f) {
+                        var c = checks[fileKey(f)];
+                        return fileFingerprint(f, c && c.state === 'ok' ? {fp: c.fp} : null);
+                      }), total: total, maxPart: maxPart, savedAt: Date.now(), sent: sent});
                       updateProgress('Uploading…', label + ' · ' + mb(sent) + ' of ' + mb(total) + ' MB uploaded · ' + elapsed(started),
                         total ? sent / total * 100 : 100, 'uploading');
                     });
@@ -1070,15 +1261,16 @@
               if (file.size === 0) break;
             }
             if (INTERLEAVE_INGEST) {
-              (function (fi, fname) {
+              (function (fi, fname, wasIngested) {
                 chain = chain.then(function () {
+                  if (wasIngested) return;  // already in the job index from a prior session
                   updateProgress('Processing on server…',
                     'File ' + (fi + 1) + ' of ' + files.length + ': ' + fname +
                     ' — parsing into the index and freeing disk · ' + elapsed(started),
                     total ? sent / total * 100 : 100, 'processing');
                   return ingestPart(id, fi, fname);
                 });
-              })(fileIndex, file.name);
+              })(fileIndex, file.name, !!prior.ingested);
             }
           });
 
@@ -1097,6 +1289,7 @@
             hidden.value = id;
             form.appendChild(hidden);
             activeId = pageUpload = null; // processing route now owns and removes the staged files
+            clearResume();
             form.submit();
           });
         })
@@ -1116,10 +1309,22 @@
             form.b.textContent = 'Run & download result';
             return;
           }
-          if (activeId) {
+          // Keep staging so the user can resume after fixing the network / re-opening
+          // the tab. Only drop it for unreadable files (bytes may be corrupt).
+          if (activeId && err && err.fileRead) {
             var cleanup = new FormData(); cleanup.append('id', activeId);
-            cleanup.append('reason', err && err.fileRead ? 'file-read-error' : 'upload-failed');
+            cleanup.append('reason', 'file-read-error');
             fetch('/upload/discard', { method: 'POST', body: cleanup, keepalive: true });
+            clearResume();
+          } else if (activeId) {
+            updateProgress('Upload paused — can resume',
+              uploadError(err, currentContext) +
+              ' Staging is kept on the server. Refresh and choose Resume, or press Run again with the same files.',
+              currentContext ? currentContext.percent : 0, 'retrying');
+            form.b.disabled = false;
+            form.b.textContent = 'Run & download result';
+            if (err && err.fileRead && currentContext && currentContext.fileObj) addRepick(currentContext.fileObj);
+            return;
           }
           updateProgress('Upload failed', uploadError(err, currentContext), currentContext ? currentContext.percent : 0, 'failed');
           if (err && err.fileRead && currentContext && currentContext.fileObj) addRepick(currentContext.fileObj);

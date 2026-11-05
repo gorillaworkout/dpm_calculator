@@ -133,7 +133,7 @@ assert (JOBS / "staging" / second).is_dir(), "idle (not expired) upload deleted 
 set_heartbeat(second, cleanup.UPLOAD_IDLE_SECONDS + 30)
 assert begin(admin, 10).status_code == 200
 assert not (JOBS / "staging" / second).exists(), "expired upload not cleaned"
-print("OK stale upload stops blocking at 5 min, is removed at 15 min")
+print("OK stale upload stops blocking at UPLOAD_BLOCK, is removed at UPLOAD_IDLE")
 
 # --- 5. discard only your own upload -------------------------------------------------
 r = bayu.post("/upload/discard", data={"id": alice_up})
@@ -208,7 +208,7 @@ assert 'user=request.user["username"]' in src
 # --- 10. limits unchanged; queue tickets keep TTL; legacy tickets still read -----------
 assert chunked.MAX_TOTAL == 12 * GIB and chunked.MAX_FILES == 70
 assert begin(bayu, 12 * GIB + 1).status_code == 413
-assert cleanup.QUEUE_TICKET_TTL == 30 and cleanup.UPLOAD_IDLE_SECONDS == 15 * 60
+assert cleanup.QUEUE_TICKET_TTL == 30 and cleanup.UPLOAD_IDLE_SECONDS == 4 * 3600
 t = "c" * 32
 (JOBS / "queue" / t).write_text(str(time.time()))          # pre-#25 ticket format
 assert cleanup.queue_entries(JOBS)[0][1:] == (t, None)

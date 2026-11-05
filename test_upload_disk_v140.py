@@ -254,17 +254,20 @@ assert "/upload/preflight" in html
 print("OK tool.html gating + UI hints")
 
 # VERSION
-assert "1.40" in Path("VERSION").read_text()
-print("OK VERSION 1.40")
+assert any(v in Path("VERSION").read_text() for v in ("1.40", "1.41"))
+print("OK VERSION (1.40+)")
 
 # ---- max_part_fit + single-file split advice ----
-free_113 = int(11.3 * _GIB)
-info_single = chunked.ringkas_preflight(S, free_113, max_part=S)
+# User's server report: ~11.3 GB free (decimal). Peak for unsplit 11 GiB fails;
+# max_part_fit is what would pass as the largest part.
+free_113_gb = int(11.3 * 1000**3)
+info_single = chunked.ringkas_preflight(S, free_113_gb, max_part=S)
 assert info_single["ok"] is False
 assert info_single["max_part_fit"] > 0
 assert info_single["max_part_fit"] < S
 assert "Split into parts" in info_single["message_en"] or "Pecah file" in info_single["message_id"]
-print(f"OK max_part_fit={info_single['max_part_fit'] / _GIB:.3f} GiB for 11 GiB on 11.3 GB free")
+print(f"OK max_part_fit={info_single['max_part_fit'] / _GIB:.3f} GiB "
+      f"({info_single['max_part_fit'] / (1000**3):.3f} GB) for 11 GiB on 11.3 GB free")
 
 # ---- interleaved HTTP ingest: peak on disk never exceeds preflight ----
 def stage_bytes(stage):

@@ -72,6 +72,20 @@ The server has no `.git`, so the version cannot come from git.
 Do not put a commit SHA in it. Copy `VERSION` with the other files on every
 deploy and restart the app. A missing file shows `version unknown`.
 
+### Upload resume after refresh (v1.41)
+
+Closing or refreshing the tab no longer discards an in-progress chunked upload.
+Staging lives until the idle TTL (default **4 hours**, `DW_UPLOAD_IDLE_SECONDS`)
+or until the same user starts a new upload (supersede). The browser keeps
+`upload_id` + per-file fingerprints (name, size, lastModified, probe hash) in
+`localStorage`. On return it offers **Lanjutkan upload sebelumnya? / Resume
+previous upload?**; the user must re-select the same file(s). The client checks
+fingerprints and the server's first-chunk hash from `GET /upload/status`, then
+continues from the next seq. For Deal Segregator, `GET /upload/status` also
+lists parts already **ingested** into the job index; resume skips those parts
+(and only uploads the remaining ones) after verifying fingerprints. Disk
+preflight subtracts bytes already staged for that user.
+
 ### Upload disk preflight (v1.40)
 
 Before chunks start, the browser calls `GET /upload/preflight?bytes=&max_part=`
