@@ -584,7 +584,9 @@ LEGENDA = {
     "Handling Fee":
         "Handling Fee = Transaction x fee rate from the 'D&W FEE' sheet,\n"
         "matched on Currency + Payment Gateway.\n"
-        "Deposit rows use the Deposit rate, withdrawal rows the Withdrawal rate.\n\n"
+        "Deposit rows use the Deposit rate, withdrawal rows the Withdrawal rate.\n"
+        "Tiered rate '3.5%; >5000 3.8%': 3.8% of the WHOLE amount when the\n"
+        "transaction is above 5,000 (Data Status shows the rate used).\n\n"
         "RED CELL = no fee rate exists yet for this Currency + Payment Gateway.\n"
         "The cell is deliberately left EMPTY (not 0) so the amount is never\n"
         "silently understated.\n"
@@ -613,6 +615,7 @@ LEGENDA = {
         "Per-row data quality note.\n\n"
         "OK   = fee rate and exchange rate both found exactly.\n"
         "FEE: = no fee rate for this Currency + Payment Gateway.\n"
+        "OK; FEE: = tiered rate: the rate/tier used for this row (info only).\n"
         "FX:  = the transaction date is missing from the XERO sheet, or no rate\n"
         "       exists for that currency at all.\n"
         "DATA:= the source export itself is incomplete (empty gateway, amount\n"
@@ -1033,7 +1036,165 @@ def cari_sheet(wb, kandidat):
     return None
 
 
+_ADA_TIER = re.compile(r"[>≥]")
+_TIER = re.compile(r"(>=|\u2265|>)\s*(\d[\d.,]*)\s*([kK])?\s+(\S.*)")
+
+
+def _teks_batas(b):
+    return f"{b:,.0f}" if float(b).is_integer() else f"{b:,g}"
+
+
+def _teks_komp(k):
+    t = f"{k['pct'] * 100:g}%"
+    if k["fixed"]:
+        t += f"+{k['fixed']:g}"
+    if k["min"] is not None:
+        t += f" min {k['min']:g}"
+    return t
+
+
 def baca_rate(v):
+    """Rate sel Deposit/Withdrawal -> {'pct','fixed','min'} atau None.
+
+    v1.38 -- rate BERTINGKAT (tier), dipisah titik koma:
+        3.5%; >5000 3.8%           -> 3,5%; transaksi > 5.000 kena 3,8% dari
+                                      SELURUH nominal (bukan marginal)
+        3.5%; >=5k 3.8%; >20k 4%   -> '>=' inklusif, 'k' = x1000, tier sebanyak
+                                      apa pun; dipakai batas TERTINGGI yang lewat
+        1.5%+50; >5000 1.2%+50     -> tiap tier boleh pakai format lama
+    Hasilnya dict dasar (tingkat pertama) + 'tiers' [{'op','batas',pct,fixed,min}].
+    Teks tier yang tidak terbaca -> dict dengan 'error' (pct 0): JANGAN dipakai
+    menghitung; process_sheet mengosongkan Handling Fee-nya (merah) + peringatan.
+    Batas dibaca dengan konvensi ribuan: 5,000 = 5.000 = 5000.
+    Teks tanpa '>N' / '>=N' dibaca persis seperti sebelum v1.38 (juga kalau ada ';').
+    """
+    if isinstance(v, str) and _ADA_TIER.search(v):
+        return _baca_rate_tier(v)
+    return _baca_rate_dasar(v)
+
+
+def _rate_salah(teks, sebab):
+    return {"pct": 0.0, "fixed": 0.0, "min": None, "error": sebab, "teks": teks}
+
+
+def _baca_rate_tier(v):
+    teks = " ".join(str(v).split())
+    bagian = [b.strip() for b in teks.split(";")]
+    while bagian and not bagian[-1]:
+        bagian.pop()
+    if not bagian or not bagian[0]:
+        return _rate_salah(teks, "the normal rate must come first, e.g. 3.5%; >5000 3.8%")
+    if _ADA_TIER.match(bagian[0]):
+        return _rate_salah(teks, "the normal rate must come first, e.g. 3.5%; >5000 3.8%")
+    if _ADA_TIER.search(bagian[0]):
+        return _rate_salah(teks, "separate each tier with ';', e.g. 3.5%; >5000 3.8%")
+    dasar = _baca_rate_dasar(bagian[0])
+    if dasar is None:
+        return _rate_salah(teks, f"cannot read the normal rate '{bagian[0]}'")
+    tiers, dipakai = [], set()
+    for b in bagian[1:]:
+        m = _TIER.fullmatch(b)
+        if not m:
+            return _rate_salah(teks, f"cannot read tier '{b}' - write it as >5000 3.8%")
+        op = ">=" if m.group(1) in (">=", "\u2265") else ">"
+        batas = parse_number(m.group(2), ambiguous=THOUSANDS, default=None)
+        isi = m.group(4).strip()
+        if batas is None:
+            return _rate_salah(teks, f"cannot read the amount in tier '{b}'")
+        if m.group(3):
+            batas *= 1000
+        if _ADA_TIER.search(isi) or not re.search(r"\d", isi):
+            return _rate_salah(teks, f"cannot read tier '{b}' - write it as >5000 3.8%")
+        r = _baca_rate_dasar(isi)
+        if r is None:
+            return _rate_salah(teks, f"cannot read the rate in tier '{b}'")
+        if batas in dipakai:
+            return _rate_salah(teks, f"amount {_teks_batas(batas)} is used by two tiers")
+        dipakai.add(batas)
+        tiers.append({"op": op, "batas": batas, **r})
+    if not tiers:
+        return dasar
+    tiers.sort(key=lambda t: t["batas"])
+    return {**dasar, "tiers": tiers, "teks": teks}
+
+
+def pilih_tier(komp, jumlah):
+    """Komponen rate yang berlaku untuk nominal transaksi `jumlah` (mata uang
+    transaksinya sendiri). -> (komp_efektif, label). Label None kalau rate-nya
+    tidak bertingkat. Rate tier berlaku untuk SELURUH nominal."""
+    tiers = (komp or {}).get("tiers")
+    if not tiers or jumlah is None:
+        return komp, None
+    a = abs(jumlah)
+    kena = None
+    for t in tiers:                       # urut naik -> yang terakhir lewat = tertinggi
+        if a > t["batas"] or (t["op"] == ">=" and a >= t["batas"]):
+            kena = t
+    if kena is None:
+        return ({"pct": komp["pct"], "fixed": komp["fixed"], "min": komp["min"]},
+                f"{_teks_komp(komp)} (normal rate; tier from "
+                f"{tiers[0]['op']}{_teks_batas(tiers[0]['batas'])} not reached)")
+    return ({"pct": kena["pct"], "fixed": kena["fixed"], "min": kena["min"]},
+            f"{_teks_komp(kena)} (tier {kena['op']}{_teks_batas(kena['batas'])} applied "
+            f"to the whole amount)")
+
+
+_REMARK_TIER = re.compile(
+    r"(more than|above|over|greater than|lebih dari|di ?atas|>)\s*[^%;]{0,15}?\d[\d.,]*\s*[kK]?"
+    r".{0,40}?\d[\d.,]*\s*%", re.I)
+
+
+def remark_mirip_tier(teks):
+    """True kalau Remark terlihat berisi aturan tier ('more than 5K, then 3.8%')."""
+    return bool(teks) and isinstance(teks, str) and bool(_REMARK_TIER.search(teks))
+
+
+def sel_rate(komp):
+    """Isi kolom (persen, fixed, min) sheet fee hasil untuk satu sisi rate.
+    Rate bertingkat / tidak terbaca ditulis sebagai TEKS aslinya di kolom persen
+    (fixed/min kosong) supaya sheet itu bisa dibaca ulang tanpa kehilangan tier."""
+    if not komp:
+        return None, None, None
+    if komp.get("tiers") or komp.get("error"):
+        return komp.get("teks"), None, None
+    return komp["pct"], (komp["fixed"] or None), komp["min"]
+
+
+def catatan_tier(v):
+    """Catatan kolom Note sheet fee: rate bertingkat, rate tidak terbaca, Remark."""
+    out = []
+    for sisi, label in (("deposit", "Deposit"), ("withdrawal", "Withdrawal")):
+        k = v.get(sisi) or {}
+        if k.get("error"):
+            out.append(f"{label} rate cannot be read: {k['error']} - "
+                       f"its Handling Fee is left EMPTY")
+        elif k.get("tiers"):
+            out.append(f"{label} tiered: " + "; ".join(
+                [_teks_komp(k)] + [f"{t['op']}{_teks_batas(t['batas'])} {_teks_komp(t)}"
+                                   for t in k["tiers"]]) + " (tier rate on the whole amount)")
+    if remark_mirip_tier(v.get("remark")) and not any(
+            (v.get(s_) or {}).get("tiers") for s_ in ("deposit", "withdrawal")):
+        rm = v["remark"]
+        if "Remark looks like a tier rule" in rm:     # Note sheet hasil yang dibaca ulang
+            out.append(rm[rm.index("Remark looks like a tier rule"):])
+        else:
+            out.append(f"Remark looks like a tier rule ('{rm}') but Remark is NOT used in "
+                       f"the calculation. Write it in the rate cell, e.g. 3.5%; >5000 3.8%")
+    return out
+
+
+def kumpulkan_peringatan_tier(fee_table):
+    """[(currency, gateway, teks)] untuk Missing Data: rate tier tidak terbaca dan
+    Remark yang berisi aturan tier."""
+    hasil = []
+    for (cur, _k), v in sorted(fee_table.items(), key=lambda x: (x[0][0], x[1].get("nama") or "")):
+        for teks in catatan_tier(v):
+            if "tiered:" not in teks:
+                hasil.append((cur, v.get("nama") or _k, teks))
+    return hasil
+
+
+def _baca_rate_dasar(v):
     """Rate bisa berupa angka atau teks. -> {'pct','fixed','min'} atau None.
 
         0.027          -> 2,7%
@@ -1093,6 +1254,8 @@ def _baca_satu_sheet_fee(ws):
                      if k.startswith("WITHDRAW")
                      and not k.endswith(("FIXED", "MIN"))), None)
     # kolom tambahan yang kita sendiri tulis di sheet 'D&W FEE' hasil gabungan
+    c_remark = next((kol[k] for k in ("REMARK", "REMARKS", "NOTE", "NOTES", "KETERANGAN")
+                     if k in kol), None)
     c_extra = {
         "dep_fixed": kol.get("DEPOSIT FIXED"),
         "wd_fixed": kol.get("WITHDRAWAL FIXED"),
@@ -1119,11 +1282,16 @@ def _baca_satu_sheet_fee(ws):
             m = to_float(row[c2]) if c2 is not None and len(row) > c2 else None
             if komp is None and (f or m is not None):
                 komp = {"pct": 0.0, "fixed": 0.0, "min": None}
-            if komp is not None:
+            if komp is not None and not komp.get("error"):
                 if f:
                     komp["fixed"] = f
                 if m is not None:
                     komp["min"] = m
+                for t in komp.get("tiers") or ():     # kolom terpisah berlaku juga
+                    if f and not t["fixed"]:           # untuk tier yang tidak menulis
+                        t["fixed"] = f                 # fixed/min sendiri
+                    if m is not None and t["min"] is None:
+                        t["min"] = m
             return komp
 
         dep = _pakai(dep, "dep_fixed", "dep_min")
@@ -1137,7 +1305,10 @@ def _baca_satu_sheet_fee(ws):
         wd_raw = row[c_wd] if c_wd is not None and len(row) > c_wd else None
         out[(cur, k_gw)] = {"deposit": dep, "withdrawal": wd, "fixed": legacy,
                             "nama": gw, "nama_asli": " ".join(str(row[c_gw]).split()),
-                            "dep_raw": dep_raw, "wd_raw": wd_raw}
+                            "dep_raw": dep_raw, "wd_raw": wd_raw,
+                            "remark": (str(row[c_remark]).strip()
+                                       if c_remark is not None and len(row) > c_remark
+                                       and row[c_remark] not in (None, "") else None)}
     return out, h_idx + 1
 
 
@@ -1186,6 +1357,7 @@ def load_fee_table(wb, pakai_extra_fees=None):
                 "ditimpa": catat,
                 "dep_raw": v.get("dep_raw") if v["deposit"] is not None else lama.get("dep_raw"),
                 "wd_raw": v.get("wd_raw") if v["withdrawal"] is not None else lama.get("wd_raw"),
+                "remark": v.get("remark") or lama.get("remark"),
             }
         print(f"         sheet fee {nama!r} (header baris {hrow - 1}): "
               f"{len(bagian)} baris -> {baru} baru, {timpa} menimpa")
@@ -1599,6 +1771,12 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
 
         # 1. Handling Fee
         komp, fixed, key, how = lookup_fee(fee_table, currency, gateway, kind)
+        rate_salah = komp.get("error") if komp else None
+        info_fee = None
+        if rate_salah:
+            komp_asli, komp = komp, None
+        elif komp is not None and komp.get("tiers") and tx is not None:
+            komp, info_fee = pilih_tier(komp, tx)
         rate = komp["pct"] if komp else None
         fee = None
         if komp is not None and tx is not None:
@@ -1612,6 +1790,10 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
             fee = None
             rate = None
             report["ditolak"][(norm(currency), norm(status))] += 1
+        elif rate_salah:
+            report.setdefault("fee_invalid", Counter())[
+                (norm(currency), norm(gateway), kind, komp_asli.get("teks") or "",
+                 rate_salah)] += 1
         elif komp is None:
             report["fee_missing"][(norm(currency), norm(gateway))] += 1
         if komp is not None and not ditolak:
@@ -1680,6 +1862,9 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
             alasan = str(ws.cell(row=row, column=c_remark).value or "").strip() if c_remark else ""
             if alasan:
                 catatan.append(f"REASON: {alasan}")
+        elif rate_salah:
+            catatan.append(f"FEE: {kind} rate for {norm(currency)} / {norm(gateway)} "
+                           f"cannot be read ({rate_salah}) - fix it in the fee sheet")
         elif rate is None:
             catatan.append(f"FEE: no rate for {norm(currency)} / {norm(gateway)}")
         if xrate is None:
@@ -1738,7 +1923,13 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
             rec["_date_col"] = date_col_name.title()
             rec["_tgl"] = paid       # tanggal yang DIPAKAI (Rebate: bukan 'Completed Date' mentah)
             rec["Type"] = kind
-            rec["Data Status"] = "; ".join(catatan) if catatan else "OK"
+            # rate bertingkat: rate yang dipakai ditulis di Data Status. Hanya
+            # info -> status tetap diawali 'OK' dan sel-nya tidak diwarnai.
+            if info_fee and not ditolak:
+                rec["Data Status"] = "; ".join(catatan + [f"FEE: {info_fee}"]) if catatan \
+                    else f"OK; FEE: {info_fee}"
+            else:
+                rec["Data Status"] = "; ".join(catatan) if catatan else "OK"
             rec["_fee_missing"] = rate is None
             rec["_fx_missing"] = xrate is None
             rec["_fx_fallback"] = bool(fallback)
@@ -1837,14 +2028,11 @@ def write_fee_sheet(wb, fee_table):
         dep, wd = v.get("deposit"), v.get("withdrawal")
         asal = v.get("asal") or []
         catat = list(v.get("ditimpa") or [])
+        catat += catatan_tier(v)
+        (dp, df, dm), (wp, wf, wm) = sel_rate(dep), sel_rate(wd)
         nilai = [
             cur, v.get("nama") or "",
-            dep["pct"] if dep else None,
-            wd["pct"] if wd else None,
-            (dep["fixed"] or None) if dep else None,
-            (wd["fixed"] or None) if wd else None,
-            dep["min"] if dep else None,
-            wd["min"] if wd else None,
+            dp, wp, df, wf, dm, wm,
             " + ".join(asal[-2:]) if len(asal) > 1 else (asal[0] if asal else ""),
             "; ".join(catat) or None,
         ]
@@ -4126,7 +4314,8 @@ def write_detail_sheet(wb, report):
                 cell.fill, cell.font = FILL_MISSING, FONT_MISSING
             elif nama == "Xero Rate" and rec["_fx_fallback"]:
                 cell.fill = FILL_WARN
-            elif nama == "Data Status" and rec["Data Status"] != "OK":
+            elif nama == "Data Status" and rec["Data Status"] != "OK" \
+                    and not rec["Data Status"].startswith("OK; "):
                 cell.fill = FILL_WARN if not (rec["_fee_missing"] or rec["_fx_missing"]) else FILL_MISSING
                 cell.alignment = Alignment(wrap_text=False)
 
@@ -4427,6 +4616,48 @@ def write_missing_sheet(wb, report):
                 if c == 2:
                     cell.fill = FILL_WARN
             ws.row_dimensions[r].height = 84
+
+    # ---- 2c. rate bertingkat (v1.38) -- hanya kalau ada yang perlu dilihat
+    tier_warn = report.get("tier_warn") or []
+    invalid = report.get("fee_invalid") or {}
+    if tier_warn or invalid:
+        r += 2
+        ws.cell(r, 2, "2c. TIERED FEE RATES TO CHECK").font = \
+            Font(bold=True, size=12, color="C00000")
+        r += 1
+        ws.cell(r, 2, "Tiered rate syntax: 3.5%; >5000 3.8% = 3.5% normally, 3.8% of the "
+                      "WHOLE amount when the transaction is above 5,000. Remark is never "
+                      "used in the calculation.").font = Font(italic=True, size=10)
+        r += 1
+        _header(ws, r, ["Currency", "Payment Gateway", "Rows affected", "", "",
+                        "Problem -> what to do"], "C00000")
+        n_inv = Counter()
+        for (cur, gw, _kind, _teks, _err), n in invalid.items():
+            n_inv[(cur, gw)] += n
+        dicetak = set()
+        for cur, gw, teks in tier_warn:
+            r += 1
+            n = n_inv.get((cur, norm(gw)), 0) if "cannot be read" in teks else ""
+            dicetak.add((cur, norm(gw)))
+            for c, v in enumerate([cur, gw, n, "", "", teks], start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                cell.alignment = wrap
+                if c == 2:
+                    cell.fill = FILL_MISSING if "cannot be read" in teks else FILL_WARN
+            ws.row_dimensions[r].height = 44
+        for (cur, gw, kind, teks, err), n in sorted(invalid.items()):
+            if (cur, gw) in dicetak:
+                continue
+            r += 1
+            for c, v in enumerate([cur, gw, n, "", "",
+                                   f"{kind} rate '{teks}' cannot be read: {err}. "
+                                   f"Handling Fee left EMPTY."], start=2):
+                cell = ws.cell(r, c, v)
+                cell.border = box
+                cell.alignment = wrap
+                if c == 2:
+                    cell.fill = FILL_MISSING
 
     # ---- 3. masalah data lain
     r += 2
@@ -5665,6 +5896,9 @@ def main():
             lapor_settlement(report)
         if WARN_HIGH_PCT:
             report["rate_tinggi"] = kumpulkan_rate_tinggi(fee_table)
+        report["tier_warn"] = kumpulkan_peringatan_tier(fee_table)
+        for _c, _g, _t in report["tier_warn"]:
+            print(f"      !! fee {_c}/{_g}: {_t}")
         if CNY_RATE_CHECK:
             report["cny_check"] = analisa_cny_rate(report["records"])
         write_missing_sheet(wb, report)

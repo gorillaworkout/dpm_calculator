@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.37 · 2026-11-04`.
+required) show the running version, for example `DW Calculator v1.38 · 2026-11-05`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.37)
+### Tests (`test_*.py`, v1.38)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -835,6 +835,34 @@ Edit bagian `KONFIGURASI` di atas `hitung_dw.py` (pakai editor teks apa saja):
 Tiap run, skrip mencetak tabel rate yang dipakai. Cek kolom `MATCH`:
 `exact` / `alias` / `strip-suffix` = aman. `fallback-other` atau blok
 `!! GATEWAY TANPA RATE` = gateway itu belum ada rate-nya, perlu ditambah ke `EXTRA_FEES`.
+
+## Rate bertingkat (tiered fee, v1.38)
+
+Satu sel Deposit / Withdrawal di sheet fee (`D&W FEE` DPM, `Handling Fee` KVB)
+boleh berisi rate normal plus tier, dipisah `;`:
+
+| Isi sel | Arti |
+|---|---|
+| `3.5%; >5000 3.8%` | transaksi **di atas** 5,000 → 3.8% dari **seluruh** jumlah; 5,000 pas → 3.5% |
+| `3.5%; >=5000 3.8%` | 5,000 pas sudah kena 3.8% (`>=` / `≥` inklusif) |
+| `3.5%; >5k 3.8%; >20k 4%` | banyak tier, urutan bebas; dipakai batas tertinggi yang terlewati |
+| `1.5%+50; >5000 1.2%+50` | tiap tier boleh pakai format lama (`%`, `+fixed`, `,min 90`) |
+
+- Batas dibandingkan dengan `Transaction` dalam **mata uang transaksi itu sendiri**
+  (bukan USD). `5k`, `5,000`, `5.000` = 5000. Bukan marginal: rate tier dipakai
+  untuk seluruh jumlah.
+- Kolom extra `Deposit Fixed` / `Deposit Min` berlaku untuk tier yang tidak menulis
+  fixed/min sendiri.
+- **Kolom Remark tidak dibaca.** Kalau Remark mirip aturan tier (mis. *"for Deposit
+  transactions more than 5K, then 3.8%"*), hasil memberi peringatan di sheet fee
+  (kolom Note) dan Missing Data **2c. TIERED FEE RATES TO CHECK** — pindahkan
+  aturannya ke sel rate.
+- Rate yang dipakai per transaksi tampil di `D&W Detail` → **Data Status**, mis.
+  `OK; FEE: 3.8% (tier >5,000 applied to the whole amount)`.
+- Penulisan salah (mis. `3.5% >5000 3.8%` tanpa `;`) tidak membuat crash dan tidak
+  diam-diam memakai 3.5%: Handling Fee transaksi itu dikosongkan (merah), dengan
+  catatan di Data Status dan Missing Data 2c.
+- Sel tanpa `>` / `≥` dibaca persis seperti v1.37 (dicek `test_tiered_fee.py`).
 
 ## Rate yang sudah masuk lewat EXTRA_FEES
 

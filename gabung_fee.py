@@ -69,6 +69,11 @@ def cari_sheet(wb, kandidat):
     return None
 
 
+def _ada_tier(v):
+    """Teks rate bertingkat ('3.5%; >5000 3.8%', lihat hitung_dw.baca_rate)?"""
+    return isinstance(v, str) and re.search(r"(>=|\u2265|>)\s*\d", v) is not None
+
+
 def baca_rate(v):
     """-> (persen, tetap, minimum, teks_asli_kalau_bukan_angka)"""
     if v is None or v == "":
@@ -200,6 +205,14 @@ def main():
 
         dep_p, dep_f, dep_m, dep_t = baca_rate(pilih["dep"])
         wd_p, wd_f, wd_m, wd_t = baca_rate(pilih["wd"])
+        # v1.38: rate bertingkat '3.5%; >5000 3.8%' disalin sebagai TEKS apa
+        # adanya -- hitung_dw.py yang membacanya. Jangan diubah jadi angka 3,5%.
+        if _ada_tier(pilih["dep"]):
+            dep_p, dep_f, dep_m, dep_t = " ".join(str(pilih["dep"]).split()), 0.0, None, None
+            catatan.append("Deposit is tiered - copied as text")
+        if _ada_tier(pilih["wd"]):
+            wd_p, wd_f, wd_m, wd_t = " ".join(str(pilih["wd"]).split()), 0.0, None, None
+            catatan.append("Withdrawal is tiered - copied as text")
         if dep_t:
             catatan.append(f"Deposit ditulis: {dep_t}")
         if wd_t:
