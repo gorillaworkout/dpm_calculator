@@ -64,7 +64,7 @@ is not installed.
 ### Version (`VERSION`)
 
 The footer of every page, error/STOP messages, and `GET /version` (login
-required) show the running version, for example `DW Calculator v1.38 · 2026-11-05`.
+required) show the running version, for example `DW Calculator v1.39 · 2026-11-05`.
 It comes from the `VERSION` file at the repo root, read once when the app starts.
 The server has no `.git`, so the version cannot come from git.
 
@@ -86,7 +86,7 @@ contents are never logged. To check an incident: `grep '^upload ' <pm2 error log
 If no line exists for a chunk the browser says it sent, the request never reached
 gunicorn (network, firewall, antivirus, or Cloudflare).
 
-### Tests (`test_*.py`, v1.38)
+### Tests (`test_*.py`, v1.39)
 
 Every test is a plain script; run them all from the repo root:
 
@@ -835,6 +835,15 @@ Edit bagian `KONFIGURASI` di atas `hitung_dw.py` (pakai editor teks apa saja):
 Tiap run, skrip mencetak tabel rate yang dipakai. Cek kolom `MATCH`:
 `exact` / `alias` / `strip-suffix` = aman. `fallback-other` atau blok
 `!! GATEWAY TANPA RATE` = gateway itu belum ada rate-nya, perlu ditambah ke `EXTRA_FEES`.
+
+## Fee-sheet guide box (v1.39)
+
+The downloadable KVB template no longer crams the rate guide into header cell F1.
+Sheet **Handling Fee** keeps only the five column headers on row 1; a purple
+**How to fill rates** box (Write | Meaning) sits to the right from column I,
+beyond the legacy `+N` scan window so examples like `+8` are never read as fees.
+The Guide sheet still has the full FEE RATES section. Short tip comments remain
+on Deposit / Withdrawal.
 
 ## Rate bertingkat (tiered fee, v1.38)
 

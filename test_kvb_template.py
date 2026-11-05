@@ -44,17 +44,27 @@ assert workbook["Transfer"]["I1"].value == "收款"
 assert workbook["Transfer"]["A2"].value == "汇款日期"
 assert not values_below(workbook["Transfer"], 3), "Transfer must contain headers only"
 assert workbook["Transfer"].freeze_panes == "A3"
-for sheet in ("D", "W", "Xero", "Handling Fee"):
+for sheet in ("D", "W", "Xero"):
     assert not values_below(workbook[sheet], 2), f"{sheet} must contain headers only"
     assert workbook[sheet].freeze_panes in ("A2", "B2"), sheet
 assert workbook["D"]["A1"].value == "Source.Name"
 assert workbook["W"]["A1"].value == "Source.Name"
 assert workbook["Xero"]["A1"].value == "Date"
 assert workbook["Handling Fee"]["A1"].value == "Payment Channel"
-guide = str(workbook["Handling Fee"]["F1"].value)
-assert "+8" in guide and "flat" in guide
-assert "1.5%+50" in guide and "min" in guide.lower()
-
+assert workbook["Handling Fee"].freeze_panes == "A2"
+# Data columns A-E stay empty below the header (guide box lives in I-J).
+hf = workbook["Handling Fee"]
+assert all(hf.cell(r, c).value is None
+           for r in range(2, hf.max_row + 1) for c in range(1, 6)), "fee data cols"
+assert hf["F1"].value is None, "no crammed F1 paragraph"
+assert hf["I1"].value == "How to fill rates"
+assert hf["I2"].value == "Write" and hf["J2"].value == "Meaning"
+assert hf["I4"].value == "+8" and "flat" in str(hf["J4"].value).lower()
+assert "3.5%; >5000 3.8%" in {hf.cell(r, 9).value for r in range(3, 12)}
+assert "WHOLE amount" in str(hf["J7"].value)
+assert "Remark is not calculated" in str(hf["I10"].value)
+# Deposit/Withdrawal comments stay short (not the old giant paragraph).
+assert hf["C1"].comment and len(hf["C1"].comment.text) < 200
 # Same header names as the KVB Plus export (siapkan_kvb.py translates them).
 import buat_template_kvb as btk  # noqa: E402
 import siapkan_kvb as sk  # noqa: E402

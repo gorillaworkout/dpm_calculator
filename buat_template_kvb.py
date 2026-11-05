@@ -90,14 +90,24 @@ XERO_KOLOM = ["Date", "AED", "AUD", "BND", "BRL", "CNY", "EGP", "EUR", "GBP", "H
               "INR", "JPY", "KES", "KHR", "KRW", "LAK", "MMK", "MXN", "MYR", "NGN", "PHP",
               "PKR", "SGD", "THB", "TRY", "TWD", "VND", "ZAR", "USD", "USDT", "USDC"]
 FEE_KOLOM = ["Payment Channel", "Currency", "Deposit", "Withdrawal", "Remark"]
-FEE_PANDUAN = ("Rate guide: +8 = flat 8 per transaction (the plus sign is required). "
-               "1.5%+50 = 1.5% of the transaction plus a flat 50. 0.45%,min 90 = 0.45%, "
-               "but at least 90. A plain number 8 is read as 800%, not as a flat fee. "
-               "Write +8 for a flat fee. "
-               "Tiered: 3.5%; >5000 3.8% = 3.5% normally, 3.8% of the WHOLE amount when "
-               "the transaction is above 5,000. >=5000 includes 5,000 itself. More tiers: "
-               "3.5%; >5k 3.8%; >20k 4%. Remark is not read - put tier rules in the rate "
-               "cell, not only in Remark.")
+# Short tip on Deposit / Withdrawal header cells (not the long F1 paragraph).
+FEE_TIP = ("Rates: 3.5% or 0.035 · +8 flat · 1.5%+50 · 0.45%,min 90 · "
+           "tiered 3.5%; >5000 3.8% (WHOLE amount). See the box on the right.")
+
+# Stand-alone 'How to fill rates' box on the fee sheet. Kept short; full detail
+# is also on the Guide sheet. Placed from column I so hitung_dw's legacy '+N'
+# scan (up to 4 cells right of Deposit/Withdrawal = cols E-H) never reads it.
+FEE_CARA_ISI = [
+    ("3.5%  or  0.035", "3.5% of the transaction"),
+    ("+8", "Flat 8 per transaction (the + is required)"),
+    ("1.5%+50", "1.5% of the transaction plus flat 50"),
+    ("0.45%,min 90", "0.45%, but at least 90"),
+    ("3.5%; >5000 3.8%", "Tier: above 5,000 = 3.8% of the WHOLE amount (5,000 itself pays 3.5%)"),
+    ("3.5%; >=5000 3.8%", ">= includes 5,000 itself"),
+    ("3.5%; >5k 3.8%; >20k 4%", "Any number of tiers; highest passed wins. 5k = 5,000"),
+]
+FEE_CATATAN = ("Note: plain 8 = 800%. Write +8 for a flat fee. Do not put rate rules only in Remark (Remark is not calculated).")
+
 CNY_KOLOM = ["Date", "TD", "Rate"]
 CNY_EN = {
     "Date": "one row per day (2026-07-01). Real dates or text like 2026-07-01 are both read.",
@@ -175,7 +185,7 @@ def sheet_guide(ws):
         ("4. Sheet 'Xero'", "One row per date, one column per currency, local currency per "
                             "1 USD (CNY 7.18 = 1 USD)."),
         ("5. Sheet 'Handling Fee'", "One row per Payment Channel + Currency with the deposit "
-                                    "and withdrawal rate. See the rate guide in cell F1."),
+                                    "and withdrawal rate. See 'How to fill rates' beside the table."),
         ("6. Sheet 'CNY RATE'", "NEW. One row per day per CNY gateway: Date | TD | Rate, "
                                 "Rate = CNY per 1 USDT. Fills 'CNY Rate' and "
                                 "'Balance (USDT)' on Payment Channel Balance."),
@@ -276,21 +286,76 @@ def sheet_xero(ws):
     ws.freeze_panes = "B2"
 
 
+def tulis_fee_cara_isi(ws, kol_awal=9, baris_awal=1):
+    """Styled 'How to fill rates' box.
+
+    kol_awal defaults to I (=9), beyond the legacy '+N' scan window (E-H on
+    the KVB Handling Fee sheet). baris_awal is 1 for KVB, 3 for the DPM
+    'D&W FEE' sheet whose header sits on row 3.
+    """
+    ungu_muda = PatternFill("solid", fgColor="E2D5F1")
+    krem = PatternFill("solid", fgColor="FFF8E7")
+    r0 = baris_awal
+    judul = ws.cell(r0, kol_awal, "How to fill rates")
+    judul.font = Font(bold=True, color="FFFFFF", size=11)
+    judul.fill = PatternFill("solid", fgColor=UNGU)
+    judul.alignment = Alignment(horizontal="center", vertical="center")
+    judul.border = KOTAK
+    ws.merge_cells(start_row=r0, start_column=kol_awal,
+                   end_row=r0, end_column=kol_awal + 1)
+    for c, t in enumerate(("Write", "Meaning"), start=kol_awal):
+        sel = ws.cell(r0 + 1, c, t)
+        sel.font = Font(bold=True, color="FFFFFF", size=10)
+        sel.fill = PatternFill("solid", fgColor="5B2C8A")
+        sel.alignment = Alignment(horizontal="center", vertical="center")
+        sel.border = KOTAK
+    for i, (tulis, arti) in enumerate(FEE_CARA_ISI):
+        r = r0 + 2 + i
+        a = ws.cell(r, kol_awal, tulis)
+        a.font = Font(name="Consolas", bold=True, size=10, color="1A1F24")
+        a.fill = ungu_muda
+        a.alignment = Alignment(vertical="center", wrap_text=True)
+        a.border = KOTAK
+        b = ws.cell(r, kol_awal + 1, arti)
+        b.font = Font(size=10, color="1A1F24")
+        b.alignment = Alignment(vertical="center", wrap_text=True)
+        b.border = KOTAK
+        ws.row_dimensions[r].height = 32 if len(arti) > 55 else 20
+    catatan_r = r0 + 2 + len(FEE_CARA_ISI)
+    cat = ws.cell(catatan_r, kol_awal, FEE_CATATAN)
+    cat.font = Font(size=9, italic=True, color="5B6B73")
+    cat.fill = krem
+    cat.alignment = Alignment(wrap_text=True, vertical="center")
+    cat.border = KOTAK
+    ws.merge_cells(start_row=catatan_r, start_column=kol_awal,
+                   end_row=catatan_r, end_column=kol_awal + 1)
+    ws.row_dimensions[catatan_r].height = 42
+    ws.row_dimensions[r0].height = max(ws.row_dimensions[r0].height or 0, 22)
+    ws.row_dimensions[r0 + 1].height = 18
+    # Narrow empty cols between data table and box so the sheet reads as
+    # "table | gap | guide" (PDF export must not split Write / Meaning).
+    # Legacy '+N' scan still covers E-H, so those stay empty of guide text.
+    for c in range(6, kol_awal):
+        ws.column_dimensions[get_column_letter(c)].width = (
+            2 if c < kol_awal - 1 else 3)
+    ws.column_dimensions[get_column_letter(kol_awal)].width = 26
+    ws.column_dimensions[get_column_letter(kol_awal + 1)].width = 56
+
+
 def sheet_fee(ws):
     ws.sheet_properties.tabColor = UNGU
     tulis_header(ws, FEE_KOLOM, UNGU, lebar={"Payment Channel": 24, "Remark": 30,
                                              "Deposit": 14, "Withdrawal": 14})
     for c in (3, 4):
-        ws.cell(1, c).comment = _komentar(FEE_PANDUAN, 200, 320)
+        ws.cell(1, c).comment = _komentar(FEE_TIP, 60, 240)
     ws.cell(1, 1).comment = _komentar("Required column - do not rename or delete.\n"
                                       "Gateway name as in D / W. Case, spaces and "
                                       "punctuation are ignored.", 80)
-    sel = ws.cell(1, 6, FEE_PANDUAN)
-    sel.font = Font(italic=True, size=9, color=ABU)
-    sel.alignment = Alignment(wrap_text=True, vertical="top")
-    ws.column_dimensions["F"].width = 70
+    # Box at column I: past the legacy '+N' scan of cols E-H after Deposit/Withdrawal.
+    tulis_fee_cara_isi(ws, kol_awal=9)
     ws.freeze_panes = "A2"
     ws.auto_filter.ref = "A1:E1"
+
 
 
 def sheet_cny_rate(ws):
