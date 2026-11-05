@@ -93,7 +93,11 @@ FEE_KOLOM = ["Payment Channel", "Currency", "Deposit", "Withdrawal", "Remark"]
 FEE_PANDUAN = ("Rate guide: +8 = flat 8 per transaction (the plus sign is required). "
                "1.5%+50 = 1.5% of the transaction plus a flat 50. 0.45%,min 90 = 0.45%, "
                "but at least 90. A plain number 8 is read as 800%, not as a flat fee. "
-               "Write +8 for a flat fee.")
+               "Write +8 for a flat fee. "
+               "Tiered: 3.5%; >5000 3.8% = 3.5% normally, 3.8% of the WHOLE amount when "
+               "the transaction is above 5,000. >=5000 includes 5,000 itself. More tiers: "
+               "3.5%; >5k 3.8%; >20k 4%. Remark is not read - put tier rules in the rate "
+               "cell, not only in Remark.")
 CNY_KOLOM = ["Date", "TD", "Rate"]
 CNY_EN = {
     "Date": "one row per day (2026-07-01). Real dates or text like 2026-07-01 are both read.",
@@ -193,6 +197,16 @@ def sheet_guide(ws):
         ("1.5%+50", "1.5% of the transaction plus a flat 50."),
         ("0.45%,min 90", "0.45% of the transaction, but at least 90."),
         ("8", "A plain number is a percentage: 8 = 800%. Write +8 for a flat fee."),
+        ("3.5%; >5000 3.8%",
+         "Tiered: 3.5% normally, 3.8% of the WHOLE amount when the transaction is above "
+         "5,000 (5,000 itself pays 3.5%). The amount is in the transaction's own currency."),
+        ("3.5%; >=5000 3.8%", ">= includes the amount itself: 5,000 already pays 3.8%."),
+        ("3.5%; >5k 3.8%; >20k 4%",
+         "Any number of tiers, separated by ';'. The highest tier the amount passes is "
+         "used. 5k = 5,000."),
+        ("1.5%+50; >5000 1.2%+50", "Each tier can use the formats above (+fixed, min)."),
+        ("Remark", "Remark is NOT read. Do not put a tier rule only in Remark ('more than "
+                   "5K, then 3.8%') - write it in the Deposit / Withdrawal cell as above."),
         ("", ""),
         ("WHAT YOU GET", ""),
         ("Payment Channel Balance", "Per date, currency and channel: deposits, charges, fund "
@@ -267,7 +281,7 @@ def sheet_fee(ws):
     tulis_header(ws, FEE_KOLOM, UNGU, lebar={"Payment Channel": 24, "Remark": 30,
                                              "Deposit": 14, "Withdrawal": 14})
     for c in (3, 4):
-        ws.cell(1, c).comment = _komentar(FEE_PANDUAN, 120, 300)
+        ws.cell(1, c).comment = _komentar(FEE_PANDUAN, 200, 320)
     ws.cell(1, 1).comment = _komentar("Required column - do not rename or delete.\n"
                                       "Gateway name as in D / W. Case, spaces and "
                                       "punctuation are ignored.", 80)

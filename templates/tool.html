@@ -134,6 +134,9 @@
       <br>Fee rates: <code>+8</code> is a flat 8 per transaction,
       <code>1.5%+50</code> is 1.5% plus a flat 50, and <code>min</code> sets a minimum.
       A plain <code>8</code> is read as 800%. Write <code>+8</code> for a flat fee.
+      Tiered: <code>3.5%; &gt;5000 3.8%</code> is 3.5% normally and 3.8% of the whole
+      amount above 5,000 (<code>&gt;=5000</code> includes 5,000). Put tier rules in the
+      rate cell, not only in Remark.
       {% endif %}</p>
     {% endif %}
 

@@ -196,6 +196,16 @@ def main():
         ("Fixed / minimum", "Use 'Deposit Fixed' / 'Withdrawal Fixed' for a flat amount added on top, "
                             "and 'Deposit Min' / 'Withdrawal Min' for a minimum charge. "
                             "Formula: fee = max(amount x percent, min) + fixed."),
+        ("Tiered rate", "Write 3.5%; >5000 3.8% in the Deposit / Withdrawal cell: 3.5% "
+                        "normally, 3.8% of the WHOLE amount when the transaction is above "
+                        "5,000 (5,000 itself pays 3.5%). The amount is in the transaction's "
+                        "own currency."),
+        ("Tier options", ">=5000 includes 5,000 itself. Any number of tiers: "
+                         "3.5%; >5k 3.8%; >20k 4% (the highest tier passed is used, 5k = "
+                         "5,000). Each tier can use +fixed / min: 1.5%+50; >5000 1.2%+50."),
+        ("Not in Remark", "Remark / Note is NOT read. Do not put a tier rule only there - "
+                          "write it in the rate cell. D&W Detail 'Data Status' shows the "
+                          "rate used per row."),
         ("Gateway names", "Punctuation and spacing are ignored when matching, so '77 Pay' and '77Pay' "
                           "are the same. Currency suffixes are dropped too: 'PA-PHP' matches 'PA'."),
         ("Missing a rate", "The 'Handling Fee' cell is left EMPTY and coloured RED - never 0 - so a "
@@ -323,10 +333,9 @@ def main():
         catat = list(v.get("ditimpa") or [])
         if v.get("fixed"):
             catat.append(f"old notation '+{v['fixed']:g}' in the source sheet - not applied")
-        nilai = [cur, v.get("nama") or "",
-                 dep["pct"] if dep else None, wd["pct"] if wd else None,
-                 (dep["fixed"] or None) if dep else None, (wd["fixed"] or None) if wd else None,
-                 dep["min"] if dep else None, wd["min"] if wd else None,
+        catat += hd.catatan_tier(v)
+        (dp, df, dm), (wp, wf, wm) = hd.sel_rate(dep), hd.sel_rate(wd)
+        nilai = [cur, v.get("nama") or "", dp, wp, df, wf, dm, wm,
                  " + ".join(asal[-2:]) if len(asal) > 1 else (asal[0] if asal else ""),
                  "; ".join(catat) or None]
         for c, val in enumerate(nilai, start=1):

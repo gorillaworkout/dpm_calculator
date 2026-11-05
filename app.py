@@ -664,7 +664,11 @@ KVB_DOC = {
         "(the plus sign is required). <code>1.5%+50</code> is 1.5% plus a flat 50. "
         "<code>0.45%,min 90</code> is 0.45% with a minimum of 90. A plain number "
         "<code>8</code> is read as 800%, not as a flat fee. Write <code>+8</code> when "
-        "you mean a flat amount. The calculation is not rewritten when a rate reads as "
+        "you mean a flat amount. Tiered: <code>3.5%; &gt;5000 3.8%</code> is 3.5% "
+        "normally and 3.8% of the whole amount when the transaction is above 5,000 "
+        "(<code>&gt;=5000</code> includes 5,000; more tiers: "
+        "<code>3.5%; &gt;5k 3.8%; &gt;20k 4%</code>). Put tier rules in the rate cell, "
+        "not only in Remark. The calculation is not rewritten when a rate reads as "
         "100% or more; Missing Data names those cells.",
         "USD opening balance for a CNY gateway, paste exactly one of these: "
         "<code>ChipPay USD(CNY) 12,345.67</code>, or three columns "
