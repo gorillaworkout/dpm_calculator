@@ -869,21 +869,27 @@ def run(slug, company="dpm"):
     # 900 MB run can only reach us that way. Both paths converge on the same list.
     upload_id = (request.form.get("upload_id") or "").strip()
     staged = chunked.staged_files(JOBS, upload_id) if upload_id else None
-    if upload_id and not staged:
+    session_ready = chunked.all_ingested(JOBS, upload_id) if upload_id else False
+    if upload_id and staged is None and not session_ready:
         return _gagal("The upload did not finish, or it expired. Please choose the files again.")
-    pemilik = cleanup.upload_owner(JOBS, upload_id) if staged else None
+    pemilik = cleanup.upload_owner(JOBS, upload_id) if (staged is not None or session_ready) else None
     if pemilik and pemilik != request.user["username"]:
         return _gagal("This upload belongs to another account. Please choose the files again.")
 
     if slug in ("segregate", "segregated"):
-        if not uploads and not staged:
+        if not uploads and not staged and not session_ready:
             return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
         # One count for every upload field: "file" (MT5 + MT4 Deals and the FX
         # workbook), files already staged by /upload/chunk, and the KVB
         # "mt4_accounts" account-type file.
         akun = request.files.get("mt4_accounts") if company == "kvb" else None
         n_akun = 1 if akun and akun.filename else 0
-        if len(uploads) + len(staged or []) + n_akun > chunked.MAX_FILES:
+        n_staged = len(staged) if staged is not None else 0
+        if session_ready and upload_id and n_staged == 0:
+            stage = chunked._stage_dir(JOBS, upload_id)
+            man = chunked._read_manifest(stage) if stage else None
+            n_staged = len((man or {}).get("files") or [])
+        if len(uploads) + n_staged + n_akun > chunked.MAX_FILES:
             return _gagal(f"Select no more than {chunked.MAX_FILES} files per run.")
         empty = []
         for upload in uploads:
@@ -893,10 +899,16 @@ def run(slug, company="dpm"):
             upload.stream.seek(pos)
             if size == 0:
                 empty.append(upload.filename)
-        empty += [original for path, original in (staged or []) if path.stat().st_size == 0]
+        empty += [original for path, original in (staged or []) if path is not None and path.is_file() and path.stat().st_size == 0]
         if empty:
             return _gagal("Empty files cannot be processed: " + ", ".join(empty))
         names = [u.filename for u in uploads] + [orig for _p, orig in (staged or [])]
+        if session_ready and upload_id and not names:
+            # Names live in the manifest when every part was already ingested.
+            stage = chunked._stage_dir(JOBS, upload_id)
+            man = chunked._read_manifest(stage) if stage else None
+            names = [e.get("original") for e in (man or {}).get("files") or []
+                     if e.get("original")]
         invalid = [n for n in names if not n.lower().endswith((".csv", ".xlsx", ".xlsm"))]
         if invalid:
             return _gagal("These files are not .csv, .xlsx, or .xlsm and were rejected: "
@@ -936,7 +948,7 @@ def run(slug, company="dpm"):
             upload.stream.seek(pos)
             if size == 0:
                 empty.append(upload.filename)
-        empty += [original for path, original in (staged or []) if path.stat().st_size == 0]
+        empty += [original for path, original in (staged or []) if path is not None and path.is_file() and path.stat().st_size == 0]
         if empty:
             return _gagal("Empty files cannot be processed: " + ", ".join(empty))
         periode = saldo_jw = saldo_ch = None
@@ -972,7 +984,7 @@ def run(slug, company="dpm"):
         upload.stream.seek(pos)
         return ukuran
 
-    ukuran_staged = sum(path.stat().st_size for path, _original in (staged or []))
+    ukuran_staged = sum(path.stat().st_size for path, _original in (staged or []) if path is not None and path.is_file())
     ukuran_baru = sum(_ukuran_stream(upload) for upload in uploads)
     if (slug == "segregate" and company == "kvb" and _akun_upload
             and _akun_upload.filename):
@@ -987,8 +999,17 @@ def run(slug, company="dpm"):
                               keep_uploads={upload_id} if upload_id else ())
         # Before any rename. A failed check must not delete the staged upload:
         # that file is the only server copy, and copying it is not allowed.
+        max_part = None
+        if upload_id:
+            stage = chunked._stage_dir(JOBS, upload_id)
+            man = chunked._read_manifest(stage) if stage else None
+            if man and man.get("max_part") is not None:
+                try:
+                    max_part = int(man["max_part"])
+                except (TypeError, ValueError):
+                    max_part = None
         salah_ruang = chunked.cek_sebelum_proses(JOBS, ukuran_staged, ukuran_baru,
-                                                 freed=freed)
+                                                 freed=freed, max_part=max_part)
         if salah_ruang:
             return _gagal(salah_ruang)
         job = JOBS / job_id
@@ -1008,20 +1029,24 @@ def run(slug, company="dpm"):
             n += 1
         return target
 
-    if staged:
+    session_path = None
+    if upload_id and (staged is not None or session_ready):
+        stage = chunked._stage_dir(JOBS, upload_id)
         # Compare directories, not the file: overlayfs (Docker, the dev box)
         # reports a different st_dev for regular files than for directories on
         # the same mount, which made every staged run look cross-device. A real
         # cross-device rename is still caught by the EXDEV handler below.
-        dev = job.stat().st_dev
-        beda = [original for path, original in staged
-                if path.parent.stat().st_dev != dev]
-        if beda:
-            shutil.rmtree(job, ignore_errors=True)
-            return _gagal("The upload is on a different disk from the job folder, so it "
-                          "cannot be moved into place. Copying it would keep a second "
-                          "copy of the file, which this server does not have room for. "
-                          "Nothing was started. The upload was not deleted.")
+        if stage and stage.is_dir():
+            dev = job.stat().st_dev
+            try:
+                if stage.stat().st_dev != dev:
+                    shutil.rmtree(job, ignore_errors=True)
+                    return _gagal("The upload is on a different disk from the job folder, so it "
+                                  "cannot be moved into place. Copying it would keep a second "
+                                  "copy of the file, which this server does not have room for. "
+                                  "Nothing was started. The upload was not deleted.")
+            except OSError:
+                pass
 
     urutan = 0
     for upload in uploads:
@@ -1033,6 +1058,8 @@ def run(slug, company="dpm"):
     pindah = []
     try:
         for path, original in (staged or []):
+            if path is None:
+                continue
             urutan += 1
             target = _tujuan(original, urutan)
             # Same-filesystem rename. A cross-device move would copy, so it is refused.
@@ -1040,6 +1067,19 @@ def run(slug, company="dpm"):
             pindah.append((target, path))
             sources.append(target)
             nama_asli.append(original)
+        # Move the ingest session (index) into the job when present — finalize
+        # reads it; remaining deal parts above are processed with --delete-input.
+        if upload_id:
+            stage = chunked._stage_dir(JOBS, upload_id)
+            src_ingest = chunked.ingest_dir(stage) if stage else None
+            if src_ingest and src_ingest.is_dir():
+                session_path = job / "ingest"
+                os.replace(str(src_ingest), str(session_path))
+                # Names of already-ingested parts for the download label.
+                man = chunked._read_manifest(stage) or {}
+                for e in man.get("files") or []:
+                    if e.get("ingested") and e.get("original") not in nama_asli:
+                        nama_asli.append(e["original"])
     except OSError as exc:
         if exc.errno not in (errno.EXDEV, errno.ENOENT):
             raise
@@ -1055,14 +1095,17 @@ def run(slug, company="dpm"):
                           "(another tab or a new attempt). Nothing was started here.")
         return _gagal("The upload could not be moved into the job folder without "
                       "copying it. Nothing was started. The upload was not deleted.")
-    if staged:
+    if upload_id and (staged is not None or session_ready):
         chunked.discard(JOBS, upload_id)
     if company == "kvb" and slug == "segregate" and not (_akun_upload and _akun_upload.filename):
         salah_mt4 = _mt4_tanpa_peta_akun(sources, nama_asli)
         if salah_mt4:
             shutil.rmtree(job, ignore_errors=True)
             return _gagal(salah_mt4)
-    src = sources[0]
+    if not sources and not session_path:
+        shutil.rmtree(job, ignore_errors=True)
+        return _gagal("Please choose at least one .csv, .xlsx, or .xlsm file first.")
+    src = sources[0] if sources else session_path
     if slug == "dw":
         dst = src.with_name(f"{src.stem}-hasil.xlsx")
     elif slug == "pl-desk":
@@ -1113,7 +1156,7 @@ def run(slug, company="dpm"):
                      args=(job_id, company, slug, job,
                            sources if slug in ("segregate", "pl-desk", "segregated") else src,
                            dst, periode, saldo_jw, saldo_ch, mt4_accounts_path,
-                           lock_fh),
+                           lock_fh, session_path),
                      daemon=True).start()
     endpoint = "kvb_job_status" if company == "kvb" else "job_status"
     return redirect(url_for(endpoint, job_id=job_id), code=303)
@@ -1194,20 +1237,20 @@ def _pesan_gagal_job(stderr, stdout):
 
 
 def _process_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
-                 saldo_ch=None, mt4_accounts=None, lock_fh=None):
+                 saldo_ch=None, mt4_accounts=None, lock_fh=None, session_path=None):
     """Run the pipeline in the background and record the outcome.
 
     lock_fh is the job's flock; while it is held no cleanup touches this job.
     """
     try:
         _jalankan_job(job_id, company, slug, job, src, dst, periode, saldo_jw,
-                      saldo_ch, mt4_accounts)
+                      saldo_ch, mt4_accounts, session_path=session_path)
     finally:
         cleanup.release_job_lock(lock_fh)
 
 
 def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=None,
-                  saldo_ch=None, mt4_accounts=None):
+                  saldo_ch=None, mt4_accounts=None, session_path=None):
     # Success: inputs and the deal index are deleted, only the result stays.
     # Failure or STOP: the whole job directory (inputs, index, partial output)
     # is deleted; the staged upload was already moved into it.
@@ -1223,6 +1266,27 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
     log = []
     masuk = src
     try:
+        # Interleaved upload already parsed every part into the session: only zip.
+        if session_path and slug == "segregate" and langkah and langkah[0] == "deal_segregator.py":
+            perintah = [sys.executable, str(BASE / "deal_segregator.py"),
+                        "--from-session", str(session_path), "-o", str(dst)]
+            if company == "kvb":
+                perintah.append("--allow-mt4")
+            r = subprocess.run(perintah, capture_output=True, text=True, cwd=BASE)
+            pengguna, jejak = _pisah_traceback(r.stderr or "")
+            if jejak:
+                print(f"job {job_id} deal_segregator.py --from-session\n{jejak}", file=sys.stderr)
+            log.append(f"$ deal_segregator.py --from-session\n{r.stdout}{pengguna}".rstrip())
+            if r.returncode != 0 or not dst.exists():
+                judul = _pesan_gagal_job(r.stderr or "", r.stdout or "")
+                _write_state(job_id, state="failed", error=judul or None,
+                             log="\n\n".join(log).strip() or judul or "Failed with no message.")
+                shutil.rmtree(job, ignore_errors=True)
+                return
+            _cleanup_completed_job(job, dst)
+            _write_state(job_id, state="done", path=str(dst),
+                         log="\n\n".join(log).strip())
+            return
         for i, script in enumerate(langkah):
             keluar = dst if i == len(langkah) - 1 else job / f"step{i}.xlsx"
             inputs = masuk if isinstance(masuk, (list, tuple)) else [masuk]

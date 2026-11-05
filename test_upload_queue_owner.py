@@ -107,7 +107,8 @@ print("OK own stalled upload is superseded")
 r = begin(alice, 3 * GIB)
 assert r.status_code == 202, r.status_code
 q = r.get_json()
-assert q["message"].startswith("Server sedang dipakai oleh bayu."), q["message"]
+assert "bayu" in q["message"] and "processing another user" in q["message"].lower(), q["message"]
+assert "Server sedang dipakai" not in q["message"]
 assert "uploading 2.0 GB" in q["message"]
 assert q["blocked_by"] == [{"kind": "upload", "user": "bayu", "own": False}], q
 no_secrets(r)
@@ -178,7 +179,7 @@ assert cleanup.job_locked(JOBS, jid) and (JOBS / jid).is_dir(), "own running job
 # alice sees bayu named, and no link to his job
 r = begin(alice, 2 * GIB)
 assert r.status_code == 202 and r.get_json()["job_url"] is None
-assert r.get_json()["message"].startswith("Server sedang dipakai oleh bayu."), r.get_json()["message"]
+assert "bayu" in r.get_json()["message"] and "Server sedang dipakai" not in r.get_json()["message"], r.get_json()["message"]
 assert "Deal Segregator run, processing since" in r.get_json()["message"]
 assert "Deals-hasil.zip" not in r.get_json()["message"], "file name of another user leaked"
 no_secrets(r)

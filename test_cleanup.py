@@ -188,7 +188,8 @@ try:
     # the heavy upload itself is now the active heavy work: another user's heavy one waits
     r = o.post("/upload/begin", data={"bytes": str(2 * _GIB)})
     assert r.status_code == 202
-    assert "Server sedang dipakai oleh tester" in r.get_json()["message"], r.get_json()
+    assert "tester" in r.get_json()["message"] and "processing another user" in r.get_json()["message"].lower()
+    assert "Server sedang dipakai" not in r.get_json()["message"], r.get_json()
     cleanup.queue_leave(JOBS, r.get_json()["ticket"])
     # 5. stale heartbeat: an upload whose chunks stopped no longer blocks anyone
     st = JOBS / "staging" / heavy_uid

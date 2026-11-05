@@ -72,6 +72,29 @@ The server has no `.git`, so the version cannot come from git.
 Do not put a commit SHA in it. Copy `VERSION` with the other files on every
 deploy and restart the app. A missing file shows `version unknown`.
 
+### Upload disk preflight (v1.40)
+
+Before chunks start, the browser calls `GET /upload/preflight?bytes=&max_part=`
+(auth required). The response is **English only** (Malaysia team) with `need` /
+`free` / `max_part` / `max_part_fit` / `reason`, using peak disk =
+`max(part) + ~20.54% of total + 256 MiB` over the whole lifecycle. Deal
+Segregator **interleaves** upload and ingest: as soon as part *i* finishes
+uploading, `POST /upload/ingest` parses it into a durable job index and deletes
+the part file, then the browser uploads part *i+1*. Peak disk is therefore
+truly ~max(part)+index+margin at every moment (including during upload), not
+the sum of every part. The final form submit only zips the session.
+
+When space is short the `reason` field distinguishes:
+* `busy` — another upload/job is holding disk → *"The server is busy processing
+  another upload right now. Please wait a few minutes and start the upload again."*
+* `too_big` — the file would not fit even on an idle server → split hint quoting
+  `max_part_fit` (typically ~8 GB max part).
+
+There is **no resume**: on failure, cancel, or tab close the partial staging is
+discarded and the user starts again from scratch. HTTP 507 is never retried and
+never shown as a VPN/internet problem. Idle staging is swept after ~15 minutes
+(`DW_UPLOAD_IDLE_SECONDS`) and also discarded promptly on `/upload/discard`.
+
 ### Upload log (`/upload/*`)
 
 Every `/upload/*` request writes one line to stderr (the pm2 error log), for
@@ -924,13 +947,15 @@ python3 hitung_dw.py file.xlsx --sheet D Withdrawal
 - Your own running job is never cancelled: a run is a subprocess inside one gunicorn worker
   and has no stored PID, so it cannot be stopped safely. The new upload waits, with a link
   to the job, and starts automatically when the job finishes.
-- When another account is busy, the notice names it: "Server sedang dipakai oleh <username>".
-  Uploads staged before this change have no owner, so they get the generic notice.
+- When another account is busy, the English notice names it (e.g. "processing another user's
+  file (bayu: uploading 2.0 GB)"). Legacy uploads without an owner get the generic notice.
 - An upload that has sent no chunk for 5 minutes (`DW_UPLOAD_BLOCK_SECONDS`) stops blocking
-  others. It is still deleted only after 15 minutes idle, so a retrying or offline browser can
-  resume. Queue tickets expire 30 s after the last poll.
-- The browser discards its upload when retries run out, when a file cannot be read, and on
-  tab close (`pagehide` via `sendBeacon`, skipped for pages kept in the back/forward cache).
+  others. Staging itself is deleted after 15 minutes idle (`DW_UPLOAD_IDLE_SECONDS`) — there
+  is no cross-session resume; the user starts the upload again. Queue tickets expire 30 s
+  after the last poll.
+- The browser discards its upload when retries run out, when a file cannot be read, on cancel,
+  and on tab close (`pagehide` via `sendBeacon`, skipped for pages kept in the back/forward
+  cache).
 
 ---
 

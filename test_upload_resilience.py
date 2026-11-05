@@ -117,8 +117,10 @@ r = c.get(f"/upload/status?id={uid}")
 assert r.status_code == 200, r.data
 st = r.get_json()
 assert st["bytes"] == len(A) + len(B) and st["declared_bytes"] == len(A) + len(B) + len(C2)
-assert st["files"] == [{"index": 0, "chunks": 2, "bytes": len(A) + len(B)}], st
-assert "hashes" not in json.dumps(st) and "original" not in st["files"][0]
+assert st["files"][0]["index"] == 0 and st["files"][0]["chunks"] == 2
+assert st["files"][0]["bytes"] == len(A) + len(B)
+assert st["files"][0]["name"] == "MT4_RawReport_20260916.csv"
+assert isinstance(st["files"][0].get("hashes"), list) and len(st["files"][0]["hashes"]) == 2
 assert c.get("/upload/status?id=" + "0" * 32).status_code == 404
 assert c.get("/upload/status?id=../../etc").status_code == 404
 assert app.test_client().get(f"/upload/status?id={uid}").status_code == 401, "needs login"

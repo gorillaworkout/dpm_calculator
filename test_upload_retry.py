@@ -171,7 +171,7 @@ test('file the browser cannot read: named, no network retries', function () {
     assert.ok(err.fileRead && err.noRetry);
     assert.strictEqual(e.calls.length, 0, 'nothing sent');
     assert.ok(err.message.indexOf('Deals History 05092026.csv') >= 0);
-    assert.ok(err.message.indexOf('tidak bisa dibaca browser') >= 0);
+    assert.ok(err.message.indexOf('could not read') >= 0);
     assert.strictEqual(err.name, 'FileReadError (NotReadableError)');
     var t = diagText(err, 0, true);
     assert.ok(t.indexOf('file read error=NotReadableError') >= 0, t);
@@ -275,18 +275,42 @@ test('pre-flight names unreadable and changed files; nothing else', function () 
       ['MT4_RawReport_20260712.csv:unreadable', 'Deals.csv:changed']);
     var t = preflightText(bad);
     assert.ok(t.indexOf('MT4_RawReport_20260712.csv') >= 0 && t.indexOf('[NotReadableError]') >= 0, t);
-    assert.ok(t.indexOf('berubah setelah dipilih') >= 0 && t.indexOf('changed on disk') >= 0, t);
+    assert.ok(t.indexOf('changed on disk') >= 0, t);
     assert.ok(t.indexOf('Nothing was uploaded') >= 0, t);
   });
 });
 
-test('read-error message is Indonesian and English and says to re-select only that file', function () {
+test('read-error message is English and says to re-select only that file', function () {
   var m = fileReadError('MT4_RawReport_20260712.csv', {name: 'NotReadableError'}).message;
-  ['tidak bisa dibaca browser', 'Pilih ulang file ini', 'file lain tetap terpilih',
-   'Re-select this file', 'the other files stay selected', 'changed or was replaced'].forEach(function (s) {
+  ['could not read', 'Re-select this file', 'the other files stay selected',
+   'changed or was replaced'].forEach(function (s) {
     assert.ok(m.indexOf(s) >= 0, s);
   });
+  assert.ok(m.indexOf('tidak bisa') < 0);
   assert.ok(unreadableShort({name: 'NotReadableError'}).indexOf('Re-select this file') >= 0);
+});
+
+test('HTTP 507 disk full: no retry, diskFull flag', function () {
+  var e = env([resp(507, {error: 'Not enough temporary storage.', disk: true})]);
+  return makeChunkSender(e)(REQ).then(function () { assert.fail(); }, function (err) {
+    assert.ok(err.diskFull && err.noRetry, err);
+    assert.strictEqual(err.name, 'HTTP 507');
+    assert.strictEqual(e.calls.length, 1, 'must not retry a disk-full response');
+    assert.strictEqual(e.delays.length, 0);
+  });
+});
+
+test('uploadError: disk/507 never mentions VPN; network errors still do', function () {
+  // uploadError is outside the chunk-retry core markers; skip if missing.
+  if (typeof uploadError !== 'function') { return; }
+  var disk = new Error('Ruang penuh / Not enough storage');
+  disk.diskFull = true; disk.name = 'HTTP 507';
+  var t = uploadError(disk, {file: 'a.csv', chunk: 0, of: 1, percent: 10});
+  assert.ok(t.toLowerCase().indexOf('vpn') < 0 && t.toLowerCase().indexOf('warp') < 0, t);
+  assert.ok(t.indexOf('press Run again') >= 0 || t.indexOf('start a fresh upload') >= 0, t);
+  var net = new TypeError('Failed to fetch');
+  var n = uploadError(net, {file: 'a.csv', chunk: 0, of: 1, percent: 10});
+  assert.ok(n.indexOf('VPN') >= 0, n);
 });
 
 (function run(i) {

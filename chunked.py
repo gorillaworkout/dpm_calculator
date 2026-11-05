@@ -11,10 +11,16 @@ Each file is one staging part. Chunks are appended to that part and then
 discarded from memory. There is never a second assembled copy beside the chunks.
 
 Flow:
+    GET  /upload/preflight?bytes=&max_part= -> need / free / max_part_fit (auth)
     POST /upload/begin                  -> {"id": "<hex>"}
     POST /upload/chunk  (repeat)        -> {"received": <bytes>}
-    GET  /upload/status?id=<hex>        -> what the server already has (resume)
-    POST /tool/<slug>   upload_id=<hex> -> the part is renamed into the job
+    POST /upload/ingest                 -> parse one finished part into the
+                                          job index, then delete the part file
+                                          (Deal Segregator interleaved path)
+    GET  /upload/status?id=<hex>        -> chunks + which parts are ingested
+    POST /tool/<slug>   upload_id=<hex> -> remaining parts renamed into the job;
+                                          if every part is already ingested, only
+                                          the session is finalized (zip/output)
 
 A chunk can reach the server while its acknowledgement is lost on the way back
 (office firewall, antivirus, Wi-Fi). The browser then sends the same chunk again.
@@ -46,8 +52,9 @@ from upload_limits import MAX_FILES
 
 CHUNK_SUFFIXES = (".csv", ".xlsx", ".xlsm")
 # Idle time since the last chunk, not the age of the staging directory.
-# A 10 GB upload can take several hours as long as chunks keep arriving.
-STAGE_MAX_AGE_HOURS = 1
+# With no resume, abandoned staging is discarded promptly (same as cleanup's
+# UPLOAD_IDLE_SECONDS, default 15 minutes).
+STAGE_MAX_AGE_HOURS = 15 / 60
 _GIB = 1024 * 1024 * 1024
 # Deal-index overhead measured on this code (journal off, no sqlite temp file,
 # workbook deleted as soon as it is inside the zip — the index and the workbook
@@ -87,37 +94,85 @@ def teks_batas():
     return f"{MAX_TOTAL} bytes"
 
 
-def ruang_dibutuhkan(ukuran, sudah_tersimpan=False):
-    """Bytes that must still be free on the job volume.
+def ruang_dibutuhkan(ukuran, sudah_tersimpan=False, max_part=None):
+    """Peak bytes that must still be free on the job volume.
 
-    The upload is stored once. Beside it the deal index needs OVERHEAD_PER_BYTE
-    of the file, plus MARGIN_DISK for the result. When the file is already on
-    this volume, only that extra space has to be free.
+    With process-and-delete (each part is parsed then unlinked before the next
+    is kept), peak disk is the largest part plus the deal index for the whole
+    upload (OVERHEAD_PER_BYTE of total size) plus MARGIN_DISK for the result.
+    When max_part is omitted it defaults to the total (single-file case), which
+    keeps the old S + 20.54%·S + margin bound.
+
+    When the bytes are already on this volume (sudah_tersimpan), only the index
+    and margin still have to be free on top of what is stored.
     """
     if ukuran < 0:
         ukuran = 0
+    ukuran = int(ukuran)
+    if max_part is None:
+        max_part = ukuran
+    else:
+        max_part = max(0, int(max_part))
     ekstra = int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK
     if sudah_tersimpan:
         return ekstra
-    return int(ukuran) + ekstra
+    return max_part + ekstra
 
 
-def pesan_disk(ukuran, bebas, sudah_tersimpan=False):
-    perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan)
+
+def max_part_fit(ukuran, bebas, freed=0, staged=0):
+    """Largest part that still fits: free - index(S) - margin (never negative).
+
+    Used when a single-file upload would exceed free space: the preflight message
+    tells the user to split, and quotes this as the max part size that would pass.
+    """
+    if ukuran < 0:
+        ukuran = 0
+    ukuran = int(ukuran)
+    efektif = max(0, int(bebas) + max(0, int(freed)) - max(0, int(staged)))
+    ekstra = int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK
+    return max(0, efektif - ekstra)
+
+
+MSG_SERVER_BUSY = (
+    "The server is busy processing another upload right now. "
+    "Please wait a few minutes and start the upload again."
+)
+
+
+def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None, busy=False):
+    """English-only disk shortage text. When busy, prefer the wait message."""
+    if busy:
+        return MSG_SERVER_BUSY
+    perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part)
+    if max_part is None:
+        max_part = ukuran
+    else:
+        max_part = max(0, int(max_part))
 
     def gb(n):
         return f"{n / _GIB:.1f} GB"
 
     persen = f"{OVERHEAD_PER_BYTE * 100:.2f}%"
     if sudah_tersimpan:
-        return (f"Not enough free disk space to process this upload. The file is "
-                f"already on the server. The deal index needs about {gb(perlu)} more "
-                f"({persen} of the file, plus {gb(MARGIN_DISK)} for the result). "
-                f"Only {gb(bebas)} is free. The upload was not deleted.")
-    return (f"Not enough free disk space for this upload. The file plus its deal "
-            f"index need about {gb(perlu)} free (the file, plus {persen} for the "
-            f"index and {gb(MARGIN_DISK)} for the result). Only {gb(bebas)} is free. "
-            f"No file was saved.")
+        return (
+            f"Not enough free disk space to process this upload. "
+            f"The file is already on the server. "
+            f"The deal index needs about {gb(perlu)} more "
+            f"({persen} of the total, plus {gb(MARGIN_DISK)} for the result). "
+            f"Only {gb(bebas)} is free. "
+            f"The upload was not deleted. "
+            f"Please wait if another upload is using the server, then start the upload again."
+        )
+    return (
+        f"Not enough free disk space for this upload. "
+        f"About {gb(perlu)} free is needed "
+        f"(largest part {gb(max_part)} + index ~{persen} of total "
+        f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin). "
+        f"Only {gb(bebas)} is free. No file was saved. "
+        f"Please wait if another upload is using the server, or split into smaller parts, "
+        f"then start the upload again."
+    )
 
 
 def teks_dibersihkan(freed):
@@ -125,34 +180,144 @@ def teks_dibersihkan(freed):
             f"({freed / _GIB:.1f} GB freed); nothing else can be removed right now.")
 
 
-def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None):
+def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None, max_part=None, busy=False):
     """None when the job volume can hold the run, otherwise a message for the user."""
     bebas = shutil.disk_usage(path).free
-    if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan):
-        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan)
+    if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part):
+        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan, max_part=max_part, busy=busy)
+        if busy:
+            return pesan
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None):
+def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=None, busy=False):
     """Room check once staged bytes are already on this volume.
 
     ukuran_baru still has to be written (a small form upload). Staged bytes
     do not need to be reserved again: renaming them does not use more space.
+    With process-and-delete the peak extra is the index for the whole total
+    (conservative); max_part is accepted for message wording only.
     """
     total = max(0, ukuran_sudah) + max(0, ukuran_baru)
-    perlu = ruang_dibutuhkan(total, sudah_tersimpan=True) + max(0, ukuran_baru)
+    perlu = ruang_dibutuhkan(total, sudah_tersimpan=True, max_part=max_part) + max(0, ukuran_baru)
     bebas = shutil.disk_usage(path).free
     if bebas < perlu:
-        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0)
+        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0, max_part=max_part,
+                           busy=busy)
+        if busy:
+            return pesan
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def _storage_error():
-    return jsonify({"error": "The server does not have enough temporary storage for this upload. "
-                             "No file was saved. Please try again after the previous upload is "
-                             "finished or contact the administrator."}), 507
+def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, staged=0, held=0):
+    """JSON-ready preflight numbers and English-only message.
+
+    Peak is modelled over the whole interleaved lifecycle (upload one part,
+    ingest+delete, repeat, then zip): max_part + index(S) + margin.
+
+    When the peak does not fit:
+      * held > 0 and the peak WOULD fit once that other work frees disk -> reason
+        "busy" (wait and start again).
+      * unsplit file that is too big even for the idle free space -> reason
+        "too_big" with a split hint quoting max_part_fit (~8 GB typical).
+      * otherwise a plain not-enough message (English only; no VPN advice).
+    """
+    if max_part is None:
+        max_part = ukuran
+    max_upload = MAX_TOTAL if max_upload is None else max_upload
+    perlu = ruang_dibutuhkan(ukuran, False, max_part=max_part)
+    # Count bytes already staged for this check so a leftover upload does not
+    # look like free space the new run can spend twice.
+    efektif = max(0, bebas + max(0, int(freed)) - max(0, int(staged)))
+    held = max(0, int(held))
+    ok = ukuran <= max_upload and perlu <= efektif
+    fit = max_part_fit(ukuran, bebas, freed=freed, staged=staged)
+    idle_free = efektif + held
+    fit_idle = max(0, idle_free - int(ukuran * OVERHEAD_PER_BYTE) - MARGIN_DISK)
+
+    def gb(n):
+        return round(n / _GIB, 2)
+
+    reason = "ok"
+    if ok:
+        msg = (
+            f"Enough free disk. Need {gb(perlu)} GB (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Free {gb(efektif)} GB. Upload limit "
+            f"{gb(max_upload)} GB."
+        )
+    elif held > 0 and perlu <= idle_free:
+        reason = "busy"
+        msg = MSG_SERVER_BUSY
+    elif max_part >= ukuran and ukuran > 0 and fit_idle > 0 and fit_idle < ukuran:
+        reason = "too_big"
+        msg = (
+            f"Not enough free disk for this file as one upload. "
+            f"Need about {gb(perlu)} GB free (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Only {gb(efektif)} GB is free now. "
+            f"Split into parts of at most {gb(fit_idle)} GB each, select every part "
+            f"together, then start the upload again."
+        )
+    elif held > 0:
+        reason = "busy"
+        msg = MSG_SERVER_BUSY
+    else:
+        reason = "disk"
+        msg = (
+            f"Not enough free disk. Need {gb(perlu)} GB (largest part {gb(max_part)} GB + index "
+            f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} GB + margin "
+            f"{gb(MARGIN_DISK)} GB). Free {gb(efektif)} GB. Upload limit "
+            f"{gb(max_upload)} GB."
+        )
+        if max_part >= ukuran and ukuran > 0 and fit <= 0:
+            msg += (
+                " Free space is too small even for a tiny part "
+                f"(index + margin alone need "
+                f"{gb(int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK)} GB)."
+            )
+        elif max_part >= ukuran and ukuran > 0 and 0 < fit < ukuran:
+            reason = "too_big"
+            msg += (
+                f" Split into parts of at most {gb(fit)} GB each so the peak fits "
+                f"the free space available now."
+            )
+
+    return {
+        "ok": ok,
+        "need": perlu,
+        "free": efektif,
+        "free_raw": bebas,
+        "max_upload": max_upload,
+        "max_part": max_part,
+        "max_part_fit": fit if reason != "too_big" else max(fit, fit_idle),
+        "total": ukuran,
+        "freed": max(0, int(freed)),
+        "staged": max(0, int(staged)),
+        "held": held,
+        "reason": reason,
+        "message": msg,
+        "message_en": msg,
+    }
+
+def _storage_error(freed=None, busy=False):
+    if busy:
+        pesan = MSG_SERVER_BUSY
+    else:
+        pesan = (
+            "Not enough temporary storage on the server for this upload. "
+            "No file was saved. "
+            "Please wait a few minutes if another upload is using the server, "
+            "then start the upload again."
+        )
+        if freed is not None:
+            pesan += teks_dibersihkan(freed)
+    body = {"error": pesan, "disk": True, "reason": "busy" if busy else "disk"}
+    if freed is not None:
+        body["freed"] = freed
+    return jsonify(body), 507
 
 
 def _stage_root(jobs_dir):
@@ -223,11 +388,18 @@ def sweep(jobs_dir, max_age_hours=STAGE_MAX_AGE_HOURS):
             pass
 
 
-def staged_files(jobs_dir, upload_id):
-    """Return the finished staged file paths in the order the user picked them.
+def ingest_dir(stage):
+    """Directory holding the Deal Segregator IngestSession for this upload."""
+    return Path(stage) / "ingest"
 
-    Returns None when the id is unknown, which the caller reports as a plain
-    validation error -- a stale tab retrying an old upload must not 500.
+
+def staged_files(jobs_dir, upload_id):
+    """Return finished staged file paths still on disk (not yet ingested).
+
+    Parts already ingested and deleted are omitted. Returns None when the id is
+    unknown or the upload is incomplete (bytes short, or a non-ingested part
+    missing). An empty list means every part was ingested — the caller should
+    finalize the session instead of moving files.
     """
     stage = _stage_dir(jobs_dir, upload_id)
     if not stage or not stage.is_dir():
@@ -237,13 +409,31 @@ def staged_files(jobs_dir, upload_id):
         return None
     if manifest["bytes"] != manifest.get("declared_bytes"):
         return None
+    if not manifest.get("files"):
+        return None
     paths = []
     for entry in manifest["files"]:
+        if entry.get("ingested"):
+            continue
         p = stage / entry["stored"]
         if not p.is_file():
             return None
         paths.append((p, entry["original"]))
-    return paths or None
+    return paths
+
+
+def all_ingested(jobs_dir, upload_id):
+    """True when every declared part has been ingested into the session."""
+    stage = _stage_dir(jobs_dir, upload_id)
+    if not stage or not stage.is_dir():
+        return False
+    manifest = _read_manifest(stage) or {}
+    files = manifest.get("files") or []
+    if not files:
+        return False
+    if manifest.get("bytes") != manifest.get("declared_bytes"):
+        return False
+    return all(e.get("ingested") for e in files)
 
 
 def discard(jobs_dir, upload_id):
@@ -362,17 +552,17 @@ def pesan_antrean(blockers, user, ahead=()):
         nama = sorted({b["user"] for b in lain if b.get("user")})
         apa = "; ".join(sorted({(f"{b['user']}: " if b.get('user') else "") + _apa(b) for b in lain}))
         if nama:
-            pesan = (f"Server sedang dipakai oleh {', '.join(nama)}. The server is currently "
-                     f"processing another user's file ({apa}). Your run is queued and will start "
-                     "automatically when it finishes.")
+            pesan = (f"The server is currently processing another user's file ({apa}). "
+                     "Your run is queued and will start automatically when it finishes.")
         else:
             pesan = ("The server is currently processing another user's file. Your run is "
                      "queued and will start automatically when it finishes.")
         return pesan, blocked_by, job_url
     depan = sorted({u for u in ahead if u and u != user})
     if depan:
-        return (f"Server sedang dipakai oleh {', '.join(depan)}. Waiting behind their queued "
-                "upload; yours starts automatically after it.", blocked_by, job_url)
+        return (f"The server is currently processing another user's queued upload "
+                f"({', '.join(depan)}). Yours starts automatically after it.",
+                blocked_by, job_url)
     return ("The server is currently processing another user's file. Your run is queued and "
             "will start automatically when it finishes.", blocked_by, job_url)
 
@@ -401,6 +591,36 @@ def _sudah_ada(entry, seq, data, sidik, target):
     with open(target, "rb") as fh:
         fh.seek(-len(data), 2)
         return fh.read() == data
+
+
+
+def bytes_held_by_others(jobs_dir, user=None, keep_upload=None):
+    """Disk bytes held by other users' active staging and locked jobs.
+
+    Used to tell 'server busy, wait' apart from 'this file is too big even when
+    the server is idle'. The caller's own staging is counted separately as
+    `staged` and is not included here.
+    """
+    held = 0
+    root = Path(jobs_dir) / "staging"
+    if root.is_dir():
+        for stage in root.iterdir():
+            if not stage.is_dir() or stage.name == keep_upload:
+                continue
+            m = _read_manifest(stage) or {}
+            owner = m.get("user")
+            if user and owner == user:
+                continue
+            try:
+                held += sum(f.stat().st_size for f in stage.rglob("*") if f.is_file())
+            except OSError:
+                pass
+    for job_id in cleanup.active_jobs(jobs_dir):
+        info = cleanup._read_json(Path(jobs_dir) / f"{job_id}.json") or {}
+        if user and info.get("user") == user:
+            continue
+        held += cleanup._size(Path(jobs_dir) / job_id)
+    return held
 
 
 def register(app, jobs_dir):
@@ -441,7 +661,58 @@ def register(app, jobs_dir):
         return jsonify({"id": upload_id, "bytes": manifest["bytes"],
                         "declared_bytes": manifest.get("declared_bytes"),
                         "files": [{"index": e["index"], "chunks": e["chunks"],
-                                   "bytes": e["bytes"]} for e in manifest["files"]]})
+                                   "bytes": e["bytes"],
+                                   "name": e.get("original"),
+                                   "hashes": e.get("hashes"),
+                                   "ingested": bool(e.get("ingested")),
+                                   "kind": e.get("ingest_kind")}
+                                  for e in manifest["files"]],
+                        "ingested": [e["index"] for e in manifest["files"]
+                                     if e.get("ingested")]})
+
+    @app.get("/upload/preflight")
+    def upload_preflight():
+        """Cheap disk check before any chunk is sent. CSRF-safe GET, auth required."""
+        try:
+            requested = int(request.args.get("bytes", "0"))
+        except ValueError:
+            return jsonify({"error": "Invalid upload size.", "ok": False}), 400
+        try:
+            max_part = request.args.get("max_part")
+            max_part = int(max_part) if max_part not in (None, "") else requested
+        except ValueError:
+            return jsonify({"error": "Invalid max_part.", "ok": False}), 400
+        if requested < 0 or max_part < 0:
+            return jsonify({"error": "Invalid upload size.", "ok": False}), 400
+        if requested > MAX_TOTAL:
+            info = ringkas_preflight(requested, 0, max_part=max_part)
+            info["ok"] = False
+            info["error"] = f"The selected files exceed the {teks_batas()} limit."
+            info["message"] = info["error"]
+            return jsonify(info), 413
+        user = _username()
+        # Count this user's currently staged bytes so a leftover upload is not
+        # treated as free space a second time. Preflight does not delete them.
+        staged = 0
+        root = _stage_root(jobs_dir)
+        if root.is_dir() and user:
+            for stage in root.iterdir():
+                if not stage.is_dir():
+                    continue
+                m = _read_manifest(stage) or {}
+                if m.get("user") == user:
+                    try:
+                        staged += sum(f.stat().st_size for f in stage.rglob("*") if f.is_file())
+                    except OSError:
+                        pass
+        bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
+        held = bytes_held_by_others(jobs_dir, user=user)
+        # Also treat live blockers (fresh heartbeat / locked job) as "busy" even
+        # when their on-disk size is still small — another upload is using the server.
+        if held <= 0 and cleanup.all_blockers(jobs_dir):
+            held = max(held, 1)
+        info = ringkas_preflight(requested, bebas, max_part=max_part, staged=staged, held=held)
+        return jsonify(info), (200 if info["ok"] else 507)
 
     @app.post("/upload/begin")
     def upload_begin():
@@ -449,6 +720,13 @@ def register(app, jobs_dir):
             requested = int(request.form.get("bytes", "0"))
         except ValueError:
             return jsonify({"error": "Invalid upload size."}), 400
+        try:
+            raw_max = request.form.get("max_part")
+            max_part = int(raw_max) if raw_max not in (None, "") else requested
+        except ValueError:
+            return jsonify({"error": "Invalid max_part."}), 400
+        if max_part < 0:
+            max_part = requested
         if requested < 0 or requested > MAX_TOTAL:
             return jsonify({"error": f"The selected files exceed the {teks_batas()} limit."}), 413
         ticket = (request.form.get("ticket") or "").strip()
@@ -472,9 +750,13 @@ def register(app, jobs_dir):
             if diganti or tiket_lama:
                 g.upload_note = (f"superseded own uploads {len(diganti)}, "
                                  f"own queue tickets {len(tiket_lama)}")
+            # sweep() is the idle staging cleaner that used to sit unused; clean()
+            # already removes idle staging by heartbeat, and sweep covers the same
+            # directories by last-chunk age so both stay consistent.
+            sweep(jobs_dir)
             freed = cleanup.clean(jobs_dir) + bebas_lama
             salah = cek_ruang(_stage_root(jobs_dir), requested, sudah_tersimpan=False,
-                              freed=freed)
+                              freed=freed, max_part=max_part)
             berat = requested >= cleanup.HEAVY_BYTES
             blockers = cleanup.heavy_blockers(jobs_dir) if berat else []
             if salah and not blockers:
@@ -493,7 +775,14 @@ def register(app, jobs_dir):
                 }), 202
             cleanup.queue_leave(jobs_dir, ticket)
             if salah:
-                return jsonify({"error": salah}), 507
+                bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
+                held = bytes_held_by_others(jobs_dir, user=user)
+                if held <= 0 and blockers:
+                    held = max(held, 1)
+                info = ringkas_preflight(requested, bebas, max_part=max_part, freed=freed, held=held)
+                err = info["message"] if info.get("reason") in ("busy", "too_big") else salah
+                # Prefer English classified message; strip bilingual leftovers from cek_ruang.
+                return jsonify({"error": err, "freed": freed, **info}), 507
             upload_id = uuid.uuid4().hex
             stage = _stage_root(jobs_dir) / upload_id
             try:
@@ -501,11 +790,13 @@ def register(app, jobs_dir):
                 stage.mkdir()
                 _write_manifest(stage, {"files": [], "bytes": 0, "user": user,
                                         "declared_bytes": requested,
+                                        "max_part": max_part,
                                         "started": sekarang,
                                         "last_chunk": sekarang})
             except OSError:
                 shutil.rmtree(stage, ignore_errors=True)
-                return _storage_error()
+                busy = bool(cleanup.all_blockers(jobs_dir))
+                return _storage_error(busy=busy)
         return jsonify({"id": upload_id, "freed": freed})
 
     @app.post("/upload/queue/leave")
@@ -527,6 +818,79 @@ def register(app, jobs_dir):
         g.upload_note = f"discard ({request.form.get('reason') or 'client'})"
         discard(jobs_dir, upload_id)
         return jsonify({"discarded": True})
+
+
+    @app.post("/upload/ingest")
+    def upload_ingest():
+        """Parse one finished staged part into the Deal Segregator session, then delete it.
+
+        Sequential with the browser: upload part i fully, call this, then upload
+        part i+1. Peak disk is therefore ~max(part) + index + margin, not the sum
+        of every part. FX / account-type files should be ingested before deals.
+        """
+        import deal_segregator as ds
+        upload_id = (request.form.get("id") or "").strip()
+        stage = _stage_dir(jobs_dir, upload_id)
+        if stage and not stage.is_dir() and cleanup.superseded(stage):
+            return jsonify({"error": "This upload was replaced by a newer upload from your "
+                                     "account (another tab or a new attempt).",
+                            "superseded": True}), 410
+        if not stage or not stage.is_dir():
+            return jsonify({"error": "This upload has expired. Please pick the files again."}), 404
+        try:
+            index = int(request.form.get("index", ""))
+        except ValueError:
+            return jsonify({"error": "Malformed ingest request."}), 400
+        allow_mt4 = (request.form.get("allow_mt4") or "").strip() in ("1", "true", "yes")
+
+        with open(stage / ".lock", "a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            manifest = _read_manifest(stage)
+            if manifest is None:
+                return jsonify({"error": "This upload is no longer valid. Please start again."}), 404
+            owner = manifest.get("user")
+            if owner and owner != _username():
+                return jsonify({"error": "This upload belongs to another account."}), 403
+            entries = {e["index"]: e for e in manifest["files"]}
+            entry = entries.get(index)
+            if entry is None:
+                return jsonify({"error": "That file has not been uploaded yet."}), 404
+            if entry.get("ingested"):
+                g.upload_note = f"ingest duplicate index={index}"
+                return jsonify({"ingested": True, "duplicate": True,
+                                "index": index, "name": entry.get("original"),
+                                "kind": entry.get("ingest_kind")})
+            target = stage / entry["stored"]
+            if not target.is_file():
+                return jsonify({"error": "The staged file is missing. Please start again."}), 404
+            # Part must be complete relative to its own bytes so far; the browser
+            # only calls ingest after the last chunk of that file has been acked.
+            state = ingest_dir(stage)
+            state.mkdir(parents=True, exist_ok=True)
+            try:
+                sess = ds.IngestSession.load(state, allow_mt4=allow_mt4)
+                rec = sess.ingest(target, hapus=True, original_name=entry.get("original"))
+            except SystemExit as exc:
+                pesan = str(exc) or "STOP: ingest failed."
+                g.upload_note = f"ingest STOP index={index}"
+                return jsonify({"error": pesan, "stop": True}), 400
+            except Exception as exc:
+                g.upload_note = f"ingest exception index={index}: {type(exc).__name__}"
+                return jsonify({"error": f"STOP: failed while ingesting "
+                                         f"{entry.get('original')}: {exc}"}), 500
+            entry["ingested"] = True
+            entry["ingest_kind"] = rec.get("kind")
+            entry["ingested_at"] = time.time()
+            # Part file is gone; keep manifest bytes as the cumulative received
+            # total (for resume / declared_bytes check) but do not count the
+            # deleted file toward disk.
+            manifest["last_chunk"] = time.time()
+            _write_manifest(stage, manifest)
+            g.upload_note = f"ingested index={index} kind={rec.get('kind')}"
+            return jsonify({"ingested": True, "index": index,
+                            "name": entry.get("original"), "kind": rec.get("kind"),
+                            "ingested_indexes": [e["index"] for e in manifest["files"]
+                                                 if e.get("ingested")]})
 
     @app.post("/upload/chunk")
     def upload_chunk():
@@ -622,5 +986,6 @@ def register(app, jobs_dir):
                 _write_manifest(stage, manifest)
             except OSError:
                 shutil.rmtree(stage, ignore_errors=True)
-                return _storage_error()
+                busy = bool(cleanup.all_blockers(jobs_dir))
+                return _storage_error(busy=busy)
             return jsonify({"received": manifest["bytes"]})

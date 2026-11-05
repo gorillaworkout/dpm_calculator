@@ -31,6 +31,8 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    <p class="hint upload-split-hint" id="upload-split-hint">Large exports can be split by month (MT5/MT4 monthly export); select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total (max part ~8 GB).</p>
+    <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="mt4-accounts">MT4 account types <span class="opt">— required when any MT4 file is uploaded</span></label>
     <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop the account-type file here</strong><br><span>Required with MT4. Columns account, GROUP (optional), account_type. CentAccount or a cent GROUP (e.g. Plus-10-cents) is USC (÷100); everything else and unknown logins are USD.</span>
@@ -50,6 +52,8 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    <p class="hint upload-split-hint" id="upload-split-hint">Large exports can be split by month (MT5 monthly export); select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total (max part ~8 GB).</p>
+    <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
     <div id="equity-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
@@ -194,7 +198,7 @@
       var b = document.createElement('button');
       b.type = 'button';
       b.className = 'file-remove repick';
-      b.textContent = 'Pilih ulang file ini / Re-select this file';
+      b.textContent = 'Re-select this file';
       b.setAttribute('aria-label', 'Re-select ' + file.name);
       b.addEventListener('click', function (event) {
         event.stopPropagation();
@@ -441,16 +445,13 @@
     // re-exported, re-downloaded under the same name, or synced by OneDrive after it was
     // picked, every read fails with NotReadableError. Only picking it again helps.
     function unreadableText(name) {
-      return 'File "' + name + '" tidak bisa dibaca browser — file berubah atau diganti setelah dipilih, ' +
-        'masih terbuka di Excel, atau file OneDrive/Google Drive online-only. Tutup file, salin ke folder ' +
-        'lokal, lalu klik "Pilih ulang file ini" dan pilih file itu lagi; file lain tetap terpilih. ' +
-        '(The browser could not read this file: it changed or was replaced after you picked it, is ' +
+      return 'The browser could not read "' + name + '": it changed or was replaced after you picked it, is ' +
         'open/locked in another program, or is an online-only OneDrive/Google Drive file. Close it, copy it ' +
-        'to a local folder, click "Re-select this file" and pick it again; the other files stay selected.)';
+        'to a local folder, click "Re-select this file" and pick it again; the other files stay selected.';
     }
     function unreadableShort(err) {
       return 'tidak bisa dibaca / cannot be read (' + ((err && err.name) || 'Error') + '). ' +
-        'Pilih ulang file ini / Re-select this file.';
+        'Re-select this file.';
     }
     function fileReadError(name, cause) {
       var e = new Error(unreadableText(name));
@@ -521,10 +522,9 @@
     function preflightText(bad) {
       return bad.map(function (b) {
         return b.why === 'changed'
-          ? 'File "' + b.file.name + '" berubah setelah dipilih — pilih ulang file ini. ' +
-            '(This file changed on disk after you picked it; re-select it so the current version is uploaded.)'
+          ? 'File "' + b.file.name + '" changed on disk after you picked it; re-select it so the current version is uploaded.'
           : unreadableText(b.file.name) + ' [' + ((b.err && b.err.name) || 'Error') + ']';
-      }).join(' ') + ' Nothing was uploaded. / Belum ada yang dikirim.';
+      }).join(' ') + ' Nothing was uploaded.';
     }
     function isJson(r) {
       var ct = (r.headers && r.headers.get && r.headers.get('content-type')) || '';
@@ -594,7 +594,14 @@
                     return fail(x);
                   });
                 }
-                if (r.status >= 500 || r.status === 429 || r.status === 408 || e.retry) {
+                // 507 = disk full: never retry and never treat as a flaky link.
+                if (r.status === 507) {
+                  var disk = new Error(e.error || 'Not enough free disk space on the server.');
+                  disk.name = 'HTTP 507'; disk.noRetry = true; disk.diskFull = true;
+                  disk.freed = e.freed; disk.need = e.need; disk.free = e.free;
+                  return fail(disk);
+                }
+                if ((r.status >= 500 && r.status !== 507) || r.status === 429 || r.status === 408 || e.retry) {
                   var h = new Error(e.error || ('HTTP ' + r.status)); h.name = 'HTTP ' + r.status;
                   return retry(h);
                 }
@@ -642,7 +649,7 @@
         return (context && context.file ? 'Upload stopped at file ' + context.fileIndex + ' of ' +
           context.fileCount + ', chunk ' + context.chunk + ' of ' + context.chunks + '. ' : '') +
           err.message + ' Nothing more was sent; the files already uploaded in this run were discarded. ' +
-          'After re-selecting, press Run again. / Setelah pilih ulang, tekan Run lagi.' + details;
+          'After re-selecting, press Run again.' + details;
       }
       if (err && err.sessionExpired) {
         return 'Session expired — please sign in again. ' + err.message +
@@ -653,6 +660,16 @@
         ? 'Upload stopped at file ' + context.fileIndex + ' of ' + context.fileCount +
           ' (' + context.file + '), chunk ' + context.chunk + ' of ' + context.chunks + '. '
         : 'Upload could not start; 0 MB reached the server. ';
+      var diskish = (err && (err.diskFull || err.name === 'HTTP 507')) ||
+        (err && err.message && /free disk|ruang disk|temporary storage|Not enough free disk/i.test(err.message));
+      if (diskish) {
+        var diskMsg = (err && err.message) ? err.message + ' ' : '';
+        // Prefer the server's classified English message (busy wait / split hint).
+        // Do not add VPN advice for disk errors; partial staging is discarded.
+        return where + diskMsg +
+          'Your selected files are still in the list. Wait a few minutes if the server is busy, ' +
+          'or split into smaller parts, then press Run again to start a fresh upload.' + details;
+      }
       var reason = err && err.message && err.message !== 'Failed to fetch' && !/NetworkError|Load failed|network/i.test(err.message) && err.name !== 'TimeoutError'
         ? err.message + ' '
         : 'The browser lost its connection before the server acknowledged this chunk' +
@@ -706,9 +723,10 @@
     }
     var activeContext = null;
     // The staged upload this tab owns until the processing route takes it over.
-    // Closing or leaving the tab discards it at once (best effort), so it neither
-    // holds disk nor waits for the idle cleanup. A page kept in the back/forward
-    // cache (persisted) can come back and resume, so it is left alone.
+    // Closing or leaving the tab discards it at once (best effort), so abandoned
+    // staging neither holds disk nor waits for the idle cleanup. There is no
+    // resume: the user starts the upload again from scratch. A page kept in the
+    // back/forward cache (persisted) is left alone so a soft navigation can continue.
     var pageUpload = null;
     window.addEventListener('pagehide', function (ev) {
       if (!pageUpload || ev.persisted) return;
@@ -758,11 +776,12 @@
       queue.button.hidden = !show;
       queue.button.style.display = show ? '' : 'none';
     }
-    function beginUpload(attempt, total, waitStarted) {
+    function beginUpload(attempt, total, waitStarted, maxPart) {
       if (queue.cancelled) {
         var c = new Error('cancelled'); c.cancelled = true; return Promise.reject(c);
       }
-      var fd = new FormData(); fd.append('bytes', total);
+      if (maxPart == null) maxPart = total;
+      var fd = new FormData(); fd.append('bytes', total); fd.append('max_part', maxPart);
       if (queue.ticket) fd.append('ticket', queue.ticket);
       return fetch('/upload/begin', { method: 'POST', body: fd, redirect: 'manual',
                                       credentials: 'same-origin' }).then(function (r) {
@@ -785,27 +804,131 @@
             return new Promise(function (resolve) {
               queue.wake = resolve;
               queue.timer = setTimeout(resolve, 5000);
-            }).then(function () { return beginUpload(1, total, since); });
+            }).then(function () { return beginUpload(1, total, since, maxPart); });
           });
         }
         cancelButton(false);
         if (r.ok) return r.json();
+        // 507 disk: never retry as if the network flaked.
+        if (r.status === 507) {
+          return r.json().catch(function () { return {}; }).then(function (e) {
+            var disk = new Error(e.error || e.message || 'Not enough free disk space on the server.');
+            disk.name = 'HTTP 507'; disk.noRetry = true; disk.diskFull = true;
+            disk.freed = e.freed; disk.need = e.need; disk.free = e.free;
+            throw disk;
+          });
+        }
         if ((r.status >= 500 || r.status === 429) && attempt < 3) {
           return new Promise(function (resolve) {
             setTimeout(resolve, 1000 * Math.pow(2, attempt));
-          }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
+          }).then(function () { return beginUpload(attempt + 1, total, waitStarted, maxPart); });
         }
         return r.json().catch(function () { return {}; }).then(function (e) {
           throw new Error(e.error || ('Could not start the upload (HTTP ' + r.status + ').'));
         });
       }, function (err) {
         if (err && err.sessionExpired) throw err;
+        if (err && err.diskFull) throw err;
         if (attempt >= 3) { err.diag = {attempts: attempt}; throw err; }
         return new Promise(function (resolve) {
           setTimeout(resolve, 1000 * Math.pow(2, attempt));
-        }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
+        }).then(function () { return beginUpload(attempt + 1, total, waitStarted, maxPart); });
       });
     }
+
+    // Deal Segregator interleaves upload→ingest→delete so peak is max(part)+index.
+    // Other tools still hold every file until the form submit, so their preflight
+    // must use the total as max_part (otherwise a passing check can fail mid-upload).
+    var INTERLEAVE_INGEST = {% if slug == 'segregate' %}true{% else %}false{% endif %};
+    var ALLOW_MT4_INGEST = {% if company == 'kvb' and slug == 'segregate' %}true{% else %}false{% endif %};
+
+    function sortForIngest(files) {
+      // accounts → FX → deals. Prefer the dedicated input fields, then sniff.
+      function rank(f) {
+        var input = f._inputName || '';
+        if (input === 'mt4_accounts') return 0;
+        if (input === 'equity' || /equity|fx/i.test(input)) return 1;
+        {% if company == 'kvb' and slug == 'segregate' %}
+        var kind = sniffed[f.name];
+        if (kind === 'accounts') return 0;
+        {% endif %}
+        // FX workbooks often named with FX / Client Equity; deals stay last.
+        var n = (f.name || '').toLowerCase();
+        if (/client\s*equity|\bfx\b|kurs|rate/.test(n)) return 1;
+        return 2;
+      }
+      return files.slice().sort(function (a, b) {
+        var d = rank(a) - rank(b);
+        if (d) return d;
+        return (a._ord || 0) - (b._ord || 0);
+      });
+    }
+
+    function ingestPart(id, fileIndex, fileName) {
+      var fd = new FormData();
+      fd.append('id', id);
+      fd.append('index', fileIndex);
+      if (ALLOW_MT4_INGEST) fd.append('allow_mt4', '1');
+      return fetch('/upload/ingest', {method: 'POST', body: fd,
+                                      credentials: 'same-origin', redirect: 'manual'})
+        .then(function (r) {
+          var login = loginResponse(r, location.origin);
+          if (login) throw sessionError(login);
+          return r.json().then(function (j) {
+            if (!r.ok) {
+              var err = new Error(j.error || ('Ingest failed (HTTP ' + r.status + ').'));
+              err.name = 'HTTP ' + r.status;
+              err.noRetry = true;
+              if (j.stop) err.stop = true;
+              throw err;
+            }
+            return j;
+          }, function () {
+            var err = new Error('Ingest failed (HTTP ' + r.status + ').');
+            err.noRetry = true; throw err;
+          });
+        });
+    }
+
+    function diskPreflight(total, maxPart) {
+      var q = '/upload/preflight?bytes=' + encodeURIComponent(total) +
+              '&max_part=' + encodeURIComponent(maxPart == null ? total : maxPart);
+      return fetch(q, {method: 'GET', redirect: 'manual', credentials: 'same-origin'})
+        .then(function (r) {
+          var login = loginResponse(r, location.origin);
+          if (login) throw sessionError(login);
+          return r.json().then(function (j) {
+            j.http = r.status;
+            return j;
+          }, function () { return {ok: false, message: 'Preflight failed (HTTP ' + r.status + ').', http: r.status}; });
+        });
+    }
+
+    var diskStatus = document.getElementById('disk-preflight-status');
+    var diskTimer = null;
+    function refreshDiskStatus() {
+      if (!diskStatus) return;
+      var files = inputs.reduce(function (all, input) {
+        return all.concat(Array.prototype.slice.call(input.files || []));
+      }, []);
+      if (!files.length) { diskStatus.hidden = true; diskStatus.textContent = ''; return; }
+      var total = files.reduce(function (s, f) { return s + f.size; }, 0);
+      var maxPart = INTERLEAVE_INGEST
+        ? files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0)
+        : total;
+      if (diskTimer) clearTimeout(diskTimer);
+      diskTimer = setTimeout(function () {
+        diskPreflight(total, maxPart).then(function (pf) {
+          if (!pf) return;
+          diskStatus.hidden = false;
+          diskStatus.textContent = pf.message || '';
+          diskStatus.style.color = pf.ok ? '' : '#b00020';
+        }, function () { /* ignore transient preflight errors on select */ });
+      }, 200);
+    }
+    inputs.forEach(function (input) {
+      input.addEventListener('change', refreshDiskStatus);
+    });
 
     // A "Re-select this file" button under the error: picks one file again into its own
     // drop zone; every other file stays selected. Then Run starts a fresh upload.
@@ -813,8 +936,7 @@
       var wrap = document.createElement('div');
       wrap.style.marginTop = '8px';
       wrap.appendChild(repickButton(file, function (fresh) {
-        wrap.textContent = 'Diganti / Replaced: ' + fresh.name + ' (' + size(fresh.size) + '). ' +
-          'Tekan Run lagi / Press Run again.';
+        wrap.textContent = 'Replaced: ' + fresh.name + ' (' + size(fresh.size) + '). Press Run again.';
       }));
       progressDetail.appendChild(wrap);
     }
@@ -830,9 +952,15 @@
         return;
       }
       {% endif %}
-      var files = inputs.reduce(function (all, input) {
-        return all.concat(Array.prototype.slice.call(input.files || []));
-      }, []);
+      var files = [];
+      inputs.forEach(function (input, ii) {
+        Array.prototype.slice.call(input.files || []).forEach(function (f, fi) {
+          // Tag for ingest sort without mutating the File object prototype broadly.
+          try { f._inputName = input.name || ''; f._ord = ii * 1000 + fi; } catch (e) {}
+          files.push(f);
+        });
+      });
+      if (INTERLEAVE_INGEST) files = sortForIngest(files);
       var total = files.reduce(function (s, f) { return s + f.size; }, 0);
       var fileCount = files.length;              // the account-type file is one of them
       var empty = files.filter(function (file) { return file.size === 0; });
@@ -864,6 +992,9 @@
         size(total) + ' total', 0, 'uploading');
       // Every file is read again (first and last 64 KB) before anything is sent, so a
       // stale or locked file is reported at once, by name, with nothing uploaded.
+      var maxPart = INTERLEAVE_INGEST
+        ? files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0)
+        : total;
       preflight(files, function (f) { return checks[fileKey(f)]; },
                 function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); })
         .then(function (bad) {
@@ -871,19 +1002,35 @@
             var pe = new Error(preflightText(bad)); pe.preflight = bad; pe.noRetry = true;
             throw pe;
           }
-          updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
-          return beginUpload(1, total);
+          updateProgress('Checking disk space…',
+            files.length + ' file(s), ' + size(total) + ' total · largest ' + size(maxPart), 0, 'uploading');
+          return diskPreflight(total, maxPart).then(function (pf) {
+            if (pf && pf.message) {
+              updateProgress(pf.ok ? 'Disk OK — starting upload…' : 'Not enough disk',
+                pf.message, 0, pf.ok ? 'uploading' : 'failed');
+            }
+            if (pf && pf.ok === false) {
+              var de = new Error(pf.message || pf.error || 'Not enough free disk space on the server.');
+              de.name = 'HTTP 507'; de.noRetry = true; de.diskFull = true;
+              de.need = pf.need; de.free = pf.free; de.freed = pf.freed;
+              throw de;
+            }
+            updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
+            return beginUpload(1, total, null, maxPart);
+          });
         })
         .then(function (start) {
           var id = activeId = pageUpload = start.id;
 
           // Sequential on purpose: parallel chunks would race on the append and
-          // the server rejects anything out of order.
+          // the server rejects anything out of order. For Deal Segregator, each
+          // finished file is ingested (parsed into the index) and deleted before
+          // the next file starts uploading — peak disk stays ~max(part)+index.
           var chain = Promise.resolve();
           files.forEach(function (file, fileIndex) {
             var seq = 0;
-            var chunks = Math.ceil(file.size / CHUNK);
-            for (var off = 0; off < file.size; off += CHUNK) {
+            var chunks = Math.ceil(file.size / CHUNK) || 1;
+            for (var off = 0; off < file.size || (file.size === 0 && seq === 0); off += CHUNK) {
               (function (offset, mySeq) {
                 chain = chain.then(function () {
                   var label = 'File ' + (fileIndex + 1) + ' of ' + files.length + ': ' + file.name +
@@ -918,6 +1065,18 @@
                     });
                 });
               })(off, seq++);
+              if (file.size === 0) break;
+            }
+            if (INTERLEAVE_INGEST) {
+              (function (fi, fname) {
+                chain = chain.then(function () {
+                  updateProgress('Processing on server…',
+                    'File ' + (fi + 1) + ' of ' + files.length + ': ' + fname +
+                    ' — parsing into the index and freeing disk · ' + elapsed(started),
+                    total ? sent / total * 100 : 100, 'processing');
+                  return ingestPart(id, fi, fname);
+                });
+              })(fileIndex, file.name);
             }
           });
 
@@ -949,7 +1108,7 @@
           }
           pageUpload = null;
           if (err && err.preflight) {
-            updateProgress('Upload not started — re-select the file / pilih ulang file', err.message, 0, 'failed');
+            updateProgress('Upload not started — re-select the file', err.message, 0, 'failed');
             err.preflight.forEach(function (b) { addRepick(b.file); });
             form.b.disabled = false;
             form.b.textContent = 'Run & download result';
