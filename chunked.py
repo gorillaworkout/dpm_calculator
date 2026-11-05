@@ -11,6 +11,7 @@ Each file is one staging part. Chunks are appended to that part and then
 discarded from memory. There is never a second assembled copy beside the chunks.
 
 Flow:
+    GET  /upload/preflight?bytes=&max_part= -> need / free / max (auth)
     POST /upload/begin                  -> {"id": "<hex>"}
     POST /upload/chunk  (repeat)        -> {"received": <bytes>}
     GET  /upload/status?id=<hex>        -> what the server already has (resume)
@@ -87,37 +88,70 @@ def teks_batas():
     return f"{MAX_TOTAL} bytes"
 
 
-def ruang_dibutuhkan(ukuran, sudah_tersimpan=False):
-    """Bytes that must still be free on the job volume.
+def ruang_dibutuhkan(ukuran, sudah_tersimpan=False, max_part=None):
+    """Peak bytes that must still be free on the job volume.
 
-    The upload is stored once. Beside it the deal index needs OVERHEAD_PER_BYTE
-    of the file, plus MARGIN_DISK for the result. When the file is already on
-    this volume, only that extra space has to be free.
+    With process-and-delete (each part is parsed then unlinked before the next
+    is kept), peak disk is the largest part plus the deal index for the whole
+    upload (OVERHEAD_PER_BYTE of total size) plus MARGIN_DISK for the result.
+    When max_part is omitted it defaults to the total (single-file case), which
+    keeps the old S + 20.54%·S + margin bound.
+
+    When the bytes are already on this volume (sudah_tersimpan), only the index
+    and margin still have to be free on top of what is stored.
     """
     if ukuran < 0:
         ukuran = 0
+    ukuran = int(ukuran)
+    if max_part is None:
+        max_part = ukuran
+    else:
+        max_part = max(0, int(max_part))
     ekstra = int(ukuran * OVERHEAD_PER_BYTE) + MARGIN_DISK
     if sudah_tersimpan:
         return ekstra
-    return int(ukuran) + ekstra
+    return max_part + ekstra
 
 
-def pesan_disk(ukuran, bebas, sudah_tersimpan=False):
-    perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan)
+def pesan_disk(ukuran, bebas, sudah_tersimpan=False, max_part=None):
+    perlu = ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part)
+    if max_part is None:
+        max_part = ukuran
+    else:
+        max_part = max(0, int(max_part))
 
     def gb(n):
         return f"{n / _GIB:.1f} GB"
 
     persen = f"{OVERHEAD_PER_BYTE * 100:.2f}%"
     if sudah_tersimpan:
-        return (f"Not enough free disk space to process this upload. The file is "
-                f"already on the server. The deal index needs about {gb(perlu)} more "
-                f"({persen} of the file, plus {gb(MARGIN_DISK)} for the result). "
-                f"Only {gb(bebas)} is free. The upload was not deleted.")
-    return (f"Not enough free disk space for this upload. The file plus its deal "
-            f"index need about {gb(perlu)} free (the file, plus {persen} for the "
-            f"index and {gb(MARGIN_DISK)} for the result). Only {gb(bebas)} is free. "
-            f"No file was saved.")
+        return (
+            f"Ruang disk tidak cukup untuk memproses upload ini. "
+            f"Not enough free disk space to process this upload. "
+            f"File sudah di server / The file is already on the server. "
+            f"Indeks deal butuh sekitar {gb(perlu)} lagi "
+            f"({persen} dari total, plus {gb(MARGIN_DISK)} untuk hasil) / "
+            f"The deal index needs about {gb(perlu)} more "
+            f"({persen} of the total, plus {gb(MARGIN_DISK)} for the result). "
+            f"Hanya {gb(bebas)} yang kosong / Only {gb(bebas)} is free. "
+            f"Upload tidak dihapus / The upload was not deleted. "
+            f"Ini bukan masalah VPN/internet — ruang disk penuh. / "
+            f"This is not a VPN or internet problem — the disk is full."
+        )
+    return (
+        f"Ruang disk tidak cukup untuk upload ini. "
+        f"Not enough free disk space for this upload. "
+        f"Perlu sekitar {gb(perlu)} kosong "
+        f"(bagian terbesar {gb(max_part)} + indeks ~{persen} dari total "
+        f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin) / "
+        f"About {gb(perlu)} free is needed "
+        f"(largest part {gb(max_part)} + index ~{persen} of total "
+        f"{gb(ukuran)} + {gb(MARGIN_DISK)} margin). "
+        f"Hanya {gb(bebas)} yang kosong / Only {gb(bebas)} is free. "
+        f"Tidak ada file yang disimpan / No file was saved. "
+        f"Ini bukan masalah VPN/internet — ruang disk penuh. / "
+        f"This is not a VPN or internet problem — the disk is full."
+    )
 
 
 def teks_dibersihkan(freed):
@@ -125,34 +159,90 @@ def teks_dibersihkan(freed):
             f"({freed / _GIB:.1f} GB freed); nothing else can be removed right now.")
 
 
-def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None):
+def cek_ruang(path, ukuran, sudah_tersimpan=False, freed=None, max_part=None):
     """None when the job volume can hold the run, otherwise a message for the user."""
     bebas = shutil.disk_usage(path).free
-    if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan):
-        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan)
+    if bebas < ruang_dibutuhkan(ukuran, sudah_tersimpan, max_part=max_part):
+        pesan = pesan_disk(ukuran, bebas, sudah_tersimpan, max_part=max_part)
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None):
+def cek_sebelum_proses(path, ukuran_sudah, ukuran_baru, freed=None, max_part=None):
     """Room check once staged bytes are already on this volume.
 
     ukuran_baru still has to be written (a small form upload). Staged bytes
     do not need to be reserved again: renaming them does not use more space.
+    With process-and-delete the peak extra is the index for the whole total
+    (conservative); max_part is accepted for message wording only.
     """
     total = max(0, ukuran_sudah) + max(0, ukuran_baru)
-    perlu = ruang_dibutuhkan(total, sudah_tersimpan=True) + max(0, ukuran_baru)
+    perlu = ruang_dibutuhkan(total, sudah_tersimpan=True, max_part=max_part) + max(0, ukuran_baru)
     bebas = shutil.disk_usage(path).free
     if bebas < perlu:
-        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0)
+        pesan = pesan_disk(total, bebas, sudah_tersimpan=ukuran_sudah > 0, max_part=max_part)
         return pesan + (teks_dibersihkan(freed) if freed is not None else "")
     return None
 
 
-def _storage_error():
-    return jsonify({"error": "The server does not have enough temporary storage for this upload. "
-                             "No file was saved. Please try again after the previous upload is "
-                             "finished or contact the administrator."}), 507
+def ringkas_preflight(ukuran, bebas, max_part=None, max_upload=None, freed=0, staged=0):
+    """JSON-ready preflight numbers and bilingual message."""
+    if max_part is None:
+        max_part = ukuran
+    max_upload = MAX_TOTAL if max_upload is None else max_upload
+    perlu = ruang_dibutuhkan(ukuran, False, max_part=max_part)
+    # Count bytes already staged for this check so a leftover upload does not
+    # look like free space the new run can spend twice.
+    efektif = max(0, bebas + max(0, int(freed)) - max(0, int(staged)))
+    ok = ukuran <= max_upload and perlu <= efektif
+    def gb(n):
+        return round(n / _GIB, 2)
+    msg_id = (
+        f"{'Cukup' if ok else 'Tidak cukup'} ruang disk. "
+        f"Perlu {gb(perlu)} GB (bagian terbesar {gb(max_part)} + indeks "
+        f"{OVERHEAD_PER_BYTE*100:.2f}% dari total {gb(ukuran)} + margin "
+        f"{gb(MARGIN_DISK)}). Kosong {gb(efektif)} GB. Batas upload "
+        f"{gb(max_upload)} GB."
+    )
+    msg_en = (
+        f"{'Enough' if ok else 'Not enough'} free disk. "
+        f"Need {gb(perlu)} GB (largest part {gb(max_part)} + index "
+        f"{OVERHEAD_PER_BYTE*100:.2f}% of total {gb(ukuran)} + margin "
+        f"{gb(MARGIN_DISK)}). Free {gb(efektif)} GB. Upload limit "
+        f"{gb(max_upload)} GB."
+    )
+    return {
+        "ok": ok,
+        "need": perlu,
+        "free": efektif,
+        "free_raw": bebas,
+        "max_upload": max_upload,
+        "max_part": max_part,
+        "total": ukuran,
+        "freed": max(0, int(freed)),
+        "staged": max(0, int(staged)),
+        "message": msg_id + " / " + msg_en,
+        "message_id": msg_id,
+        "message_en": msg_en,
+    }
+
+
+def _storage_error(freed=None):
+    pesan = (
+        "Ruang penyimpanan sementara tidak cukup di server. "
+        "Not enough temporary storage on the server for this upload. "
+        "Tidak ada file yang disimpan / No file was saved. "
+        "Ini bukan masalah VPN/internet — ruang disk penuh. "
+        "This is not a VPN or internet problem — the disk is full. "
+        "Coba lagi setelah upload lain selesai, atau hubungi admin. "
+        "Try again after the previous upload finishes, or contact the administrator."
+    )
+    if freed is not None:
+        pesan += teks_dibersihkan(freed)
+    body = {"error": pesan, "disk": True}
+    if freed is not None:
+        body["freed"] = freed
+    return jsonify(body), 507
 
 
 def _stage_root(jobs_dir):
@@ -441,7 +531,48 @@ def register(app, jobs_dir):
         return jsonify({"id": upload_id, "bytes": manifest["bytes"],
                         "declared_bytes": manifest.get("declared_bytes"),
                         "files": [{"index": e["index"], "chunks": e["chunks"],
-                                   "bytes": e["bytes"]} for e in manifest["files"]]})
+                                   "bytes": e["bytes"],
+                                   "name": e.get("original"),
+                                   "hashes": e.get("hashes")} for e in manifest["files"]]})
+
+    @app.get("/upload/preflight")
+    def upload_preflight():
+        """Cheap disk check before any chunk is sent. CSRF-safe GET, auth required."""
+        try:
+            requested = int(request.args.get("bytes", "0"))
+        except ValueError:
+            return jsonify({"error": "Invalid upload size.", "ok": False}), 400
+        try:
+            max_part = request.args.get("max_part")
+            max_part = int(max_part) if max_part not in (None, "") else requested
+        except ValueError:
+            return jsonify({"error": "Invalid max_part.", "ok": False}), 400
+        if requested < 0 or max_part < 0:
+            return jsonify({"error": "Invalid upload size.", "ok": False}), 400
+        if requested > MAX_TOTAL:
+            info = ringkas_preflight(requested, 0, max_part=max_part)
+            info["ok"] = False
+            info["error"] = f"The selected files exceed the {teks_batas()} limit."
+            info["message"] = info["error"]
+            return jsonify(info), 413
+        user = _username()
+        # Count this user's currently staged bytes so a leftover upload is not
+        # treated as free space a second time. Preflight does not delete them.
+        staged = 0
+        root = _stage_root(jobs_dir)
+        if root.is_dir() and user:
+            for stage in root.iterdir():
+                if not stage.is_dir():
+                    continue
+                m = _read_manifest(stage) or {}
+                if m.get("user") == user:
+                    try:
+                        staged += sum(f.stat().st_size for f in stage.rglob("*") if f.is_file())
+                    except OSError:
+                        pass
+        bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
+        info = ringkas_preflight(requested, bebas, max_part=max_part, staged=staged)
+        return jsonify(info), (200 if info["ok"] else 507)
 
     @app.post("/upload/begin")
     def upload_begin():
@@ -449,6 +580,13 @@ def register(app, jobs_dir):
             requested = int(request.form.get("bytes", "0"))
         except ValueError:
             return jsonify({"error": "Invalid upload size."}), 400
+        try:
+            raw_max = request.form.get("max_part")
+            max_part = int(raw_max) if raw_max not in (None, "") else requested
+        except ValueError:
+            return jsonify({"error": "Invalid max_part."}), 400
+        if max_part < 0:
+            max_part = requested
         if requested < 0 or requested > MAX_TOTAL:
             return jsonify({"error": f"The selected files exceed the {teks_batas()} limit."}), 413
         ticket = (request.form.get("ticket") or "").strip()
@@ -472,9 +610,13 @@ def register(app, jobs_dir):
             if diganti or tiket_lama:
                 g.upload_note = (f"superseded own uploads {len(diganti)}, "
                                  f"own queue tickets {len(tiket_lama)}")
+            # sweep() is the idle staging cleaner that used to sit unused; clean()
+            # already removes idle staging by heartbeat, and sweep covers the same
+            # directories by last-chunk age so both stay consistent.
+            sweep(jobs_dir)
             freed = cleanup.clean(jobs_dir) + bebas_lama
             salah = cek_ruang(_stage_root(jobs_dir), requested, sudah_tersimpan=False,
-                              freed=freed)
+                              freed=freed, max_part=max_part)
             berat = requested >= cleanup.HEAVY_BYTES
             blockers = cleanup.heavy_blockers(jobs_dir) if berat else []
             if salah and not blockers:
@@ -493,7 +635,9 @@ def register(app, jobs_dir):
                 }), 202
             cleanup.queue_leave(jobs_dir, ticket)
             if salah:
-                return jsonify({"error": salah}), 507
+                bebas = shutil.disk_usage(_stage_root(jobs_dir)).free
+                info = ringkas_preflight(requested, bebas, max_part=max_part, freed=freed)
+                return jsonify({"error": salah, "freed": freed, **info}), 507
             upload_id = uuid.uuid4().hex
             stage = _stage_root(jobs_dir) / upload_id
             try:
@@ -501,6 +645,7 @@ def register(app, jobs_dir):
                 stage.mkdir()
                 _write_manifest(stage, {"files": [], "bytes": 0, "user": user,
                                         "declared_bytes": requested,
+                                        "max_part": max_part,
                                         "started": sekarang,
                                         "last_chunk": sekarang})
             except OSError:

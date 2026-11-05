@@ -40,6 +40,13 @@ assert chunked.ruang_dibutuhkan(int(10.5 * 10**9), False) <= 13 * 10**9
 assert chunked.ruang_dibutuhkan(int(10.5 * 10**9), False) < int(10.5 * 10**9 * 2)
 assert chunked.ruang_dibutuhkan(12 * _GIB, False) > 13 * _GIB
 assert chunked.OVERHEAD_PER_BYTE < 1
+# Peak model: max(part) + index(total) + margin. Four equal parts beat one file.
+_S = 11 * _GIB
+_part = _S // 4
+assert chunked.ruang_dibutuhkan(_S, False, max_part=_part) == (
+    _part + int(_S * chunked.OVERHEAD_PER_BYTE) + chunked.MARGIN_DISK)
+assert chunked.ruang_dibutuhkan(_S, False, max_part=_part) < chunked.ruang_dibutuhkan(_S, False)
+assert chunked.ruang_dibutuhkan(_S, False) == _S + int(_S * chunked.OVERHEAD_PER_BYTE) + chunked.MARGIN_DISK
 
 app.config["TESTING"] = True
 c = app.test_client()
@@ -77,7 +84,10 @@ try:
     before = {p.name for p in (JOBS / "staging").iterdir()}
     r = c.post("/upload/begin", data={"bytes": str(100 * 1024 * 1024)})
     assert r.status_code == 507, (r.status_code, r.data)
-    assert b"temporary storage" in r.data and b"try again" in r.data
+    low = r.data.lower()
+    assert b"temporary storage" in low or b"penyimpanan sementara" in low
+    assert b"try again" in low or b"coba lagi" in low
+    assert b"vpn" not in low or b"bukan masalah vpn" in low
     assert {p.name for p in (JOBS / "staging").iterdir()} == before
 finally:
     chunked._write_manifest = original_write_manifest

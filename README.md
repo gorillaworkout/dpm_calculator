@@ -72,6 +72,17 @@ The server has no `.git`, so the version cannot come from git.
 Do not put a commit SHA in it. Copy `VERSION` with the other files on every
 deploy and restart the app. A missing file shows `version unknown`.
 
+### Upload disk preflight (v1.40)
+
+Before chunks start, the browser calls `GET /upload/preflight?bytes=&max_part=`
+(auth required). The response is bilingual (ID + EN) with `need` / `free` /
+largest part, using peak disk = `max(part) + ~20.54% of total + 256 MiB`.
+Deal Segregator can take several monthly export parts in one run; each part is
+parsed then deleted on the server so peak stays near the largest part, and the
+zip matches concatenating the parts first. HTTP 507 (disk full) is never
+retried and never shown as a VPN/internet problem. Stale staging is swept on
+`/upload/begin`.
+
 ### Upload log (`/upload/*`)
 
 Every `/upload/*` request writes one line to stderr (the pm2 error log), for

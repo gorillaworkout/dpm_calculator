@@ -987,8 +987,17 @@ def run(slug, company="dpm"):
                               keep_uploads={upload_id} if upload_id else ())
         # Before any rename. A failed check must not delete the staged upload:
         # that file is the only server copy, and copying it is not allowed.
+        max_part = None
+        if upload_id:
+            stage = chunked._stage_dir(JOBS, upload_id)
+            man = chunked._read_manifest(stage) if stage else None
+            if man and man.get("max_part") is not None:
+                try:
+                    max_part = int(man["max_part"])
+                except (TypeError, ValueError):
+                    max_part = None
         salah_ruang = chunked.cek_sebelum_proses(JOBS, ukuran_staged, ukuran_baru,
-                                                 freed=freed)
+                                                 freed=freed, max_part=max_part)
         if salah_ruang:
             return _gagal(salah_ruang)
         job = JOBS / job_id

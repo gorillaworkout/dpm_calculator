@@ -31,6 +31,8 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    <p class="hint upload-split-hint" id="upload-split-hint">File besar boleh dipecah per bulan (export MT5/MT4 per bulan), lalu pilih semua bagian sekaligus — hasilnya sama seperti satu file digabung. / Large exports can be split by month; select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total.</p>
+    <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="mt4-accounts">MT4 account types <span class="opt">— required when any MT4 file is uploaded</span></label>
     <div id="accounts-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop the account-type file here</strong><br><span>Required with MT4. Columns account, GROUP (optional), account_type. CentAccount or a cent GROUP (e.g. Plus-10-cents) is USC (÷100); everything else and unknown logins are USD.</span>
@@ -50,6 +52,8 @@
       <input id="deals-file" type="file" name="file" accept=".csv,.xlsx,.xlsm" multiple required>
       <ul class="drop-files" aria-live="polite"></ul>
     </div>
+    <p class="hint upload-split-hint" id="upload-split-hint">File besar boleh dipecah per bulan (export MT5 per bulan), lalu pilih semua bagian sekaligus — hasilnya sama seperti satu file digabung. / Large exports can be split by month; select every part together — the result matches one concatenated file. Peak disk ≈ largest part + deal index of the total.</p>
+    <p class="hint" id="disk-preflight-status" hidden aria-live="polite"></p>
     <label for="equity-file">Client Equity FX <span class="opt">— optional, one workbook</span></label>
     <div id="equity-drop" class="dropzone" tabindex="0" role="button">
       <strong>Drop Client Equity FX here</strong><br><span>or click to choose one workbook</span>
@@ -594,7 +598,14 @@
                     return fail(x);
                   });
                 }
-                if (r.status >= 500 || r.status === 429 || r.status === 408 || e.retry) {
+                // 507 = disk full: never retry and never treat as a flaky link.
+                if (r.status === 507) {
+                  var disk = new Error(e.error || 'Not enough free disk space on the server.');
+                  disk.name = 'HTTP 507'; disk.noRetry = true; disk.diskFull = true;
+                  disk.freed = e.freed; disk.need = e.need; disk.free = e.free;
+                  return fail(disk);
+                }
+                if ((r.status >= 500 && r.status !== 507) || r.status === 429 || r.status === 408 || e.retry) {
                   var h = new Error(e.error || ('HTTP ' + r.status)); h.name = 'HTTP ' + r.status;
                   return retry(h);
                 }
@@ -653,6 +664,14 @@
         ? 'Upload stopped at file ' + context.fileIndex + ' of ' + context.fileCount +
           ' (' + context.file + '), chunk ' + context.chunk + ' of ' + context.chunks + '. '
         : 'Upload could not start; 0 MB reached the server. ';
+      var diskish = (err && (err.diskFull || err.name === 'HTTP 507')) ||
+        (err && err.message && /free disk|ruang disk|temporary storage|Not enough free disk/i.test(err.message));
+      if (diskish) {
+        return where + (err && err.message ? err.message + ' ' : '') +
+          'Your selected files are still in the list. Free up space on the server ' +
+          '(or split the export into smaller monthly parts) and press Run again. ' +
+          'Ini bukan masalah VPN/internet. / This is not a VPN or internet problem.' + details;
+      }
       var reason = err && err.message && err.message !== 'Failed to fetch' && !/NetworkError|Load failed|network/i.test(err.message) && err.name !== 'TimeoutError'
         ? err.message + ' '
         : 'The browser lost its connection before the server acknowledged this chunk' +
@@ -758,11 +777,12 @@
       queue.button.hidden = !show;
       queue.button.style.display = show ? '' : 'none';
     }
-    function beginUpload(attempt, total, waitStarted) {
+    function beginUpload(attempt, total, waitStarted, maxPart) {
       if (queue.cancelled) {
         var c = new Error('cancelled'); c.cancelled = true; return Promise.reject(c);
       }
-      var fd = new FormData(); fd.append('bytes', total);
+      if (maxPart == null) maxPart = total;
+      var fd = new FormData(); fd.append('bytes', total); fd.append('max_part', maxPart);
       if (queue.ticket) fd.append('ticket', queue.ticket);
       return fetch('/upload/begin', { method: 'POST', body: fd, redirect: 'manual',
                                       credentials: 'same-origin' }).then(function (r) {
@@ -785,27 +805,75 @@
             return new Promise(function (resolve) {
               queue.wake = resolve;
               queue.timer = setTimeout(resolve, 5000);
-            }).then(function () { return beginUpload(1, total, since); });
+            }).then(function () { return beginUpload(1, total, since, maxPart); });
           });
         }
         cancelButton(false);
         if (r.ok) return r.json();
+        // 507 disk: never retry as if the network flaked.
+        if (r.status === 507) {
+          return r.json().catch(function () { return {}; }).then(function (e) {
+            var disk = new Error(e.error || e.message || 'Not enough free disk space on the server.');
+            disk.name = 'HTTP 507'; disk.noRetry = true; disk.diskFull = true;
+            disk.freed = e.freed; disk.need = e.need; disk.free = e.free;
+            throw disk;
+          });
+        }
         if ((r.status >= 500 || r.status === 429) && attempt < 3) {
           return new Promise(function (resolve) {
             setTimeout(resolve, 1000 * Math.pow(2, attempt));
-          }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
+          }).then(function () { return beginUpload(attempt + 1, total, waitStarted, maxPart); });
         }
         return r.json().catch(function () { return {}; }).then(function (e) {
           throw new Error(e.error || ('Could not start the upload (HTTP ' + r.status + ').'));
         });
       }, function (err) {
         if (err && err.sessionExpired) throw err;
+        if (err && err.diskFull) throw err;
         if (attempt >= 3) { err.diag = {attempts: attempt}; throw err; }
         return new Promise(function (resolve) {
           setTimeout(resolve, 1000 * Math.pow(2, attempt));
-        }).then(function () { return beginUpload(attempt + 1, total, waitStarted); });
+        }).then(function () { return beginUpload(attempt + 1, total, waitStarted, maxPart); });
       });
     }
+
+    function diskPreflight(total, maxPart) {
+      var q = '/upload/preflight?bytes=' + encodeURIComponent(total) +
+              '&max_part=' + encodeURIComponent(maxPart == null ? total : maxPart);
+      return fetch(q, {method: 'GET', redirect: 'manual', credentials: 'same-origin'})
+        .then(function (r) {
+          var login = loginResponse(r, location.origin);
+          if (login) throw sessionError(login);
+          return r.json().then(function (j) {
+            j.http = r.status;
+            return j;
+          }, function () { return {ok: false, message: 'Preflight failed (HTTP ' + r.status + ').', http: r.status}; });
+        });
+    }
+
+    var diskStatus = document.getElementById('disk-preflight-status');
+    var diskTimer = null;
+    function refreshDiskStatus() {
+      if (!diskStatus) return;
+      var files = inputs.reduce(function (all, input) {
+        return all.concat(Array.prototype.slice.call(input.files || []));
+      }, []);
+      if (!files.length) { diskStatus.hidden = true; diskStatus.textContent = ''; return; }
+      var total = files.reduce(function (s, f) { return s + f.size; }, 0);
+      var maxPart = files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0);
+      if (diskTimer) clearTimeout(diskTimer);
+      diskTimer = setTimeout(function () {
+        diskPreflight(total, maxPart).then(function (pf) {
+          if (!pf) return;
+          diskStatus.hidden = false;
+          diskStatus.textContent = pf.message || '';
+          diskStatus.style.color = pf.ok ? '' : '#b00020';
+        }, function () { /* ignore transient preflight errors on select */ });
+      }, 200);
+    }
+    inputs.forEach(function (input) {
+      input.addEventListener('change', refreshDiskStatus);
+    });
 
     // A "Re-select this file" button under the error: picks one file again into its own
     // drop zone; every other file stays selected. Then Run starts a fresh upload.
@@ -864,6 +932,7 @@
         size(total) + ' total', 0, 'uploading');
       // Every file is read again (first and last 64 KB) before anything is sent, so a
       // stale or locked file is reported at once, by name, with nothing uploaded.
+      var maxPart = files.reduce(function (m, f) { return f.size > m ? f.size : m; }, 0);
       preflight(files, function (f) { return checks[fileKey(f)]; },
                 function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); })
         .then(function (bad) {
@@ -871,8 +940,22 @@
             var pe = new Error(preflightText(bad)); pe.preflight = bad; pe.noRetry = true;
             throw pe;
           }
-          updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
-          return beginUpload(1, total);
+          updateProgress('Checking disk space…',
+            files.length + ' file(s), ' + size(total) + ' total · largest ' + size(maxPart), 0, 'uploading');
+          return diskPreflight(total, maxPart).then(function (pf) {
+            if (pf && pf.message) {
+              updateProgress(pf.ok ? 'Disk OK — starting upload…' : 'Not enough disk',
+                pf.message, 0, pf.ok ? 'uploading' : 'failed');
+            }
+            if (pf && pf.ok === false) {
+              var de = new Error(pf.message || pf.error || 'Not enough free disk space on the server.');
+              de.name = 'HTTP 507'; de.noRetry = true; de.diskFull = true;
+              de.need = pf.need; de.free = pf.free; de.freed = pf.freed;
+              throw de;
+            }
+            updateProgress('Starting upload…', files.length + ' file(s), ' + size(total) + ' total · ' + elapsed(started), 0, 'uploading');
+            return beginUpload(1, total, null, maxPart);
+          });
         })
         .then(function (start) {
           var id = activeId = pageUpload = start.id;

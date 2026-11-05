@@ -1886,12 +1886,40 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
                      if mt4_paths else None)
         try:
             per_file = []
-            for path, info in klasifikasi:
-                if info:
-                    rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, akun)
-                    per_file.append(rec)
-                else:
-                    per_file.append(_normalisasi_satu_file(path, deals, pakai_baris))
+            dihapus_awal = []
+            for urutan, (path, info) in enumerate(klasifikasi, start=1):
+                try:
+                    if info:
+                        rec = _normalisasi_mt4(path, info, deals_mt4, pakai_baris, akun)
+                    else:
+                        rec = _normalisasi_satu_file(path, deals, pakai_baris)
+                except KeyboardInterrupt:
+                    raise
+                except SystemExit as exc:
+                    # baca_file / MT4 readers exit with STOP; prefix the part number
+                    # so a later failure in a multi-part run is clear.
+                    pesan = str(exc)
+                    if pesan.startswith("STOP:") and f"part {urutan} of" not in pesan:
+                        sys.exit(
+                            f"STOP: failed while reading part {urutan} of {len(klasifikasi)} "
+                            f"({path.name}):\n{pesan}"
+                        )
+                    raise
+                except Exception as exc:
+                    # Name the part so a later failure in a multi-part run is clear.
+                    sys.exit(
+                        f"STOP: failed while reading part {urutan} of {len(klasifikasi)} "
+                        f"({path.name}): {exc}"
+                    )
+                per_file.append(rec)
+                # Process-and-delete: free this part before the next is parsed so
+                # peak disk is max(part) + growing index, not sum(parts) + index.
+                if hapus_sumber:
+                    try:
+                        path.unlink()
+                        dihapus_awal.append(path.name)
+                    except OSError:
+                        pass
         finally:
             deals.close()
             if deals_mt4 is not None:
@@ -2104,8 +2132,12 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
             yellow_labels.add(label_beda)
 
     if hapus_sumber:
+        # Keep the Verifikasi wording consistent whether parts were removed
+        # mid-parse or only after the zip was written.
         ringkasan["Uploaded files on the server"] = (
-            "Deleted from the server once this result is ready. "
+            "Deleted from the server during / after this run "
+            "(each deals part is removed right after it is parsed; "
+            "remaining inputs are removed once this result is ready). "
             "The files on your computer are not changed."
         )
 

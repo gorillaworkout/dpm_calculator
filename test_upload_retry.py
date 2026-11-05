@@ -289,6 +289,29 @@ test('read-error message is Indonesian and English and says to re-select only th
   assert.ok(unreadableShort({name: 'NotReadableError'}).indexOf('Re-select this file') >= 0);
 });
 
+test('HTTP 507 disk full: no retry, diskFull flag', function () {
+  var e = env([resp(507, {error: 'Not enough temporary storage.', disk: true})]);
+  return makeChunkSender(e)(REQ).then(function () { assert.fail(); }, function (err) {
+    assert.ok(err.diskFull && err.noRetry, err);
+    assert.strictEqual(err.name, 'HTTP 507');
+    assert.strictEqual(e.calls.length, 1, 'must not retry a disk-full response');
+    assert.strictEqual(e.delays.length, 0);
+  });
+});
+
+test('uploadError: disk/507 never mentions VPN; network errors still do', function () {
+  // uploadError is outside the chunk-retry core markers; skip if missing.
+  if (typeof uploadError !== 'function') { return; }
+  var disk = new Error('Ruang penuh / Not enough storage');
+  disk.diskFull = true; disk.name = 'HTTP 507';
+  var t = uploadError(disk, {file: 'a.csv', chunk: 0, of: 1, percent: 10});
+  assert.ok(t.indexOf('VPN') < 0 && t.toLowerCase().indexOf('warp') < 0, t);
+  assert.ok(t.indexOf('bukan masalah VPN') >= 0 || t.indexOf('not a VPN') >= 0, t);
+  var net = new TypeError('Failed to fetch');
+  var n = uploadError(net, {file: 'a.csv', chunk: 0, of: 1, percent: 10});
+  assert.ok(n.indexOf('VPN') >= 0, n);
+});
+
 (function run(i) {
   if (i >= tests.length) { console.log('node retry OK ' + tests.length); return; }
   Promise.resolve().then(tests[i][1]).then(function () { run(i + 1); }, function (err) {
