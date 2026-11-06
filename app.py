@@ -733,9 +733,10 @@ KVB_SEGREGATE_DOC = {
         "When an MT4 file is uploaded, its out rows join the same <code>Daily</code> and <code>Monthly Summary</code> sheets as MT5, "
         "with a Platform column (<code>MT5</code> / <code>MT4</code>). Rows are grouped by Platform and Login, "
         "so the same login number on both platforms stays two rows. An MT5-only upload does not add that column.",
-        "MT4 USC profit, commission, swap and fee are divided by 100. Volume is not. "
-        "That conversion does not use the Client Equity FX rate. MT5 USC still does: "
-        "missing MT5 rates stay blank and are highlighted yellow.",
+        "USC (cent) amounts convert to *(USD) by dividing by 100 on both MT4 and MT5. "
+        "Volume is not divided. That conversion does not use the Client Equity FX rate "
+        "(an FX rate of 1 for USC must not leave Profit (USD) equal to Profit). "
+        "Other currencies still use Client Equity FX; missing rates stay blank and yellow.",
     ],
     "hasil": "One <code>.zip</code> containing two workbooks:",
     "sheets": [
@@ -749,7 +750,7 @@ KVB_SEGREGATE_DOC = {
     ],
     "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals. "
                 "It counts MT4 rows matched in the account-type file, lists logins missing from it "
-                "(treated as USD), flags any currency-column disagreement, and notes MT4 USC ÷100. "
+                "(treated as USD), flags any currency-column disagreement, and notes USC ÷100. "
                 "Agent is listed there as information and is not part of Profit, Commission or Fee.",
                 "After a successful run the uploaded file is deleted from the server. "
                 "The file on your computer is not changed. Verifikasi records this.",

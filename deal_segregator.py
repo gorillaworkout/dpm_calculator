@@ -1081,9 +1081,10 @@ _KOLOM_GROUP = ("group", "mt4 group", "mt4_group")
 # Plus-10-centsFM, real\Pro-06-cents. "cent"/"cents"/"USC" must start a word, so
 # names like "Percent" do not count; text after it (FM, -SL5) is allowed.
 _GROUP_CENT = re.compile(r"(?<![a-z])(?:cents?|usc)", re.I)
-ATURAN_CENT = ("USC (÷100) when account_type is CentAccount OR the GROUP name contains "
-               "'cent'/'cents'/'USC' as a word (e.g. real\\Plus-10-cents, Plus-10-centsFM). "
-               "Every other login, and a login missing from the file, is USD.")
+ATURAN_CENT = ("USC (÷100) when account_type is CentAccount OR account_type / GROUP "
+               "contains 'cent'/'cents'/'USC' as a word (e.g. real\\Plus-10-cents, "
+               "Plus-10-cents, Plus-10-centsFM). Every other login, and a login missing "
+               "from the file, is USD.")
 
 
 def _header_peta_dari_sel(cells):
@@ -1136,8 +1137,15 @@ def _adalah_peta_akun(path: Path) -> bool:
 
 
 def _adalah_cent(tipe) -> bool:
-    """CentAccount, centaccount, 'Cent Account', cent_account -> True."""
-    return re.sub(r"[\s_\-]+", "", _teks(tipe)).lower() == "centaccount"
+    """CentAccount (any spacing) OR a cent-style label like Plus-10-cents -> True.
+
+    Newer MT4_Cent_Account exports sometimes put the group name in account_type
+    (or omit GROUP). Treat those the same as a cent GROUP so USC ÷100 still runs.
+    """
+    teks = _teks(tipe)
+    if re.sub(r"[\s_\-]+", "", teks).lower() == "centaccount":
+        return True
+    return _group_cent(teks)
 
 
 def baca_peta_akun(path: Path) -> dict:
@@ -1905,22 +1913,31 @@ class IngestSession:
         for kol in KOLOM_JUMLAH:
             jumlah_t[e][kol] += b[kol]
         if b.get("_mt4_usc"):
+            # MT4 cent: money columns already ÷100 at ingest; USD cols copy them.
+            # Client Equity FX is never applied to MT4 USC.
             if pakai_fx:
                 b["_kurs_kurang"] = False
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
                     b[target] = b[source]
         elif pakai_fx:
-            key = (b["Date"], _norm(b["Currency"]))
-            pembagi = pembagi_usd(self.fx, b["Date"], b["Currency"])
-            if pembagi is None:
-                b["_kurs_kurang"] = True
-                self.kurs_kurang[key] += 1
-                for name in KOLOM_USD:
-                    b[name] = None
-            else:
+            # USC (MT5 layout or any non-MT4-cent path): flat ÷100 into *(USD).
+            # An FX rate of 1 for USC used to leave Profit (USD) == Profit.
+            if _norm(b["Currency"]) == "USC":
                 b["_kurs_kurang"] = False
                 for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
-                    b[target] = b[source] / pembagi
+                    b[target] = b[source] / 100.0
+            else:
+                key = (b["Date"], _norm(b["Currency"]))
+                pembagi = pembagi_usd(self.fx, b["Date"], b["Currency"])
+                if pembagi is None:
+                    b["_kurs_kurang"] = True
+                    self.kurs_kurang[key] += 1
+                    for name in KOLOM_USD:
+                        b[name] = None
+                else:
+                    b["_kurs_kurang"] = False
+                    for source, target in zip(("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                        b[target] = b[source] / pembagi
         _tambah_agregat(self.harian[e], b, "hari", pakai_fx)
         _tambah_agregat(self.bulanan[e], b, "bulan", pakai_fx)
 
@@ -2080,17 +2097,30 @@ class IngestSession:
                 cur = d["Currency"]
                 # Re-apply per "virtual row" using deal count — approximate; better
                 # path is client uploads FX first. Use average: convert totals.
-                pembagi = pembagi_usd(self.fx, tgl, cur)
-                if pembagi is None:
-                    d["_kurs_kurang"] = d["Deals"]
-                    self.kurs_kurang[(tgl, _norm(cur))] += d["Deals"]
-                    for name in KOLOM_USD:
-                        d[name] = None
-                else:
+                # USC is always a flat ÷100 (cent), never the Client Equity FX rate.
+                # MT4 cent rows already divided money columns at ingest: just copy.
+                if _norm(cur) == "USC":
                     d["_ada_usd_valid"] = True
-                    for source, target in zip(
-                            ("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
-                        d[target] = d[source] / pembagi
+                    if d.get("Platform") == "MT4":
+                        for source, target in zip(
+                                ("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                            d[target] = d[source]
+                    else:
+                        for source, target in zip(
+                                ("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                            d[target] = d[source] / 100.0
+                else:
+                    pembagi = pembagi_usd(self.fx, tgl, cur)
+                    if pembagi is None:
+                        d["_kurs_kurang"] = d["Deals"]
+                        self.kurs_kurang[(tgl, _norm(cur))] += d["Deals"]
+                        for name in KOLOM_USD:
+                            d[name] = None
+                    else:
+                        d["_ada_usd_valid"] = True
+                        for source, target in zip(
+                                ("Commission", "Fee", "Swap", "Profit"), KOLOM_USD):
+                            d[target] = d[source] / pembagi
         # Rebuild monthly from daily (with USD).
         self.bulanan = {"out": {}, "in": {}}
         for e in ("out", "in"):
@@ -2379,9 +2409,10 @@ def _ringkasan_dari_session(sess, berkas_mt5, berkas_mt4, ada_mt5, ada_mt4,
                 set().union(*(r["source_logins"]["unknown"] for r in berkas_mt4))),
             "MT4 account type and currency column disagree (cross-check only)": _teks_beda_mt4(
                 [item for r in berkas_mt4 for item in r["disagree"]]),
-            "MT4 USC ÷100":
-                "Commission, Fee, Swap and Profit on USC rows are divided by 100 into USD. "
-                "Volume is not divided. Client Equity FX is not applied to MT4 USC.",
+            "USC ÷100":
+                "Commission, Fee, Swap and Profit (USD) on USC rows use a flat divide by 100. "
+                "Volume is not divided. Client Equity FX is not applied to USC "
+                "(including when the FX file lists USC with rate 1).",
             "MT4 Agent column (sum of kept rows; not included in Profit, Commission, or Fee)":
                 round(sum(r["agent"] for r in berkas_mt4), 2),
             "Combined Total Profit (MT5 + MT4 out rows)":
