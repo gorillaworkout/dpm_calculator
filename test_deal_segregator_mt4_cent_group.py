@@ -150,7 +150,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert summary["MT4 Total Profit (closed buy/sell)"] == 102.0, summary["MT4 Total Profit (closed buy/sell)"]
     line = summary["  - " + accounts.name + K_FILE]
     assert "columns account, GROUP, account_type" in line and "5 USC, 2 USD" in line, line
-    assert "account_type is CentAccount OR the GROUP" in summary[K_RULE]
+    assert "CentAccount" in summary[K_RULE] and "Plus-10-cents" in summary[K_RULE]
     counts = summary[K_COUNTS]
     assert "both CentAccount and cent group: 2" in counts
     assert "cent group only (type not CentAccount, USC by group): 2" in counts

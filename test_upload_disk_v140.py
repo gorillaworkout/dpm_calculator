@@ -261,8 +261,8 @@ assert "/upload/preflight" in html
 print("OK tool.html gating + UI hints")
 
 # VERSION
-assert "1.40" in Path("VERSION").read_text()
-print("OK VERSION 1.40")
+assert "1.42" in Path("VERSION").read_text()
+print("OK VERSION 1.42")
 
 # ---- max_part_fit + single-file split advice ----
 free_113 = int(11.3 * _GIB)

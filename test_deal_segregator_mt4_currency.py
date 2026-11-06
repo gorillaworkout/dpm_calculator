@@ -45,7 +45,7 @@ K_FB_ROWS = "MT4 logins not in the account-type file, treated as USD (rows)"
 K_FB_LOGINS = "MT4 logins not in the account-type file, treated as USD (logins)"
 K_FB_LIST = "MT4 logins not in the account-type file (sample)"
 K_DISAGREE = "MT4 account type and currency column disagree (cross-check only)"
-K_USC = "MT4 USC ÷100"
+K_USC = "USC ÷100"
 K_BAL = "MT4 balance/credit rows dropped (same rule as MT5 non-trade Entry)"
 K_CAN = "MT4 cancelled pending orders dropped"
 
@@ -159,8 +159,8 @@ with tempfile.TemporaryDirectory() as tmp:
     for login in ("10", "20", "30", "40"):
         assert login in str(v[K_FB_LIST])
     assert "20" in str(v[K_DISAGREE]) and "10" not in str(v[K_DISAGREE])
-    assert "divided by 100" in str(v[K_USC])
-    assert "Client Equity FX is not" in str(v[K_USC])
+    assert "divide by 100" in str(v[K_USC])
+    assert "Client Equity FX is not applied to USC" in str(v[K_USC])
 print("OK currency column is only a cross-check; unmapped logins are USD")
 
 # Mapping wins over the column. Classic stays USD even when the column says USC.
@@ -227,7 +227,9 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError("MT4 ran without the account-type file")
 print("OK MT4 without the account-type file is rejected")
 
-# MT5 USC still uses the FX rate. MT4 USC ignores that rate and divides by 100.
+# USC is always a flat ÷100 into *(USD), on MT5 and MT4. An FX rate for USC
+# (even 50) must not be used — that used to leave Profit (USD) == Profit when
+# the rate was 1.
 with tempfile.TemporaryDirectory() as tmp:
     tmp = Path(tmp)
     mt5, mt4, fx = tmp / "mt5.csv", tmp / "mt4.csv", tmp / "fx.xlsx"
@@ -258,11 +260,11 @@ with tempfile.TemporaryDirectory() as tmp:
         wb.close()
     by_platform = {r["Platform"]: r for r in rows}
     assert by_platform["MT5"]["Profit"] == 100
-    assert by_platform["MT5"]["Profit (USD)"] == 2
+    assert by_platform["MT5"]["Profit (USD)"] == 1  # 100 / 100, FX 50 ignored
     assert by_platform["MT4"]["Profit"] == 1
     assert by_platform["MT4"]["Profit (USD)"] == 1
     assert by_platform["MT4"]["Currency"] == "USC"
-print("OK MT5 USC still uses FX; MT4 USC is a flat divide by 100")
+print("OK USC is flat ÷100 on MT5 and MT4 (FX rate ignored for USC)")
 
 # A cp1252 comment must not stop the header-first reader. DPM still rejects the file.
 with tempfile.TemporaryDirectory() as tmp:
