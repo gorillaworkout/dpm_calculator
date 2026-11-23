@@ -990,6 +990,37 @@ online-only). The account-type file is now sent in the chunked upload too, so th
 "file N of M" counter includes it. Sizes under 1 MB show in KB (no more "0 MB" for a
 300 KB file).
 
+## DPM Invitation (v1.43)
+
+One public RSVP link per event (for example the DPM Gala Dinner). Menu: **DPM → Events → Invitation** (`/invitation`).
+
+- **Admins** create an event (name, link slug, invitation image, optional *Closes at* in WIB), edit it,
+  open/close registration and delete the event (type the slug to confirm; this deletes all responses and the image).
+- **DPM users** see the events and responses, search, filter, export **Excel (.xlsx)** / **CSV**, and delete single responses.
+- **Public page** `/i/<slug>`: no login, English only. Image left, form right (image on top on a phone).
+  Fields: Full name, Email (any domain), Will you attend? Only if Yes: food allergy Yes/No, and if Yes,
+  *What are you allergic to?* (required, max 200 characters). If No, nothing else is asked or stored.
+  The same email (trimmed, case-insensitive) submitting again updates the earlier answer (`edited ×N`).
+  After submit: a Thank you page. No e-mail is sent.
+- **Open** = switch is Open **and** the closing time (if any) has not passed. Checked on every request; no cron.
+- **Abuse protection:** 60 submissions per IP per 10 minutes, 5 per event + email per hour (counters in SQLite,
+  shared by all gunicorn workers; the email is stored only as a SHA-256 in the counter), a hidden honeypot
+  field, a per-link CSRF token, a 64 KB body limit, and a strict CSP. Client IP: `CF-Connecting-IP`, then
+  `X-Real-IP`, then the first `X-Forwarded-For` (same helper as Partner Approval).
+- **Images:** JPG/PNG/WebP up to 8 MB, 600–8000 px. The type is read from the bytes (Pillow), then the image
+  is rotated by EXIF, stripped of all metadata (GPS, camera), resized to at most 2400 px and saved as WebP.
+
+**Storage** (next to `users.db`, like Partner Approval, so a deploy that copies the code never touches it):
+
+| What | Default | Override |
+|---|---|---|
+| Events + responses + rate-limit counters | `invitation.db` | `DW_INVITATION_DB` |
+| Uploaded images (`<uuid>.webp`) | `invitation_files/` | `DW_INVITATION_DIR` |
+
+Both are created on first use (`CREATE TABLE IF NOT EXISTS`), are in `.gitignore`, and hold personal data
+(emails, allergies): back them up with `approval.db`, never commit them. The public link uses
+`DW_PUBLIC_BASE_URL` (default `https://dw-calculator.gorillaworkout.id`). No new pip package (Flask, openpyxl, Pillow).
+
 ## Partner Approval (Beta, v1.35)
 
 Test-only, DPM-only. Sales fill the "Sales PartnerRequest" form at `/approval`

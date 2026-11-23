@@ -37,3 +37,8 @@ users.db
 approval.db
 approval.db-*
 approval_files/
+
+# DPM Invitation data: employees' RSVPs (emails, allergies) and uploaded images
+invitation.db
+invitation.db-*
+invitation_files/

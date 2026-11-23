@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -261,8 +262,10 @@ assert "/upload/preflight" in html
 print("OK tool.html gating + UI hints")
 
 # VERSION
-assert "1.42" in Path("VERSION").read_text()
-print("OK VERSION 1.42")
+# v1.40 shipped this; later PRs keep bumping VERSION (1.43 = DPM Invitation).
+_ver = re.search(r"^version=1\.(\d+)$", Path("VERSION").read_text(), re.M)
+assert _ver and int(_ver.group(1)) >= 40, Path("VERSION").read_text()
+print("OK VERSION 1." + _ver.group(1))
 
 # ---- max_part_fit + single-file split advice ----
 free_113 = int(11.3 * _GIB)

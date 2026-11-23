@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% from "invitation/_status.html" import badge, copy_link, copy_script %}
+{% block title %}Invitation · Dupoin DPM Tools{% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+{% include "invitation/_admin_style.html" %}
+<header class="pa-top">
+  <div class="pa-titles">
+    <div class="pa-head"><h1>DPM <span>Invitation</span></h1></div>
+    <p class="pa-meta">One public RSVP link per event. Employees open it without signing in and answer: attend, and any food allergy.</p>
+  </div>
+</header>
+
+{% if is_admin %}
+<details class="pa-card" id="create" {{ 'open' if open_create or not events }}>
+  <summary>New invitation</summary>
+  <form class="inv-form" method="post" action="{{ url_for('invitation.create') }}" enctype="multipart/form-data" novalidate>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label class="lab" for="name">Event name</label>
+      <input type="text" id="name" name="name" maxlength="120" required value="{{ form.get('name', '') }}" placeholder="e.g. DPM Gala Dinner 2027">
+      {% if errors.name %}<p class="err">{{ errors.name }}</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="slug">Public link</label>
+      <div class="slugrow"><span>/i/</span><input type="text" id="slug" name="slug" maxlength="60" value="{{ form.get('slug', '') }}" placeholder="dpm-gala-dinner-2027" pattern="[a-z0-9-]{3,60}"></div>
+      {% if errors.slug %}<p class="err">{{ errors.slug }}</p>{% else %}<p class="hint">Lowercase letters, numbers and hyphens. Filled in from the name.</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="closes_at">Closes at (WIB, optional)</label>
+      <input type="datetime-local" id="closes_at" name="closes_at" value="{{ form.get('closes_at', '') }}">
+      {% if errors.closes_at %}<p class="err">{{ errors.closes_at }}</p>{% else %}<p class="hint">Registration closes automatically at this time (Asia/Jakarta). Leave empty to close by hand.</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="image">Invitation image</label>
+      <input type="file" id="image" name="image" accept="image/jpeg,image/png,image/webp" required>
+      {% if errors.image %}<p class="err">{{ errors.image }}</p>{% else %}<p class="hint">JPG, PNG or WebP, up to {{ max_mb }} MB, at least 600 px on the short side. Portrait works best.</p>{% endif %}
+      <img class="inv-preview" id="image-preview" alt="" hidden>
+    </div>
+    <div class="wide pa-submit" style="margin-top:4px"><button class="btn btn-primary" type="submit">Create invitation</button></div>
+  </form>
+</details>
+{% endif %}
+
+<section class="pa-card pa-table inv-table">
+{% if events %}
+<table class="pa">
+  <thead><tr><th></th><th>Event</th><th>Public link</th><th>Status</th><th>Responses</th><th></th></tr></thead>
+  <tbody>
+  {% for e in events %}
+  <tr>
+    <td><img class="inv-thumb" src="{{ url_for('invitation.admin_image', eid=e.id) }}" alt="" loading="lazy"></td>
+    <td class="evname"><a href="{{ url_for('invitation.detail', eid=e.id) }}">{{ e.name }}</a>
+      <span class="sub">{% if e.closes_label %}Closes {{ e.closes_label }}{% else %}No closing time{% endif %}</span></td>
+    <td style="min-width:240px;width:34%">{{ copy_link(e, 'link-' ~ e.id) }}</td>
+    <td>{{ badge(e) }}</td>
+    <td><b>{{ e.total }}</b><span class="sub nowrap">{{ e.attending }} attending · {{ e.allergies }} allergies</span>
+      <span class="sub">{% if e.last_response %}Last {{ format_wib(e.last_response) }}{% else %}No responses yet{% endif %}</span></td>
+    <td class="act"><a class="btn btn-secondary btn-sm" href="{{ url_for('invitation.detail', eid=e.id) }}">Responses</a></td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="empty">No invitations yet.{% if not is_admin %} An admin creates them.{% endif %}</p>{% endif %}
+</section>
+{{ copy_script() }}
+{% if is_admin %}
+<script>
+(function () {
+  var name = document.getElementById('name'), slug = document.getElementById('slug');
+  var touched = !!slug.value;
+  function suggest(s) {
+    return s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/đ/gi, 'd').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60).replace(/-+$/g, '');
+  }
+  slug.addEventListener('input', function () { touched = true; slug.value = slug.value.toLowerCase(); });
+  name.addEventListener('input', function () { if (!touched) slug.value = suggest(name.value); });
+  var file = document.getElementById('image'), prev = document.getElementById('image-preview');
+  file.addEventListener('change', function () {
+    var f = file.files[0];
+    if (!f) { prev.hidden = true; return; }
+    prev.src = URL.createObjectURL(f); prev.hidden = false;
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

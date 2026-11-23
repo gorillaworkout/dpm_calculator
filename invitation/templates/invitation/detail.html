@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% from "invitation/_status.html" import badge, copy_link, copy_script %}
+{% block title %}{{ ev.name }} · Invitation · Dupoin DPM Tools{% endblock %}
+{% block wide %} wide{% endblock %}
+{% block body %}
+{% include "invitation/_admin_style.html" %}
+<a class="pa-back" href="{{ url_for('invitation.index') }}">← All invitations</a>
+<header class="pa-top">
+  <div class="pa-titles inv-head">
+    <a href="{{ url_for('invitation.admin_image', eid=ev.id) }}" target="_blank" rel="noopener"><img src="{{ url_for('invitation.admin_image', eid=ev.id) }}" alt="Invitation image"></a>
+    <div style="min-width:0">
+      <div class="pa-head"><h1>{{ ev.name }}</h1>{{ badge(ev) }}</div>
+      <p class="pa-meta">{% if ev.closes_label %}Closes automatically at <b>{{ ev.closes_label }}</b>{% else %}No closing time: close it by hand{% endif %}
+        · Created by {{ ev.created_by }} {{ format_wib(ev.created_at) }}</p>
+      <div style="margin-top:12px;max-width:560px">{{ copy_link(ev, 'link-main') }}</div>
+      <div class="btns" style="justify-content:flex-start;margin-top:10px">
+        <a class="btn btn-secondary btn-sm" href="{{ ev.link }}" target="_blank" rel="noopener">Open page ↗</a>
+        {% if is_admin %}
+        <form method="post" action="{{ url_for('invitation.set_status', eid=ev.id) }}">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          {% if ev.status == 'open' %}
+          <input type="hidden" name="status" value="closed"><button class="btn btn-danger btn-sm" type="submit">Close registration</button>
+          {% else %}
+          <input type="hidden" name="status" value="open"><button class="btn btn-primary btn-sm" type="submit">Open registration</button>
+          {% endif %}
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</header>
+{% if ev.auto_closed %}
+<div class="pa-strip warn"><span class="ic">!</span><span class="t">Closed automatically at <b>{{ ev.closes_label }}</b>. Clear or move the closing time to reopen.</span></div>
+{% endif %}
+
+{% if is_admin %}
+<details class="pa-card" {{ 'open' if open_settings }}>
+  <summary>Settings</summary>
+  <form class="inv-form" method="post" action="{{ url_for('invitation.edit', eid=ev.id) }}" enctype="multipart/form-data" novalidate>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <div>
+      <label class="lab" for="name">Event name</label>
+      <input type="text" id="name" name="name" maxlength="120" value="{{ form.get('name', ev.name) }}">
+      {% if errors.name %}<p class="err">{{ errors.name }}</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="slug">Public link</label>
+      <div class="slugrow"><span>/i/</span><input type="text" id="slug" name="slug" maxlength="60" value="{{ form.get('slug', ev.slug) }}"></div>
+      {% if errors.slug %}<p class="err">{{ errors.slug }}</p>{% else %}<p class="hint">Changing it breaks the old link (no redirect).</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="closes_at">Closes at (WIB, optional)</label>
+      <input type="datetime-local" id="closes_at" name="closes_at" value="{{ form.get('closes_at', to_wib_input(ev.closes_at)) }}">
+      <label style="display:flex;gap:6px;align-items:center;margin:8px 0 0;font-size:13px;text-transform:none;letter-spacing:0"><input type="checkbox" name="clear_closes_at" value="1"> Clear the closing time</label>
+      {% if errors.closes_at %}<p class="err">{{ errors.closes_at }}</p>{% endif %}
+    </div>
+    <div>
+      <label class="lab" for="image">Replace image (optional)</label>
+      <input type="file" id="image" name="image" accept="image/jpeg,image/png,image/webp">
+      {% if errors.image %}<p class="err">{{ errors.image }}</p>{% else %}<p class="hint">JPG, PNG or WebP, up to {{ max_mb }} MB.</p>{% endif %}
+    </div>
+    <div class="wide pa-submit" style="margin-top:4px"><button class="btn btn-primary" type="submit">Save changes</button></div>
+  </form>
+</details>
+{% endif %}
+
+<dl class="inv-kpis">
+  <div><dt>Total</dt><dd>{{ counts.total }}</dd></div>
+  <div class="att"><dt>Attending</dt><dd>{{ counts.attending }}</dd></div>
+  <div class="no"><dt>Not attending</dt><dd>{{ counts.not_attending }}</dd></div>
+  <div class="alg"><dt>With allergies</dt><dd>{{ counts.allergies }}</dd></div>
+</dl>
+
+{% set chips = [('all', 'All', counts.total), ('attending', 'Attending', counts.attending), ('not-attending', 'Not attending', counts.not_attending), ('allergy', 'With allergies', counts.allergies)] %}
+<div class="pa-tabs">
+  {% for key, label, n in chips %}
+  <a href="{{ url_for('invitation.detail', eid=ev.id, filter=key if key != 'all' else None, q=q or None) }}" class="{{ 'on' if filt == key }}">{{ label }}<b>{{ n }}</b></a>
+  {% endfor %}
+</div>
+<form class="inv-search" method="get" action="{{ url_for('invitation.detail', eid=ev.id) }}">
+  {% if filt != 'all' %}<input type="hidden" name="filter" value="{{ filt }}">{% endif %}
+  <input type="search" name="q" value="{{ q }}" placeholder="Search name or email" aria-label="Search name or email">
+  <button class="btn btn-secondary" type="submit">Search</button>
+  {% if q %}<a class="btn btn-ghost" href="{{ url_for('invitation.detail', eid=ev.id, filter=filt if filt != 'all' else None) }}">Clear</a>{% endif %}
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="{{ url_for('invitation.export_responses', eid=ev.id, format='xlsx', q=q or None, filter=filt if filt != 'all' else None) }}">Export Excel</a>
+  <a class="btn btn-secondary" href="{{ url_for('invitation.export_responses', eid=ev.id, format='csv', q=q or None, filter=filt if filt != 'all' else None) }}">Export CSV</a>
+</form>
+
+<section class="pa-card pa-table inv-table inv-resp">
+{% if responses %}
+<table class="pa">
+  <thead><tr><th>Full name</th><th>Email</th><th>Attending</th><th>Allergy</th><th>Allergy notes</th><th>Last updated</th><th></th></tr></thead>
+  <tbody>
+  {% for r in responses %}
+  <tr>
+    <td>{{ r.full_name }}{% if r.submission_count > 1 %}<span class="edited" title="Submitted {{ r.submission_count }} times">edited ×{{ r.submission_count }}</span>{% endif %}</td>
+    <td>{{ r.email }}</td>
+    <td>{% if r.attending %}<span class="yes">Yes</span>{% else %}<span class="no">No</span>{% endif %}</td>
+    <td>{% if r.has_allergy is none %}<span class="no">–</span>{% elif r.has_allergy %}<span class="st st-auto" style="height:22px">Yes</span>{% else %}No{% endif %}</td>
+    <td style="max-width:280px;overflow-wrap:anywhere">{{ r.allergy_notes or '' }}</td>
+    <td class="nowrap">{{ format_wib(r.updated_at) }}</td>
+    <td class="act">
+      <form method="post" action="{{ url_for('invitation.delete_response', eid=ev.id, rid=r.id) }}" data-confirm="Delete the response from {{ r.full_name }} ({{ r.email }})?">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        {% if q %}<input type="hidden" name="q" value="{{ q }}">{% endif %}
+        {% if filt != 'all' %}<input type="hidden" name="filter" value="{{ filt }}">{% endif %}
+        <button class="btn btn-ghost btn-sm" type="submit">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}<p class="empty">{% if q or filt != 'all' %}No responses match.{% else %}No responses yet. Share the public link above.{% endif %}</p>{% endif %}
+</section>
+
+{% if is_admin %}
+<details class="pa-card" style="border-color:#F7C1BB">
+  <summary style="color:var(--bad)">Delete this event</summary>
+  <form method="post" action="{{ url_for('invitation.delete_event', eid=ev.id) }}" data-confirm="Delete “{{ ev.name }}” and all {{ counts.total }} responses? This cannot be undone.">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+    <p class="mini" style="margin-top:0">Deletes the event, its image and all {{ counts.total }} responses. Type <b>{{ ev.slug }}</b> to confirm.</p>
+    <div class="btns" style="justify-content:flex-start">
+      <input type="text" name="confirm" autocomplete="off" aria-label="Type the link name to confirm" style="height:36px;padding:0 10px;border:1px solid #CFD9DC;border-radius:8px;font:inherit;width:260px">
+      <button class="btn btn-danger solid" type="submit">Delete event</button>
+    </div>
+  </form>
+</details>
+{% endif %}
+{{ copy_script() }}
+<script>
+document.addEventListener('submit', function (e) {
+  var msg = e.target.getAttribute('data-confirm');
+  if (msg && !window.confirm(msg)) e.preventDefault();
+});
+</script>
+{% endblock %}

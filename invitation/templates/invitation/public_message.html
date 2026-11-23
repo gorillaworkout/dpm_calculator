@@ -1,0 +1,30 @@
+{% extends "invitation/_public_base.html" %}
+{% block title %}{% if state == 'thanks' %}Thank you{% elif state == 'closed' %}Invitation closed{% else %}Invitation{% endif %}{% if ev %} · {{ ev.name }}{% endif %}{% endblock %}
+{% block page %}
+{% if ev %}{{ super() }}{% else %}
+<div class="invalid">
+  <img class="brand" src="{{ url_for('partner_sign.static', filename='dupoin-logo.png') }}" alt="Dupoin" width="212" height="88">
+  {% if state == 'too_large' %}
+  <h1>That was too much data</h1>
+  <p class="to">Please go back, check your answers and submit again.</p>
+  {% else %}
+  <h1>This invitation link is not valid</h1>
+  <p class="to">Please check the link you received, or ask the DPM event team for the correct one.</p>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
+{% block main %}
+{% if state == 'thanks' %}
+<div class="big-icon" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg></div>
+<p class="eyebrow">{{ ev.name }}</p>
+<h1>Thank you</h1>
+<p class="to">Your response has been recorded.{% if ev.is_open %} You can submit again with the same email to change it.{% endif %}</p>
+{% if ev.is_open %}<p class="fine"><a class="link" href="{{ url_for('invitation_public.form', slug=ev.slug) }}">Change my answer</a></p>{% endif %}
+{% else %}
+<div class="big-icon closed" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+<p class="eyebrow">{{ ev.name }}</p>
+<h1>This invitation is closed</h1>
+<p class="to">Registration for this event is no longer open. If you need help, please contact the DPM event team.</p>
+{% endif %}
+{% endblock %}

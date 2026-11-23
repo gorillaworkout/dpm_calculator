@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light">
+<link rel="icon" href="{{ url_for('partner_sign.static', filename='dupoin-logo.png') }}">
+<title>{% block title %}{{ ev.name if ev else 'Invitation' }} · Dupoin{% endblock %}</title>
+<style>
+/* Ported from the Annual Dinner /r/[token] registration page (tokens + register.css). */
+:root{--dp-blue:#2EB5C4;--dp-teal-dark:#1A8A96;--dp-black:#0A0A0A;--dp-ink:#1A1F24;--dp-muted:#5B6B73;
+  --n-200:#DDE3E6;--n-300:#C3CCD0;--danger:#B42318;--danger-bg:#FDECEA;--r-2:4px;--focus:0 0 0 3px rgba(46,181,196,.45)}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+body{background:#fff;color:var(--dp-ink);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Arial,sans-serif;-webkit-font-smoothing:antialiased;min-height:100vh}
+.shell{min-height:100vh;display:grid;grid-template-columns:1fr}
+.panel{background:var(--dp-black);display:flex;align-items:center;justify-content:center}
+.panel img{display:block;width:100%;height:auto}
+main{padding:28px 20px 40px}
+.brand{display:block;height:30px;width:auto;margin:0 0 22px}
+.eyebrow{margin:0;font-size:12px;letter-spacing:.16em;text-transform:uppercase;font-weight:700;color:var(--dp-muted)}
+h1{font-size:26px;line-height:1.15;margin:8px 0 0;font-weight:700;letter-spacing:-.01em}
+.to{font-size:15px;color:var(--dp-muted);margin:8px 0 0}
+.to b{color:var(--dp-ink)}
+form{margin-top:28px;display:grid;gap:22px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.label{font-size:14px;font-weight:700;color:var(--dp-ink)}
+.input{height:48px;width:100%;padding:0 14px;border:1px solid var(--n-300);border-radius:var(--r-2);background:#fff;font-family:inherit;font-size:16px;font-weight:400;color:var(--dp-ink)}
+.input::placeholder{color:#66737A}
+.input:focus{outline:none;border-color:var(--dp-blue);box-shadow:var(--focus)}
+.input.is-error{border-color:var(--danger)}
+.help{font-size:13px;color:var(--dp-muted)}
+.err{font-size:13px;color:var(--danger)}
+.notice{border:1px solid var(--n-200);border-left:3px solid var(--dp-blue);background:#fff;padding:14px 16px;font-size:14.5px;border-radius:var(--r-2)}
+.notice.danger{border-left-color:var(--danger);background:var(--danger-bg)}
+.choice-set{border:0;padding:0;margin:0;min-width:0}
+.choice-set legend.label{padding:0;float:none;margin-bottom:6px}
+.choice{display:grid;grid-template-columns:1fr 1fr;height:48px;border:1px solid var(--n-300);border-radius:var(--r-2);overflow:hidden;background:#fff}
+.choice.is-error{border-color:var(--danger)}
+.choice label{display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;cursor:pointer;border-left:1px solid var(--n-300);color:var(--dp-ink);position:relative}
+.choice label:first-child{border-left:0}
+.choice label:has(input:checked){background:var(--dp-ink);color:#fff}
+.choice input{position:absolute;opacity:0;width:1px;height:1px;pointer-events:none}
+.choice label:focus-within{box-shadow:var(--focus);z-index:1}
+.hp{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+.btn{display:inline-flex;align-items:center;justify-content:center;height:52px;width:100%;padding:0 24px;border-radius:var(--r-2);font-family:inherit;font-size:16px;font-weight:700;line-height:1;letter-spacing:.04em;border:1px solid transparent;cursor:pointer;background:var(--dp-blue);color:var(--dp-black);text-decoration:none}
+.btn:hover{background:var(--dp-teal-dark);color:#fff}
+.btn:focus-visible{outline:none;box-shadow:var(--focus)}
+.btn[disabled]{opacity:.55;cursor:not-allowed}
+.fine{font-size:13px;color:var(--dp-muted);margin:18px 0 0;line-height:1.5}
+.link{color:var(--dp-ink);text-decoration:underline;text-decoration-color:var(--dp-blue);text-decoration-thickness:2px;text-underline-offset:3px}
+.big-icon{display:grid;place-items:center;width:56px;height:56px;border-radius:50%;margin:0 0 18px;background:#E6F7F9;color:var(--dp-teal-dark)}
+.big-icon.closed{background:#F2F4F5;color:var(--dp-muted)}
+.invalid{max-width:560px;margin:0 auto;padding:80px 24px;text-align:left}
+@media (min-width:1024px){
+  .shell{grid-template-columns:minmax(440px,5fr) 7fr}
+  .panel{position:sticky;top:0;height:100vh}
+  .panel img{width:100%;height:100%;object-fit:contain}
+  main{padding:56px 72px;max-width:640px;align-self:center}
+  .brand{height:36px;margin-bottom:32px}
+  h1{font-size:40px}
+  form{margin-top:36px;gap:26px}
+  .btn{width:auto;min-width:220px}
+}
+</style>
+</head>
+<body>
+{% block page %}
+<div class="shell">
+  <aside class="panel">
+    <img src="{{ url_for('invitation_public.image', slug=ev.slug, v=ev.image_key.split('.')[0][:12]) }}"
+         alt="{{ ev.name }}" width="{{ ev.image_width }}" height="{{ ev.image_height }}">
+  </aside>
+  <main>
+    <img class="brand" src="{{ url_for('partner_sign.static', filename='dupoin-logo.png') }}" alt="Dupoin" width="212" height="88">
+    {% block main %}{% endblock %}
+  </main>
+</div>
+{% endblock %}
+</body>
+</html>

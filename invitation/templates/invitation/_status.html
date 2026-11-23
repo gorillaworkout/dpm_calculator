@@ -1,0 +1,24 @@
+{% macro badge(ev) -%}
+{% if ev.is_open %}<span class="st st-open">Open</span>
+{% elif ev.auto_closed %}<span class="st st-auto" title="Closed automatically at {{ ev.closes_label }}">Closed automatically</span>
+{% else %}<span class="st st-closed">Closed</span>{% endif %}
+{%- endmacro %}
+{% macro copy_link(ev, id) -%}
+<div class="linkrow">
+  <input type="text" readonly value="{{ ev.link }}" id="{{ id }}" aria-label="Public link" onclick="this.select()">
+  <button type="button" class="btn btn-secondary btn-sm" data-copy="{{ id }}">Copy link</button>
+</div>
+{%- endmacro %}
+{% macro copy_script() -%}
+<script>
+document.addEventListener('click', function (e) {
+  var b = e.target.closest('[data-copy]');
+  if (!b) return;
+  var input = document.getElementById(b.getAttribute('data-copy'));
+  function done() { var t = b.textContent; b.textContent = 'Copied ✓'; setTimeout(function () { b.textContent = t; }, 1600); }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(input.value).then(done, function () { input.select(); document.execCommand('copy'); done(); });
+  } else { input.select(); document.execCommand('copy'); done(); }
+});
+</script>
+{%- endmacro %}
