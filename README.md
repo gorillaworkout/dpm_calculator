@@ -375,7 +375,26 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
-#### Rebate Withdrawal — `Completed Date` diabaikan (v1.29)
+#### DPM v1.44 — Withdrawal + Rebate/Wallet Withdrawal pakai `Completed Date`; status finish/success/process
+Keputusan tim DPM (23 Nov 2026): *"both withdrawal & rebate withdrawal take the data based on
+completed Date (status: finish, success, process)"*. Di ekspor Oktober 2026 `Completed Time` baris
+Rebate hanya berisi jam (`" 00:33"`) dan `Settlement Date` = `Apply Date`, jadi aturan v1.29 di
+bawah menaruh rebate yang selesai lewat tengah malam sehari terlalu awal.
+
+- **DPM** (tanpa flag): `Rebate Withdrawal` **dan `Wallet Withdrawal`** (nama baru mulai file
+  November; huruf besar/kecil dan spasi diabaikan, keduanya diperlakukan sama di tanggal,
+  MTOATD Wallet出金, Date Check) memakai urutan `Withdrawal` biasa: `Completed Date` sah →
+  (kosong / teks) `Completed Time` bertanggal penuh → `Settlement Date`; `Completed Date` 1970
+  = belum dibayar, **tidak** diselamatkan `Settlement Date` (dilaporkan di Date Check / Missing Data).
+- **Pengaman v1.29**: kalau `Completed Time` bertanggal penuh dan beda > 3 hari dari
+  `Completed Date`, `Completed Date` dianggap isian palsu → `Completed Time`, dihitung di Date
+  Check (`Rebate/Wallet Withdrawal: implausible Completed Date replaced`).
+- **Status withdrawal** yang dihitung: `finish`, `success`, `process` (trim, tanpa beda huruf).
+  Deposit tetap `finish`/`success` (`hitung_dw.status_dipakai`).
+- **KVB** tidak berubah: `app.py` memasang `--legacy-withdrawal-rules` di `isi_template.py` dan
+  `hitung_dw.py` (aturan v1.29 di bawah + status finish/success).
+
+#### Rebate Withdrawal — `Completed Date` diabaikan (v1.29; sejak v1.44 hanya KVB)
 Untuk baris yang `Source Name`-nya **`Rebate Withdrawal`** atau **berakhir dengan** itu, mis.
 `08-2026 Rebate Withdrawal` (huruf besar/kecil dan spasi diabaikan), `Completed Date` **bukan** tanggal selesai yang asli: hanya 3.593 baris yang
 mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu–1 Sep 2026 pada baris yang diajukan
@@ -512,7 +531,7 @@ TD入金             = Σ USD          [Paid Date = t]
 ——crm已入,TD未入    = Σ USD          [Settlement = t, Paid > t]
 ——调上日差异 (入金)   = -Σ USD         [Paid = t, Settlement < t]
 MT4出金            = Σ USD          [Settlement = t, Source Name = 'Withdrawal']
-Wallet出金          = Σ USD          [Settlement = t, Source Name = 'Rebate Withdrawal']
+Wallet出金          = Σ USD          [Settlement = t, Source Name = 'Rebate Withdrawal' / 'Wallet Withdrawal']
 CRM出金            = MT4出金 + Wallet出金
 TD出金             = Σ USD          [Completed = t, Status ≠ refuse]
 ——crm已出,TD未出    = Σ USD          [Settlement = t, Completed > t, Status ≠ refuse]

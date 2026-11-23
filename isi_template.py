@@ -152,7 +152,11 @@ def laporkan_ringkasan(ring, utama, saring, bulan_arg):
         rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
         print(f"             tanggal '{(utama or '').title()}' kosong/tidak sah -> tanggal diambil "
               f"dari kolom cadangan: {rinci}")
-    if ring.rebate_sumber:
+    if ring.rebate_sumber and tgl.REBATE_PAKAI_COMPLETED_DATE:
+        rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
+        print(f"             {tgl.LABEL_REBATE}: 'Completed Date' tidak masuk akal (beda > "
+              f"{tgl.AMBANG_SELISIH_REBATE_HARI} hari dari Completed Time), tanggal dari {rinci}")
+    elif ring.rebate_sumber:
         rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
         print(f"             Rebate Withdrawal: 'Completed Date' DIABAIKAN, tanggal dari {rinci}"
               + (f" ({ring.rebate_selisih:,} baris 'Completed Date'-nya beda > "
@@ -422,9 +426,15 @@ def main():
                          "bulan dan statusnya finish/success. Baris itu HANYA dipakai "
                          "kolom Settlement Date di D&W Report (hitung_dw "
                          "--settlement-columns); saldo pembuka tidak bergeser.")
+    ap.add_argument("--legacy-withdrawal-rules", action="store_true",
+                    help="KVB: aturan tanggal sebelum v1.44 (Rebate Withdrawal: Completed "
+                         "Date diabaikan -> Completed Time -> Settlement Date). DPM memakai "
+                         "Completed Date untuk Withdrawal dan Rebate/Wallet Withdrawal.")
     ap.add_argument("--sheet-d", help="nama sheet deposit di sumber (default: D / Deposit)")
     ap.add_argument("--sheet-w", help="nama sheet withdrawal di sumber (default: W / Withdrawal)")
     args = ap.parse_args()
+    if args.legacy_withdrawal_rules:
+        tgl.REBATE_PAKAI_COMPLETED_DATE = False
 
     src = Path(args.input).expanduser()
     tpl = Path(args.template).expanduser()

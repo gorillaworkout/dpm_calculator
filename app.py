@@ -314,10 +314,15 @@ CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # CRM average berbasis Settlement Date di D&W Report (KVB saja; tab lain tidak berubah).
 # v1.32: --cny-balance-usdt = kolom CNY Rate | Balance (USDT) | Rate source di baris
 # CNY Payment Channel Balance, rate dari sheet 'CNY RATE' di file yang diupload.
+# v1.44: --legacy-withdrawal-rules = aturan withdrawal sebelum v1.44 untuk KVB (Rebate
+# Withdrawal dari Completed Time -> Settlement Date, status finish/success). DPM tidak
+# memakainya: Withdrawal + Rebate/Wallet Withdrawal dari Completed Date, status
+# finish/success/process.
 KVB_ARG = {
-    "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows"),
+    "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows", "--legacy-withdrawal-rules"),
     "hitung_dw.py": (
         "--tanpa-extra-fees",
+        "--legacy-withdrawal-rules",
         "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",

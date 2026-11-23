@@ -70,11 +70,12 @@ try:
         "siapkan_kvb.py", "isi_template.py", "hitung_dw.py"
     ]
     assert "--bulan" not in commands[0]
-    assert commands[1][-4:] == ["--bulan", "2026-08", "--tanpa-extra-fees",
-                                "--settlement-rows"]
+    assert commands[1][-5:] == ["--bulan", "2026-08", "--tanpa-extra-fees",
+                                "--settlement-rows", "--legacy-withdrawal-rules"]
     assert commands[2][commands[2].index("--period"):] == [
         "--period", "2026-08",
         "--tanpa-extra-fees",
+        "--legacy-withdrawal-rules",
         "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",
@@ -103,6 +104,9 @@ try:
     assert "--cny-balance-usdt" not in joined   # v1.32: KVB saja
     assert "--settlement-columns" not in joined   # v1.30: KVB saja
     assert "--settlement-rows" not in " ".join(commands[0])
+    # v1.44: DPM uses the new withdrawal rules (Completed Date, finish/success/process)
+    assert "--legacy-withdrawal-rules" not in joined
+    assert "--legacy-withdrawal-rules" not in " ".join(commands[0])
 
     commands.clear()
     def fail_translate(command, **_kwargs):
