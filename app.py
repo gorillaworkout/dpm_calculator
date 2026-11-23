@@ -1472,6 +1472,12 @@ def job_download(job_id):
 def _halaman_dibersihkan(job_id, info, registry):
     """Friendly 410 when a newer run's cleanup removed this result."""
     info = dict(info)
+    latest = _read_state(job_id)
+    if latest and latest.get("state") == "collected":
+        # A concurrent download finished (and removed the folder) after this
+        # request read the state: it was downloaded, not cleared by a newer run.
+        return render_template("job.html", job_id=job_id, info=latest, elapsed=0,
+                               tool=_tools_for(latest.get("company", "dpm"))[latest["slug"]]), 410
     if info.get("state") != "cleared":
         info = _write_state(job_id, state="cleared", path=None, cleared=time.time())
     return render_template("job.html", job_id=job_id, info=info, elapsed=0,

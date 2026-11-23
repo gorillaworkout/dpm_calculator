@@ -289,6 +289,47 @@ def test_concurrent_download_has_one_winner_and_controlled_loser():
         shutil.rmtree(jobs, ignore_errors=True)
 
 
+def test_stale_read_loser_sees_collected_not_cleared():
+    """v1.45 race fix, deterministic: the losing download read state 'done' just
+    before the winner finished, then runs on after the winner wrote 'collected'
+    and removed the folder. It must answer 410 'already downloaded' and must not
+    overwrite 'collected' with 'cleared'."""
+    jobs = Path(tempfile.mkdtemp())
+    job_id = uuid.uuid4().hex
+    job = jobs / job_id
+    job.mkdir()
+    Workbook().save(job / "hasil.xlsx")
+    original_jobs, original_read = web.JOBS, web._read_state
+    web.JOBS = jobs
+    try:
+        web._write_state(job_id, state="done", path=str(job / "hasil.xlsx"),
+                         name="hasil.xlsx", slug="segregate", started=0)
+        stale = web._read_state(job_id)              # the loser's first read
+        client = web.app.test_client()
+        winner = client.get(f"/job/{job_id}/download", headers={"Authorization": AUTH})
+        assert winner.status_code == 200 and winner.data[:2] == b"PK"
+        winner.close()
+        assert web._read_state(job_id)["state"] == "collected"
+        assert not job.exists() and not (jobs / f".{job_id}.download").exists()
+        calls = {"n": 0}
+
+        def stale_once(jid):
+            calls["n"] += 1
+            return dict(stale) if calls["n"] == 1 else original_read(jid)
+
+        web._read_state = stale_once
+        loser = client.get(f"/job/{job_id}/download", headers={"Authorization": AUTH})
+        web._read_state = original_read
+        assert calls["n"] >= 2, calls                # the fix re-read the state
+        assert loser.status_code == 410, loser.status_code
+        assert "already been downloaded" in loser.get_data(as_text=True)
+        assert web._read_state(job_id)["state"] == "collected"
+    finally:
+        web._read_state = original_read
+        web.JOBS = original_jobs
+        shutil.rmtree(jobs, ignore_errors=True)
+
+
 if __name__ == "__main__":
     # Tanpa pytest: file ini dijalankan langsung (python3 test_regressions.py),
     # jadi test-nya harus dipanggil sendiri -- kalau tidak, exit 0 itu palsu.
