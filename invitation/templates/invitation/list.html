@@ -11,7 +11,7 @@
   </div>
 </header>
 
-{% if is_admin %}
+{% if can_manage %}
 <details class="pa-card" id="create" {{ 'open' if open_create or not events }}>
   <summary>New invitation</summary>
   <form class="inv-form" method="post" action="{{ url_for('invitation.create') }}" enctype="multipart/form-data" novalidate>
@@ -61,10 +61,13 @@
   {% endfor %}
   </tbody>
 </table>
-{% else %}<p class="empty">No invitations yet.{% if not is_admin %} An admin creates them.{% endif %}</p>{% endif %}
+{% else %}<div class="empty">
+  <p style="margin:0 0 12px">No invitations yet. Create one to get a public RSVP link to share with everyone.</p>
+  {% if can_manage %}<a class="btn btn-primary" href="#create" id="empty-create">Create invitation</a>{% endif %}
+</div>{% endif %}
 </section>
 {{ copy_script() }}
-{% if is_admin %}
+{% if can_manage %}
 <script>
 (function () {
   var name = document.getElementById('name'), slug = document.getElementById('slug');
@@ -75,6 +78,12 @@
   }
   slug.addEventListener('input', function () { touched = true; slug.value = slug.value.toLowerCase(); });
   name.addEventListener('input', function () { if (!touched) slug.value = suggest(name.value); });
+  var empty = document.getElementById('empty-create');
+  if (empty) empty.addEventListener('click', function (e) {
+    e.preventDefault();
+    var d = document.getElementById('create'); d.open = true;
+    d.scrollIntoView({behavior: 'smooth', block: 'start'}); name.focus();
+  });
   var file = document.getElementById('image'), prev = document.getElementById('image-preview');
   file.addEventListener('change', function () {
     var f = file.files[0];
