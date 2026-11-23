@@ -218,6 +218,11 @@ pre{
       <a href="/approval" class="{{ 'on' if request.path.startswith('/approval') }}"
          {{ 'aria-current=page' if request.path.startswith('/approval') }}><i class="dot"></i>Partner Approval <small class="betatag">Beta</small></a>
     </nav>
+    <div class="navlabel" style="margin-top:18px">Events</div>
+    <nav>
+      <a href="/invitation" class="{{ 'on' if request.path.startswith('/invitation') }}"
+         {{ 'aria-current=page' if request.path.startswith('/invitation') }}><i class="dot"></i>Invitation</a>
+    </nav>
     {% endif %}
   </div>
   <div class="sidefoot">Your original file is never modified — the result is always a new file.

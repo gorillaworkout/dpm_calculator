@@ -1,0 +1,75 @@
+{% extends "invitation/_public_base.html" %}
+{% macro choice(name, label, help, options) %}
+<fieldset class="field choice-set" id="{{ name }}-set">
+  <legend class="label">{{ label }}</legend>
+  <div class="choice{{ ' is-error' if errors.get(name) }}" role="radiogroup">
+    {% for v, text in options %}
+    <label><input type="radio" name="{{ name }}" value="{{ v }}" {{ 'checked' if form.get(name) == v }} required>{{ text }}</label>
+    {% endfor %}
+  </div>
+  {% if errors.get(name) %}<span class="err" role="alert">{{ errors[name] }}</span>{% elif help %}<span class="help">{{ help }}</span>{% endif %}
+</fieldset>
+{% endmacro %}
+{% block main %}
+<p class="eyebrow">RSVP</p>
+<h1>Confirm your attendance</h1>
+<p class="to"><b>{{ ev.name }}</b>{% if ev.closes_label %} · Please reply before {{ ev.closes_label }}{% endif %}</p>
+<form method="post" action="{{ url_for('invitation_public.submit', slug=ev.slug) }}" novalidate id="rsvp">
+  <input type="hidden" name="csrf" value="{{ public_csrf(ev.slug) }}">
+  {% if notice %}<div class="notice danger" role="alert">{{ notice }}</div>
+  {% elif errors %}<div class="notice danger" role="alert">Please check the highlighted fields.</div>{% endif %}
+  <div class="field">
+    <label class="label" for="full_name">Full name</label>
+    <input class="input{{ ' is-error' if errors.full_name }}" id="full_name" name="full_name" value="{{ form.get('full_name', '') }}"
+           autocomplete="name" maxlength="{{ NAME_MAX }}" required {{ 'aria-invalid=true' if errors.full_name }}>
+    {% if errors.full_name %}<span class="err">{{ errors.full_name }}</span>{% else %}<span class="help">As you would like it to appear on the guest list.</span>{% endif %}
+  </div>
+  <div class="field">
+    <label class="label" for="email">Email</label>
+    <input class="input{{ ' is-error' if errors.email }}" id="email" name="email" type="email" inputmode="email" value="{{ form.get('email', '') }}"
+           autocomplete="email" maxlength="{{ EMAIL_MAX }}" required {{ 'aria-invalid=true' if errors.email }}>
+    {% if errors.email %}<span class="err">{{ errors.email }}</span>{% else %}<span class="help">If you submit again with the same email, we will update your answer.</span>{% endif %}
+  </div>
+  {{ choice('attending', 'Will you attend?', '', [('yes', 'Yes'), ('no', 'No')]) }}
+  <div id="allergy-block" class="field" style="gap:22px">
+    {{ choice('has_allergy', 'Do you have any food allergies?', 'Shared with the event organisers and catering only.', [('no', 'No'), ('yes', 'Yes')]) }}
+    <div class="field" id="notes-block">
+      <label class="label" for="allergy_notes">What are you allergic to?</label>
+      <input class="input{{ ' is-error' if errors.allergy_notes }}" id="allergy_notes" name="allergy_notes" value="{{ form.get('allergy_notes', '') }}"
+             maxlength="{{ ALLERGY_MAX }}" placeholder="e.g. peanuts, shellfish, gluten" autocomplete="off" {{ 'aria-invalid=true' if errors.allergy_notes }}>
+      {% if errors.allergy_notes %}<span class="err">{{ errors.allergy_notes }}</span>{% else %}<span class="help" id="notes-count">Up to {{ ALLERGY_MAX }} characters.</span>{% endif %}
+    </div>
+  </div>
+  <div class="hp" aria-hidden="true">
+    <label for="website">Leave this field empty</label>
+    <input id="website" name="website" tabindex="-1" autocomplete="off" value="">
+  </div>
+  <div><button class="btn" type="submit" id="submit">Submit</button></div>
+</form>
+<p class="fine">Your answers are only visible to the DPM event team.</p>
+<script nonce="{{ csp_nonce() }}">
+(function () {
+  var f = document.getElementById('rsvp');
+  var allergy = document.getElementById('allergy-block');
+  var notes = document.getElementById('notes-block');
+  var notesInput = document.getElementById('allergy_notes');
+  function val(name) { var c = f.querySelector('input[name="' + name + '"]:checked'); return c ? c.value : ''; }
+  function sync() {
+    var attend = val('attending') === 'yes';
+    var allergic = attend && val('has_allergy') === 'yes';
+    allergy.hidden = !attend;
+    notes.hidden = !allergic;
+    // Hidden answers are not sent: the server discards them anyway.
+    f.querySelectorAll('input[name="has_allergy"]').forEach(function (i) { i.disabled = !attend; });
+    notesInput.disabled = !allergic;
+    notesInput.required = allergic;
+  }
+  f.addEventListener('change', sync);
+  sync();
+  f.addEventListener('submit', function () {
+    var b = document.getElementById('submit');
+    setTimeout(function () { b.disabled = true; b.textContent = 'Submitting…'; }, 0);
+  });
+})();
+</script>
+{% endblock %}

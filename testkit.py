@@ -38,6 +38,9 @@ def hermetic_env(admin_user="tester", admin_pass="tester-password-1", admin=True
     # Partner Approval (Beta): own DB + files in the temp dir, never real mail.
     os.environ["DW_APPROVAL_DB"] = str(root / "approval.db")
     os.environ["DW_APPROVAL_DIR"] = str(root / "approval_files")
+    # DPM Invitation: own DB + image folder in the temp dir too.
+    os.environ["DW_INVITATION_DB"] = str(root / "invitation.db")
+    os.environ["DW_INVITATION_DIR"] = str(root / "invitation_files")
     for name in ("DW_APPROVAL_TEMPLATES", "DW_SIGN_LINK_DAYS", "DW_PUBLIC_BASE_URL",
                  "DW_SOFFICE", "DW_SMTP_HOST", "DW_SMTP_PORT", "DW_SMTP_USER",
                  "DW_SMTP_PASSWORD", "DW_SMTP_FROM", "DW_SMTP_TLS"):
@@ -69,6 +72,10 @@ def assert_isolated(root):
         for path in (pa.SETTINGS.db, pa.SETTINGS.files):
             assert root in Path(path).resolve().parents, f"approval path {path} is outside {root}"
         assert not pa.SETTINGS.smtp_ready, "tests must not inherit a real SMTP server"
+    inv = sys.modules.get("invitation")
+    if inv is not None and inv.SETTINGS is not None:
+        for path in (inv.SETTINGS.db, inv.SETTINGS.files):
+            assert root in Path(path).resolve().parents, f"invitation path {path} is outside {root}"
 
 
 # --------------------------------------------------------------------------

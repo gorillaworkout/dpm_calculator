@@ -31,6 +31,7 @@ import angka
 import auth
 import chunked
 import cleanup
+import invitation
 import partner_approval
 
 BASE = Path(__file__).resolve().parent
@@ -242,6 +243,8 @@ auth.register(app)
 chunked.register(app, JOBS)
 # Partner Approval (Beta): its own blueprints, SQLite file and storage folder.
 partner_approval.register(app)
+# DPM Invitation: public RSVP link per event; own SQLite file and image folder.
+invitation.register(app)
 
 
 @app.teardown_request
@@ -261,6 +264,8 @@ def _require_login():
         return None                      # admin views carry their own stricter check
     if request.blueprint == "partner_sign":
         return None                      # public signing page: the link token is the key
+    if request.blueprint == "invitation_public":
+        return None                      # public invitation RSVP page /i/<slug>: no login
     user = auth.current_user()
     if not user:
         # Browsers get the styled sign-in page. Accept */* and a missing Accept
@@ -272,7 +277,8 @@ def _require_login():
     request.user = user
     if (request.path == "/" or request.path.startswith("/tool/") or
             request.path == "/template" or request.path == "/approval" or
-            request.path.startswith("/approval/")):
+            request.path.startswith("/approval/") or
+            request.path == "/invitation" or request.path.startswith("/invitation/")):
         return _require_company("dpm")
     if request.path == "/kvb" or request.path.startswith("/kvb/"):
         return _require_company("kvb")
