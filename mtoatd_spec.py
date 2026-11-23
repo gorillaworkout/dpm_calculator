@@ -32,7 +32,8 @@ Rumus per tanggal t, per currency:
     ——crm已入,TD未入    = Σ USD          [Settlement = t, Paid > t]
     ——调上日差异 (入金)   = -Σ USD         [Paid = t, Settlement < t]
     MT4出金            = Σ USD          [Settlement = t, Source Name = 'Withdrawal']
-    Wallet出金          = Σ USD          [Settlement = t, Source Name = 'Rebate Withdrawal']
+    Wallet出金          = Σ USD          [Settlement = t, Source Name = 'Rebate Withdrawal'
+                                                       atau 'Wallet Withdrawal' (v1.44)]
     CRM出金            = MT4出金 + Wallet出金
     TD出金             = Σ USD          [Completed = t, Status ≠ refuse]
     ——crm已出,TD未出    = Σ USD          [Settlement = t, Completed > t, Status ≠ refuse]
@@ -61,6 +62,8 @@ Terverifikasi 523/523 sel terhadap 1 Jun 2026 (19 currency + kolom 合計).
 """
 
 import datetime
+
+from tanggal_util import adalah_rebate
 
 EPOCH = datetime.date(1970, 1, 1)          # CRM menandai 'belum dibayar' begini
 
@@ -172,7 +175,7 @@ EN = {
     "MT4出金 (USD)": "MT4 Withdrawal (USD) = sum of USD where Settlement Date = this day "
                      "and Source Name = 'Withdrawal'",
     "Wallet出金 (USD)": "Wallet Withdrawal (USD) = sum of USD where Settlement Date = this day "
-                        "and Source Name = 'Rebate Withdrawal'",
+                        "and Source Name = 'Rebate Withdrawal' or 'Wallet Withdrawal'",
     "CRM出金 (USD)": "CRM Withdrawal (USD) = MT4 Withdrawal + Wallet Withdrawal",
     "TD出金 (USD)": "TD Withdrawal (USD) = sum of USD where Completed Date = this day "
                     "and Status is not 'refuse'",
@@ -316,7 +319,8 @@ def hitung(idx, cur, t):
 
     # ---- 出金 (USD)
     v["mt4_w"] = S([r for r in wd_sw if r[6] == "Withdrawal" and ikut_sw(r)], 2)
-    v["wallet_w"] = S([r for r in wd_sw if r[6] == "Rebate Withdrawal" and ikut_sw(r)], 2)
+    # v1.44: 'Wallet Withdrawal' (nama DPM mulai November 2026) = 'Rebate Withdrawal'.
+    v["wallet_w"] = S([r for r in wd_sw if adalah_rebate(r[6]) and ikut_sw(r)], 2)
     v["crm_w"] = v["mt4_w"] + v["wallet_w"]
     v["td_w"] = S([r for r in wd_cd if lolos(r)], 2)
     v["var_w_mwc"] = v["mt4_w"] + v["wallet_w"] - v["crm_w"]

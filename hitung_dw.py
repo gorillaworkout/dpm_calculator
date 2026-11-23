@@ -166,6 +166,17 @@ HANYA_STATUS_FINISH = True
 # menulis "Blank status is same as Refuse, hence do not include in any
 # calculations." Jangan digabung ke sini tanpa keputusan baru dari user.
 STATUS_DIPAKAI = ("FINISH", "SUCCESS")
+# v1.44 (DPM, 23 Nov 2026): untuk baris WITHDRAWAL (Withdrawal + Rebate/Wallet
+# Withdrawal) 'PROCESS' juga dihitung -- keputusan tim DPM: "both withdrawal & rebate
+# withdrawal take the data based on completed Date (status: finish, success, process)".
+# Deposit (dan baris non-withdrawal lain yang punya kolom Status) TETAP finish/success.
+# KVB memasang --legacy-withdrawal-rules -> kembali ke STATUS_DIPAKAI.
+STATUS_DIPAKAI_W = ("FINISH", "SUCCESS", "PROCESS")
+
+
+def status_dipakai(kind):
+    """Status yang dihitung untuk satu jenis baris ('withdrawal' / 'deposit')."""
+    return STATUS_DIPAKAI_W if kind == "withdrawal" else STATUS_DIPAKAI
 
 # ------------------------------------------------------------- periode laporan
 # Bulan laporan, diisi dari --period YYYY-MM  ->  (tahun, bulan). None = semua
@@ -1740,7 +1751,7 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         # (hanya untuk kolom Settlement Date di D&W Report). Baris yang tanggal
         # transaksinya di luar bulan tetap DIBUANG dari records/pivot/MTOATD/dst.
         status_ok = not (HANYA_STATUS_FINISH and c_status
-                         and norm(status) not in STATUS_DIPAKAI)
+                         and norm(status) not in status_dipakai(kind))
         settle_saja = False
         if SETTLEMENT_COLUMNS and status_ok:
             settle_saja = catat_settlement(report, ws, row, cols, kind, currency, gateway,
@@ -1761,7 +1772,7 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         # Baris yang statusnya bukan 'finish' DIBUANG seluruhnya -- tidak masuk
         # laporan, pivot, Channel Balance, maupun total. Refuse H+1 yang relevan
         # sudah disalin khusus untuk MTOATD sebelum saringan periode/status.
-        if HANYA_STATUS_FINISH and c_status and norm(status) not in STATUS_DIPAKAI:
+        if HANYA_STATUS_FINISH and c_status and norm(status) not in status_dipakai(kind):
             report["dibuang"][(ws.title, norm(currency), norm(status) or "(kosong)")] += 1
             report["dibuang_usd"][(ws.title, norm(currency), norm(status) or "(kosong)")] += \
                 to_float(ws.cell(row=row, column=c_usd).value) or 0.0
@@ -3699,8 +3710,8 @@ def write_mtoatd_sheet(wb, report):
         usd = to_float(rec.get("USD")) or 0.0
         tx = to_float(rec.get("Transaction")) or 0.0
         if rec["Type"] == "withdrawal":
-            # rec["_tgl"] = tanggal hasil tanggal_util (Rebate Withdrawal: Completed Time,
-            # BUKAN kolom 'Completed Date' mentah) -- harus sama dengan saringan bulan.
+            # rec["_tgl"] = tanggal hasil tanggal_util (DPM v1.44: Completed Date; KVB
+            # Rebate Withdrawal: Completed Time) -- harus sama dengan saringan bulan.
             selesai = (rec.get("_tgl") or as_date(rec.get("Completed Date"))
                        or as_date(rec.get("Date")))
             if selesai is None and settle is None:
@@ -4350,7 +4361,12 @@ def lapor_tanggal(report):
             rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.cadangan.items()))
             print(f"Tanggal: sheet '{nama}' -- tanggal kolom utama kosong/tidak sah, "
                   f"diambil dari kolom cadangan: {rinci}")
-        if ring.rebate_sumber:
+        if ring.rebate_sumber and tu.REBATE_PAKAI_COMPLETED_DATE:
+            rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
+            print(f"Tanggal: sheet '{nama}' -- {tu.LABEL_REBATE}: 'Completed Date' tidak masuk "
+                  f"akal (beda > {tu.AMBANG_SELISIH_REBATE_HARI} hari dari Completed Time), "
+                  f"tanggal dari {rinci}")
+        elif ring.rebate_sumber:
             rinci = ", ".join(f"{k.title()}: {v:,}" for k, v in sorted(ring.rebate_sumber.items()))
             print(f"Tanggal: sheet '{nama}' -- Rebate Withdrawal: 'Completed Date' diabaikan, "
                   f"tanggal dari {rinci}"
@@ -5113,6 +5129,9 @@ def write_legend_sheet(wb, date_cols_used, report=None):
     # jalan. Dengan stempel ini, versi file langsung ketahuan.
     r += 1
     status_teks = " or ".join(f"'{s.lower()}'" for s in STATUS_DIPAKAI)
+    if STATUS_DIPAKAI_W != STATUS_DIPAKAI:
+        status_teks += (" (withdrawals: " + " or ".join(f"'{s.lower()}'" for s in STATUS_DIPAKAI_W)
+                        + ")")
     aturan = (f"only rows with Status = {status_teks} are counted"
               if HANYA_STATUS_FINISH else "ALL rows are counted regardless of Status")
     bulan = (f"REPORT MONTH {nama_periode()} - rows dated outside it are dropped"
@@ -5245,10 +5264,15 @@ def write_legend_sheet(wb, date_cols_used, report=None):
 
     # --- bagian: aturan status
     r += 2
-    ws.cell(r, 2, "ONLY 'FINISH'/'SUCCESS' ROWS ARE COUNTED").font = \
+    _w_proc = STATUS_DIPAKAI_W != STATUS_DIPAKAI
+    ws.cell(r, 2, "ONLY 'FINISH'/'SUCCESS' ROWS ARE COUNTED" + (
+        " (WITHDRAWALS: ALSO 'PROCESS')" if _w_proc else "")).font = \
         Font(bold=True, size=12, color="C00000")
     r += 1
-    ws.cell(r, 2, "Every row in sheet D and W whose Status is not 'finish' or 'success' is "
+    ws.cell(r, 2, ("Every deposit row whose Status is not 'finish' or 'success', and every "
+                   "withdrawal row whose Status is not 'finish', 'success' or 'process', is "
+                   if _w_proc else
+                   "Every row in sheet D and W whose Status is not 'finish' or 'success' is ") +
                   "dropped completely - it is not counted in any sheet, total or variance. "
                   "That covers rows marked 'refuse' AND rows where the Status cell was "
                   "left empty (those carry remarks such as 'Application Failed, please "
@@ -5268,6 +5292,21 @@ def write_legend_sheet(wb, date_cols_used, report=None):
         Font(size=10, color="008000")
     ws.row_dimensions[r].height = 56
     r += 1
+    if tu.REBATE_PAKAI_COMPLETED_DATE:
+        ws.cell(r, 2, "v1.44 (23 Nov 2026), decision of the DPM team: regular 'Withdrawal' and "
+                      "'Rebate Withdrawal' / 'Wallet Withdrawal' rows are all dated by their "
+                      "Completed Date, and withdrawal rows with Status 'finish', 'success' or "
+                      "'process' are counted (deposits: 'finish' or 'success'). 'Wallet "
+                      "Withdrawal' (the new name from November 2026) is treated exactly like "
+                      "'Rebate Withdrawal'. A blank or text Completed Date falls back to a full "
+                      "date in Completed Time, then Settlement Date; a 1/1/1970 Completed Date "
+                      "(not paid yet) is not rescued by Settlement Date and is listed in Date "
+                      "Check / Missing Data. A rebate Completed Date more than "
+                      f"{tu.AMBANG_SELISIH_REBATE_HARI} days away from a full-date Completed Time "
+                      "is treated as a back-filled value and Completed Time is used (counted in "
+                      "Date Check).").font = Font(size=10, color="008000")
+        ws.row_dimensions[r].height = 70
+        r += 1
     ws.cell(r, 2, "CONFIRMED by the DPM Malaysia team, 3 September 2026, on the treatment of "
                   "a blank Status cell: \"Blank status is same as Refuse, hence do not "
                   "include in any calculations.\" That is exactly what this report does. "
@@ -5605,6 +5644,11 @@ def main():
                     help="D&W Report: tambah kolom CRM USD / Transactions / CRM average "
                          "berbasis Settlement Date di sebelah kolom basis Paid Date / "
                          "Completed Date. Tab lain tidak berubah. Hanya dipasang untuk KVB.")
+    ap.add_argument("--legacy-withdrawal-rules", action="store_true",
+                    help="Aturan sebelum v1.44: Rebate Withdrawal diberi tanggal dari "
+                         "Completed Time -> Settlement Date (Completed Date diabaikan, v1.29) "
+                         "dan status withdrawal hanya finish/success. Hanya dipasang untuk KVB; "
+                         "DPM memakai Completed Date + finish/success/process.")
     ap.add_argument("--cny-balance-usdt", action="store_true",
                     help="Payment Channel Balance: kolom CNY Rate | Balance (USDT) | "
                          "Rate source di baris CNY, rate dari sheet 'CNY RATE' "
@@ -5612,7 +5656,10 @@ def main():
     args = ap.parse_args()
 
     global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
-    global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT
+    global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT, STATUS_DIPAKAI_W
+    if args.legacy_withdrawal_rules:
+        STATUS_DIPAKAI_W = STATUS_DIPAKAI
+        tu.REBATE_PAKAI_COMPLETED_DATE = False
     if args.cny_balance_usdt:
         CNY_BALANCE_USDT = True
     if args.settlement_columns:
@@ -5952,6 +5999,8 @@ def main():
     if report.get("dibuang"):
         tot = sum(report["dibuang"].values())
         status_teks = "/".join(s.lower() for s in STATUS_DIPAKAI)
+        if STATUS_DIPAKAI_W != STATUS_DIPAKAI:
+            status_teks += " (withdrawal: " + "/".join(s.lower() for s in STATUS_DIPAKAI_W) + ")"
         print(f"\n!  DIBUANG: {tot:,} baris statusnya BUKAN {status_teks} -> tidak dihitung "
               f"di laporan mana pun")
         for (sh, cur, st), n in sorted(report["dibuang"].items(), key=lambda x: -x[1])[:15]:

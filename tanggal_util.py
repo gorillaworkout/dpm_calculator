@@ -37,6 +37,30 @@ mengisinya (semua Sales UID 100007), 32 tanggal 1 Agu-1 Sep 2026 pada baris yang
 baris). Maka untuk Rebate: 'Completed Date' DIABAIKAN -> 'Completed Time' -> 'Settlement
 Date'; 'Apply Date' tetap tidak pernah. Withdrawal biasa dan sumber lain memakai aturan
 di atas (v1.28). 'Source Name' kosong / tidak dikenal -> aturan v1.28.
+Aturan v1.29 ini sekarang HANYA untuk KVB (--legacy-withdrawal-rules), lihat v1.44.
+
+DPM v1.44 (23 Nov 2026): REBATE / WALLET WITHDRAWAL IKUT COMPLETED DATE
+-----------------------------------------------------------------------
+Keputusan tim DPM (disampaikan Bayu 23 Nov 2026): "both withdrawal & rebate
+withdrawal take the data based on completed Date (status: finish, success, process)".
+Bukti di ekspor Oktober 2026: 'Completed Time' baris Rebate isinya JAM SAJA (" 00:33"),
+'Settlement Date' = Apply Date. Aturan v1.29 jadi jatuh ke Settlement Date, dan rebate
+yang selesai lewat tengah malam tercatat SEHARI terlalu awal. Mulai November tim mengganti nama 'Rebate Withdrawal' jadi
+'Wallet Withdrawal'; dua nama itu diperlakukan SAMA (adalah_rebate).
+
+Urutan DPM untuk baris Rebate/Wallet Withdrawal = urutan Withdrawal biasa:
+  1. 'Completed Date' yang sah (1990-2100);
+  2. kalau kosong / teks: 'Completed Time' bertanggal penuh, lalu 'Settlement Date';
+  3. 'Completed Date' 1970 = "belum dibayar" -> hanya diselamatkan oleh 'Completed Time'
+     bertanggal penuh, TIDAK oleh Settlement Date (sama dengan Withdrawal biasa) ->
+     dilaporkan di Date Check / Missing Data, tidak dihitung.
+PENGAMAN masalah v1.29 (Completed Date isian palsu, median 308 hari dari Apply Date):
+kalau 'Completed Time' BERTANGGAL PENUH dan beda > AMBANG_SELISIH_REBATE_HARI hari dari
+'Completed Date', Completed Date itu dianggap isian palsu -> tanggal dari Completed Time,
+dihitung di Date Check ("implausible Completed Date"). Ekspor lama punya Completed Time
+bertanggal penuh, jadi kasus 308 hari tetap tertangkap; ekspor baru (jam saja) memakai
+Completed Date apa adanya, sesuai keputusan tim. Selisih <= 3 hari (mis. lewat tengah
+malam) -> Completed Date tetap dipakai.
 """
 import datetime
 import re
@@ -52,6 +76,11 @@ KOLOM_COMPLETED = "COMPLETED DATE"
 KOLOM_SETTLE = "SETTLEMENT DATE"
 KOLOM_SOURCE = "SOURCE NAME"
 SUMBER_REBATE = "REBATE WITHDRAWAL"
+# v1.44: mulai file November tim DPM menulis 'Wallet Withdrawal' untuk jenis yang sama.
+SUMBER_WALLET = "WALLET WITHDRAWAL"
+SUMBER_REBATE_SEMUA = (SUMBER_REBATE, SUMBER_WALLET)
+# Label untuk orang (Date Check, Legend, log).
+LABEL_REBATE = "Rebate/Wallet Withdrawal"
 # Rebate: 'Completed Date' yang beda > ini (hari) dari 'Completed Time' dihitung sebagai
 # informasi di Date Check ("Completed Date ignored for Rebate").
 AMBANG_SELISIH_REBATE_HARI = 3
@@ -62,6 +91,12 @@ RANTAI_CADANGAN = {KOLOM_COMPLETED: (KOLOM_WAKTU, KOLOM_SETTLE)}
 # True  = kalau keduanya sepakat dan bulannya beda, pakai itu (BELUM dipilih).
 UTAMAKAN_WAKTU = False
 
+# v1.44: True (DPM, default) = baris Rebate/Wallet Withdrawal diberi tanggal dari
+# 'Completed Date' seperti Withdrawal biasa (lihat docstring). False = aturan v1.29
+# (Completed Date diabaikan -> Completed Time -> Settlement Date); dipasang KVB lewat
+# --legacy-withdrawal-rules supaya keluaran KVB tidak berubah.
+REBATE_PAKAI_COMPLETED_DATE = True
+
 def kolom_penentu(utama):
     """Kolom sheet yang harus dibaca penelepon untuk menentukan tanggal satu baris:
     kolom utama + cadangannya (+ 'Source Name' untuk aturan Rebate)."""
@@ -71,16 +106,20 @@ def kolom_penentu(utama):
     return kol + (KOLOM_SOURCE,) if utama == KOLOM_COMPLETED else kol
 
 
-_RE_REBATE = re.compile(r"(?:^|[^A-Z0-9])" + re.escape(SUMBER_REBATE) + r"$")
+_RE_REBATE = re.compile(r"(?:^|[^A-Z0-9])(?:"
+                        + "|".join(re.escape(x) for x in SUMBER_REBATE_SEMUA) + r")$")
 
 
 def adalah_rebate(sumber):
     """True kalau 'Source Name' (trim, spasi dirapikan, tanpa beda huruf besar/kecil)
-    BERAKHIR dengan 'rebate withdrawal' sebagai kata utuh -- jadi 'Rebate Withdrawal' dan
-    'prefix bulan' ala KVB ('08-2026 Rebate Withdrawal') sama-sama cocok.
-    TIDAK cocok: 'Withdrawal', '08-2026 Withdrawal', 'Wallet withdrawal' (diubah
-    siapkan_kvb.py jadi 'Rebate Withdrawal' sebelum sampai sini), 'Rebate Withdrawals',
-    'Rebate Withdrawal (Manual)', 'Unrebate Withdrawal', 'Rebate', kosong / bukan teks."""
+    BERAKHIR dengan 'rebate withdrawal' atau 'wallet withdrawal' (v1.44, nama baru DPM
+    mulai November 2026) sebagai kata utuh -- jadi 'Rebate Withdrawal', 'Wallet Withdrawal'
+    dan 'prefix bulan' ala KVB ('08-2026 Rebate Withdrawal') sama-sama cocok. (KVB:
+    siapkan_kvb.py sudah mengubah 'Wallet withdrawal' jadi 'Rebate Withdrawal', jadi
+    hasilnya sama.)
+    TIDAK cocok: 'Withdrawal', '08-2026 Withdrawal', 'Rebate Withdrawals',
+    'Wallet Withdrawals', 'Rebate Withdrawal (Manual)', 'Unrebate Withdrawal', 'Rebate',
+    'Wallet', kosong / bukan teks."""
     return (isinstance(sumber, str)
             and _RE_REBATE.search(" ".join(sumber.split()).upper()) is not None)
 
@@ -216,7 +255,8 @@ HasilTanggal = namedtuple(
 # konflik         : date dari Completed Time / Settlement kalau berbeda BULAN dari
 #                   'Completed Date' yang sah (lihat UTAMAKAN_WAKTU), selain itu None
 # konflik_sumber  : kolom asal 'konflik'
-# aturan          : 'rebate' kalau baris Rebate Withdrawal (Completed Date diabaikan), else None
+# aturan          : 'rebate' kalau baris Rebate/Wallet Withdrawal yang tanggalnya BUKAN dari
+#                   Completed Date (KVB v1.29: selalu; DPM v1.44: hanya isian palsu), else None
 # selisih_abaikan : True kalau (Rebate) 'Completed Date' yang sah beda > 3 hari dari
 #                   'Completed Time' -- hanya untuk hitungan informasi
 
@@ -231,8 +271,18 @@ def tentukan_tanggal(nilai, utama):
     kelas = kelas_nilai(mentah)
     cadangan = RANTAI_CADANGAN.get(utama, ())
 
-    if utama == KOLOM_COMPLETED and adalah_rebate(nilai.get(KOLOM_SOURCE)):
-        # Rebate Withdrawal: 'Completed Date' diabaikan (lihat docstring modul).
+    if (utama == KOLOM_COMPLETED and adalah_rebate(nilai.get(KOLOM_SOURCE))
+            and REBATE_PAKAI_COMPLETED_DATE):
+        # DPM v1.44: Completed Date dipakai seperti Withdrawal biasa, KECUALI isian palsu
+        # ala v1.29 (Completed Time bertanggal penuh beda > 3 hari) -> Completed Time.
+        d_waktu = waktu_ke_tanggal(nilai.get(KOLOM_WAKTU))
+        d_cd = ke_tanggal(mentah) if kelas == "sah" else None
+        if (d_cd is not None and d_waktu is not None
+                and abs((d_cd - d_waktu).days) > AMBANG_SELISIH_REBATE_HARI):
+            return HasilTanggal(d_waktu, KOLOM_WAKTU, "sah", None, None, "rebate", True)
+        # selain itu: jatuh ke aturan Withdrawal biasa di bawah
+    elif utama == KOLOM_COMPLETED and adalah_rebate(nilai.get(KOLOM_SOURCE)):
+        # KVB (aturan v1.29): 'Completed Date' diabaikan (lihat docstring modul).
         d_waktu = waktu_ke_tanggal(nilai.get(KOLOM_WAKTU))
         d_settle = ke_tanggal(nilai.get(KOLOM_SETTLE))
         d_cd = ke_tanggal(mentah) if kelas == "sah" else None
@@ -351,10 +401,18 @@ class Ringkasan:
             out.append((s, "skipped: no usable date", NAMA_ALASAN.get(alasan, alasan), n))
         for kol, n in sorted(self.cadangan.items()):
             out.append((s, "date taken from fallback column", kol.title(), n))
-        for kol, n in sorted(self.rebate_sumber.items()):
+        if REBATE_PAKAI_COMPLETED_DATE:
+            # DPM v1.44: rebate_sumber hanya berisi baris yang Completed Date-nya palsu.
+            for kol, n in sorted(self.rebate_sumber.items()):
+                out.append((s, f"{LABEL_REBATE}: implausible Completed Date replaced",
+                            f"Completed Date differs from Completed Time by more than "
+                            f"{AMBANG_SELISIH_REBATE_HARI} days -> date taken from "
+                            f"{kol.title()}", n))
+        for kol, n in (() if REBATE_PAKAI_COMPLETED_DATE
+                       else sorted(self.rebate_sumber.items())):
             out.append((s, "Rebate Withdrawal: Completed Date ignored, date taken from",
                         kol.title(), n))
-        if self.rebate_selisih:
+        if self.rebate_selisih and not REBATE_PAKAI_COMPLETED_DATE:
             out.append((s, "Completed Date ignored for Rebate",
                         f"Completed Date differs from Completed Time by more than "
                         f"{AMBANG_SELISIH_REBATE_HARI} days (informational)",

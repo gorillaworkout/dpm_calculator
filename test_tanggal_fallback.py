@@ -9,6 +9,12 @@ v1.29: for Source Name = "Rebate Withdrawal" the 'Completed Date' column is NOT 
 completion date (3,593 rows, all UID 100007, dates 1 Aug-1 Sep 2026 on rows applied 2024-2026),
 so it is ignored for Rebate: Completed Time -> Settlement Date. Withdrawal is unchanged.
 
+v1.44: the v1.29 Rebate rule is now KVB-only (--legacy-withdrawal-rules). DPM dates
+Rebate/Wallet Withdrawal by Completed Date (test_dpm_withdrawal_completed_date_v144.py).
+This file deliberately PINS the legacy rule: the unit block switches
+tu.REBATE_PAKAI_COMPLETED_DATE off, and every isi_template.py / hitung_dw.py run below
+gets --legacy-withdrawal-rules, exactly as app.py passes it for KVB.
+
 python3 test_tanggal_fallback.py
 """
 import datetime
@@ -24,6 +30,11 @@ HERE = Path(__file__).resolve().parent
 PY = sys.executable
 sys.path.insert(0, str(HERE))
 import tanggal_util as tu  # noqa: E402
+
+# v1.44: DPM default is the new Completed Date rule; this file tests the legacy (KVB) rule.
+assert tu.REBATE_PAKAI_COMPLETED_DATE is True          # DPM default
+tu.REBATE_PAKAI_COMPLETED_DATE = False
+LEGACY = "--legacy-withdrawal-rules"
 
 D = datetime.date
 DT = datetime.datetime
@@ -168,7 +179,10 @@ for src in ("08-2026 Rebate Withdrawal", "8-2026 rebate withdrawal", "07-2026  R
     h = reb(src, **{"Completed Date": DT(2026, 8, 10), "Completed Time": SEP + 3.5})
     assert h.tanggal == D(2026, 9, 4) and h.aturan == "rebate", (src, h)
 # negatives: plain / prefixed Withdrawal, other rebate-ish names, non-text
-for src in ("Withdrawal", "08-2026 Withdrawal", "08-2026 Wallet withdrawal", "Rebate Withdrawals",
+# v1.44: 'Wallet Withdrawal' (new DPM name from Nov 2026) is the same as 'Rebate Withdrawal'
+for src in ("Wallet Withdrawal", "  wallet   WITHDRAWAL ", "08-2026 Wallet withdrawal"):
+    assert tu.adalah_rebate(src), src
+for src in ("Withdrawal", "08-2026 Withdrawal", "Wallet Withdrawals", "Wallet", "Rebate Withdrawals",
             "08-2026 Rebate Withdrawals", "Rebate Withdrawal (Manual)", "Rebate Withdrawal 2",
             "Unrebate Withdrawal", "NonRebate Withdrawal", "Rebate", "Rebate Deposit", "withdrawal rebate",
             "", "   ", None, 5, 5.5):
@@ -233,6 +247,9 @@ def buat_sumber(rows_w, rows_d=None):
 
 
 def jalan(*args):
+    args = list(args)
+    if args and args[0] in ("isi_template.py", "hitung_dw.py"):
+        args.append(LEGACY)                     # v1.44: legacy (KVB) withdrawal rules
     r = subprocess.run([PY, *map(str, args)], cwd=HERE, capture_output=True, text=True)
     assert r.returncode == 0, r.stdout + r.stderr
     return r.stdout
