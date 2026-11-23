@@ -134,14 +134,17 @@ assert anon.get("/invitation").status_code == 401
 assert kvb.get("/invitation", headers={"Accept": "*/*"}).status_code == 403
 r = sales.get("/invitation")
 assert r.status_code == 200 and "No invitations yet" in r.get_data(as_text=True)
-assert "New invitation" not in r.get_data(as_text=True)              # admins only
+assert "New invitation" in r.get_data(as_text=True)                  # every DPM user can create
+assert 'id="empty-create"' in r.get_data(as_text=True) and "An admin creates them" not in r.get_data(as_text=True)
 assert 'href="/invitation"' in admin.get("/").get_data(as_text=True)  # DPM menu link
 assert 'href="/invitation"' not in kvb.get("/kvb").get_data(as_text=True)
 
 ADMIN_TOKEN = re.search(r'name="csrf_token" value="([0-9a-f]{64})"',
                         admin.get("/invitation").get_data(as_text=True)).group(1)
 r = sales.post("/invitation/new", data={"csrf_token": "x", "name": "Nope"})
-assert r.status_code == 403, r.status_code                            # admin check first
+assert r.status_code == 400, r.status_code                            # DPM user: CSRF still checked
+r = kvb.post("/invitation/new", data={"csrf_token": "x", "name": "Nope"}, headers={"Accept": "*/*"})
+assert r.status_code == 403, r.status_code                            # no Invitation access
 r = admin.post("/invitation/new", data={"csrf_token": "bad", "name": "Gala"})
 assert r.status_code == 400
 
@@ -176,7 +179,9 @@ for c in (admin, sales):
 detail = admin.get(f"/invitation/{EID}")
 assert detail.status_code == 200 and detail.headers["Cache-Control"] == "no-store"
 assert LINK in detail.get_data(as_text=True) and "Close registration" in detail.get_data(as_text=True)
-assert "Close registration" not in sales.get(f"/invitation/{EID}").get_data(as_text=True)
+page = sales.get(f"/invitation/{EID}").get_data(as_text=True)
+assert "Close registration" in page and "Save changes" in page          # DPM user manages
+assert "Delete this event" not in page                                  # ... but cannot delete it
 assert admin.get("/invitation/999").status_code == 404
 print("ok access + create")
 
@@ -307,8 +312,43 @@ assert sales.post(f"/invitation/{EID}/responses/{dan_row['id']}/delete",
                   data={"csrf_token": SALES_TOKEN}).status_code == 404
 assert sales.post(f"/invitation/{EID}/responses/1/delete", data={}).status_code == 400   # no CSRF
 assert sales.post(f"/invitation/{EID}/delete", data={"csrf_token": SALES_TOKEN, "confirm": SLUG}).status_code == 403
-assert sales.post(f"/invitation/{EID}/status", data={"csrf_token": SALES_TOKEN, "status": "closed"}).status_code == 403
 print("ok response delete")
+
+# ------------------------------------------------------------------ non-admin DPM user manages events
+r = sales.post("/invitation/new", data={
+    "csrf_token": SALES_TOKEN, "name": "Sales Team Lunch", "slug": "sales-lunch", "closes_at": "",
+    "image": (io.BytesIO(img_bytes()), "lunch.jpg")}, content_type="multipart/form-data")
+assert r.status_code == 303, r.status_code
+SID = int(r.headers["Location"].rstrip("/").split("/")[-1])
+sev = INV.STORE.event(SID)
+assert sev["created_by"] == "sales" and sev["status"] == "open"
+r = sales.post(f"/invitation/{SID}/edit", data={
+    "csrf_token": SALES_TOKEN, "name": "Sales Team Lunch 2027", "slug": "sales-lunch-2027",
+    "closes_at": "2030-06-01T12:00",
+    "image": (io.BytesIO(img_bytes("PNG", size=(800, 1200))), "new.png")}, content_type="multipart/form-data")
+assert r.status_code == 303, r.status_code
+sev2 = INV.STORE.event(SID)
+assert sev2["name"] == "Sales Team Lunch 2027" and sev2["slug"] == "sales-lunch-2027" and sev2["updated_by"] == "sales"
+assert sev2["image_key"] != sev["image_key"] and not (INV.SETTINGS.files / sev["image_key"]).exists()
+assert rules.format_wib(sev2["closes_at"]) == "01 Jun 2030, 12:00 WIB"
+r = sales.post(f"/invitation/{SID}/status", data={"csrf_token": SALES_TOKEN, "status": "closed"})
+assert r.status_code == 303 and INV.STORE.event(SID)["status"] == "closed"
+assert "This invitation is closed" in anon.get("/i/sales-lunch-2027").get_data(as_text=True)
+r = sales.post(f"/invitation/{SID}/status", data={"csrf_token": SALES_TOKEN, "status": "open"})
+assert r.status_code == 303 and INV.STORE.event(SID)["status"] == "open"
+assert sales.get(f"/invitation/{SID}/export?format=xlsx").status_code == 200
+assert sales.post(f"/invitation/{SID}/status", data={"csrf_token": "bad", "status": "closed"}).status_code == 400
+# Deleting a whole event stays admin-only, even for the user who created it.
+r = sales.post(f"/invitation/{SID}/delete", data={"csrf_token": SALES_TOKEN, "confirm": "sales-lunch-2027"})
+assert r.status_code == 403 and INV.STORE.event(SID) is not None
+# Users without Invitation access are refused on every write.
+for path, data in ((f"/invitation/{SID}/edit", {"name": "x"}), (f"/invitation/{SID}/status", {"status": "closed"}),
+                   (f"/invitation/{SID}/delete", {"confirm": "sales-lunch-2027"})):
+    assert kvb.post(path, data=data, headers={"Accept": "*/*"}).status_code == 403, path
+    assert anon.post(path, data=data).status_code == 401, path
+r = admin.post(f"/invitation/{SID}/delete", data={"csrf_token": ADMIN_TOKEN, "confirm": "sales-lunch-2027"})
+assert r.status_code == 303 and INV.STORE.event(SID) is None
+print("ok non-admin DPM user manages events")
 
 # ------------------------------------------------------------------ close / auto-close / edit
 r = admin.post(f"/invitation/{EID}/status", data={"csrf_token": ADMIN_TOKEN, "status": "closed"})

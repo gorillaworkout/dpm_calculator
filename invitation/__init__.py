@@ -57,6 +57,14 @@ def _is_admin():
     return bool(u and u["is_admin"])
 
 
+def _can_manage():
+    """Anyone who can open the Invitation menu (DPM access) manages events.
+    Only deleting a whole event stays admin-only (it removes every response)."""
+    import auth
+    u = _user()
+    return bool(u and (u["is_admin"] or auth.has_company(u, "dpm")))
+
+
 def _username():
     u = _user()
     return u["username"] if u else ""
@@ -134,12 +142,15 @@ def _decorate(ev, now=None):
 # ============================================================ admin pages
 @bp.context_processor
 def _ctx():
-    return {"csrf_token": _csrf_token, "is_admin": _is_admin(), "format_wib": rules.format_wib,
+    return {"csrf_token": _csrf_token, "is_admin": _is_admin(), "can_manage": _can_manage(),
+            "format_wib": rules.format_wib,
             "to_wib_input": rules.to_wib_input, "max_mb": images.MAX_BYTES // (1024 * 1024)}
 
 
-_ADMIN_ONLY = {"invitation.create", "invitation.edit", "invitation.set_status",
-               "invitation.delete_event"}
+# Create / edit / upload / open-close: every user with Invitation (DPM) access.
+_MANAGE = {"invitation.create", "invitation.edit", "invitation.set_status"}
+# Deleting a whole event (and all its responses) is destructive: admins only.
+_ADMIN_ONLY = {"invitation.delete_event"}
 
 
 @bp.before_request
@@ -147,8 +158,10 @@ def _guard():
     # app.before_request already required a signed-in DPM user for /invitation.
     if _user() is None:
         abort(401)
+    if not _can_manage():
+        abort(403, description="Your account does not have access to Invitation.")
     if request.endpoint in _ADMIN_ONLY and not _is_admin():
-        abort(403, description="Only an admin can create, change or delete an invitation event.")
+        abort(403, description="Only an admin can delete an invitation event.")
     if request.method == "POST":
         request.max_content_length = UPLOAD_MAX
         sent = request.form.get("csrf_token") or request.headers.get("X-CSRF-Token") or ""

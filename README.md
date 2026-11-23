@@ -1013,9 +1013,10 @@ online-only). The account-type file is now sent in the chunked upload too, so th
 
 One public RSVP link per event (for example the DPM Gala Dinner). Menu: **DPM → Events → Invitation** (`/invitation`).
 
-- **Admins** create an event (name, link slug, invitation image, optional *Closes at* in WIB), edit it,
-  open/close registration and delete the event (type the slug to confirm; this deletes all responses and the image).
-- **DPM users** see the events and responses, search, filter, export **Excel (.xlsx)** / **CSV**, and delete single responses.
+- **Every user with the Invitation menu (DPM access)** creates an event (name, link slug, invitation image,
+  optional *Closes at* in WIB), edits it, replaces the image, opens/closes registration, sees the responses,
+  searches, filters, exports **Excel (.xlsx)** / **CSV** and deletes single responses.
+- **Admins only** delete a whole event (type the slug to confirm; this deletes all responses and the image).
 - **Public page** `/i/<slug>`: no login, English only. Image left, form right (image on top on a phone).
   Fields: Full name, Email (any domain), Will you attend? Only if Yes: food allergy Yes/No, and if Yes,
   *What are you allergic to?* (required, max 200 characters). If No, nothing else is asked or stored.

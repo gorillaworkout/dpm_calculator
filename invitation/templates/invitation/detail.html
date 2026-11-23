@@ -15,7 +15,7 @@
       <div style="margin-top:12px;max-width:560px">{{ copy_link(ev, 'link-main') }}</div>
       <div class="btns" style="justify-content:flex-start;margin-top:10px">
         <a class="btn btn-secondary btn-sm" href="{{ ev.link }}" target="_blank" rel="noopener">Open page ↗</a>
-        {% if is_admin %}
+        {% if can_manage %}
         <form method="post" action="{{ url_for('invitation.set_status', eid=ev.id) }}">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           {% if ev.status == 'open' %}
@@ -33,7 +33,7 @@
 <div class="pa-strip warn"><span class="ic">!</span><span class="t">Closed automatically at <b>{{ ev.closes_label }}</b>. Clear or move the closing time to reopen.</span></div>
 {% endif %}
 
-{% if is_admin %}
+{% if can_manage %}
 <details class="pa-card" {{ 'open' if open_settings }}>
   <summary>Settings</summary>
   <form class="inv-form" method="post" action="{{ url_for('invitation.edit', eid=ev.id) }}" enctype="multipart/form-data" novalidate>
