@@ -76,6 +76,7 @@ try:
         "--period", "2026-08",
         "--tanpa-extra-fees",
         "--legacy-withdrawal-rules",
+        "--keep-test-rows",
         "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",
@@ -107,6 +108,8 @@ try:
     # v1.44: DPM uses the new withdrawal rules (Completed Date, finish/success/process)
     assert "--legacy-withdrawal-rules" not in joined
     assert "--legacy-withdrawal-rules" not in " ".join(commands[0])
+    # v1.46: DPM always drops 'Test data' rows; only KVB keeps them
+    assert "--keep-test-rows" not in joined
 
     commands.clear()
     def fail_translate(command, **_kwargs):

@@ -318,11 +318,14 @@ CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # Withdrawal dari Completed Time -> Settlement Date, status finish/success). DPM tidak
 # memakainya: Withdrawal + Rebate/Wallet Withdrawal dari Completed Date, status
 # finish/success/process.
+# v1.46: --keep-test-rows = KVB tetap menghitung baris Sales Name 'Test data' / Sales
+# Dept 'Test Department'. DPM selalu membuangnya (keputusan Bayu + tim DPM).
 KVB_ARG = {
     "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows", "--legacy-withdrawal-rules"),
     "hitung_dw.py": (
         "--tanpa-extra-fees",
         "--legacy-withdrawal-rules",
+        "--keep-test-rows",
         "--settlement-columns",
         "--usd-shadow", "CNY:CHIPPAY,EP,UPAY,ZPAY",
         "--fee-currency-suffix",

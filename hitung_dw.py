@@ -123,6 +123,9 @@ CNY_BALANCE_USDT = False
 # Nama gateway di sheet data -> nama gateway di tabel fee (semua di-UPPERCASE)
 GATEWAY_ALIAS = {
     ("VND", "VN77PAY"):         "77 PAY",
+    # Dua baris USDT ini HANYA untuk lookup fee (BEP20 tidak ada di tabel fee, pakai
+    # baris USDT/Other). Sejak v1.46 gateway yang memang bernama 'Other' TIDAK lagi
+    # ikut channel BEP20 -- lihat CHANNEL_ALIAS_CUR[("USDT", "OTHER")].
     ("USDT", "USDT-BEP20"):     "OTHER",        # BEP20 tdk terdaftar; semua USDT 0%
     ("USDT", "BEP20"):          "OTHER",        # penulisan di sheet W
     ("USD", "MNTX-BINANCEPAY"): "BINANCE PAY",
@@ -172,6 +175,23 @@ STATUS_DIPAKAI = ("FINISH", "SUCCESS")
 # Deposit (dan baris non-withdrawal lain yang punya kolom Status) TETAP finish/success.
 # KVB memasang --legacy-withdrawal-rules -> kembali ke STATUS_DIPAKAI.
 STATUS_DIPAKAI_W = ("FINISH", "SUCCESS", "PROCESS")
+
+# v1.46 (DPM, 24 Nov 2026): baris TEST back office SELALU dibuang otomatis di D, W
+# dan Rebate/Wallet Withdrawal -- keputusan Bayu + tim DPM. Contoh 9 Oct: deposit
+# USDT-BEP20 1,000,000.00 dari Sales Name 'Test data' (Sales UID 100016) membuat
+# baris BEP20 1,023,835.96, seharusnya 23,835.96. Dicocokkan TEPAT (huruf besar/
+# kecil dan spasi diabaikan), bukan 'mengandung kata test', supaya sales sungguhan
+# yang namanya kebetulan memuat 'test' tidak ikut terbuang. Baris yang dibuang
+# dicantumkan di Missing Data bagian 0c. KVB memasang --keep-test-rows (perilaku lama).
+BUANG_DATA_TES = True
+TES_SALES_NAME = ("TEST DATA",)
+TES_SALES_DEPT = ("TEST DEPARTMENT",)
+
+
+def baris_data_tes(sales_name, sales_dept):
+    """True kalau baris ini data tes back office (Sales Name 'Test data' atau
+    Sales Dept 'Test Department')."""
+    return norm(sales_name) in TES_SALES_NAME or norm(sales_dept) in TES_SALES_DEPT
 
 
 def status_dipakai(kind):
@@ -1661,6 +1681,9 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
     # Kolom yang ikut menentukan tanggal baris: kolom utama + cadangannya (tanggal_util).
     kol_tanggal = {k: cols[k] for k in tu.kolom_penentu(date_col_name) if k in cols}
     c_pay = cols.get("PAY CHANNEL")
+    c_sname = cols.get("SALES NAME")
+    c_sdept = cols.get("SALES DEPT")
+    c_ref = cols.get("REFERENCE") or cols.get("TICKET")
     ring = report["tanggal"].setdefault(ws.title, tu.Ringkasan(ws.title))
 
     # tulis (atau timpa) header 4 kolom baru
@@ -1707,6 +1730,27 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         source = ws.cell(row=row, column=c_src).value if c_src else None
         kind = kind_of(ws.title, source)
         status = ws.cell(row=row, column=c_status).value if c_status else None
+
+        # v1.46: data tes back office dibuang SEBELUM apa pun (MTOATD refuse H+1,
+        # saringan bulan, status, Date Check) -- baris ini tidak pernah ada.
+        if BUANG_DATA_TES and (c_sname or c_sdept):
+            s_name = ws.cell(row=row, column=c_sname).value if c_sname else None
+            s_dept = ws.cell(row=row, column=c_sdept).value if c_sdept else None
+            if baris_data_tes(s_name, s_dept):
+                kosongkan_kolom_hitung(ws, row, out)
+                n -= 1
+                if PERIODE_FILTER is None or dalam_periode(paid):
+                    report.setdefault("data_tes", []).append({
+                        "sheet": ws.title, "row": row, "date": paid,
+                        "source": "" if source is None else str(source).strip(),
+                        "currency": norm(currency), "gateway": str(gateway or "").strip(),
+                        "tx": tx, "usd": usd_existing,
+                        "status": "" if status is None else str(status).strip(),
+                        "ref": ws.cell(row=row, column=c_ref).value if c_ref else None,
+                        "sales": " / ".join(str(v).strip() for v in (s_name, s_dept)
+                                            if v not in (None, "")),
+                    })
+                continue
         # Kolom bergeser (ekspor Rebate): kata status ('success') nongol di 'Pay Channel'.
         # Kolom 'Status' tetap yang utama; dia baru diganti kalau KOSONG tapi kata status
         # ada di tempat bergeser -- kalau tidak, baris selesai terbuang sebagai "kosong".
@@ -2138,6 +2182,18 @@ CHANNEL_ALIAS = {
 CHANNEL_ALIAS_CUR = {
     ("USD", "MNTX-BINANCE PAY"): "BINANCE PAY",     # sheet PCB menulis pakai spasi
     ("USD", "PAY247-KHR (USD)"): "PAY247-KH",       # data: 'PAY247-KH USD'
+    # v1.46 (DPM, 24 Nov 2026): gateway USDT bernama 'Other' adalah channel SENDIRI.
+    # Dulu kunci_channel() memakai GATEWAY_ALIAS -- yang memetakan 'USDT-BEP20' /
+    # 'BEP20' ke 'OTHER' khusus untuk LOOKUP FEE -- sehingga BEP20 berkunci 'OTHER',
+    # dan gateway yang memang bernama 'Other' (kunci 'OTHER') ikut masuk baris BEP20
+    # di Payment Channel Balance, dari Pay Channel mana pun (9 Oct: BEP20 W 59,303.44,
+    # seharusnya 59,198.44). Keputusan Bayu + tim DPM (opsi a): 'Other' baris sendiri.
+    # Kunci 'OTHERS' = nama kolom USDT di sheet 'Payment Channel Balance' mereka
+    # (TRC20, BEP20, ERC20, DEFI PAY, MoPay, OTHERS), jadi saldo pembuka 'OTHERS'
+    # yang ditempel ikut ke baris ini. Kunci BEP20 sengaja TETAP 'OTHER' (kunci
+    # internal lama) supaya urutan baris dan semua angka channel lain tidak berubah.
+    # Lookup fee TIDAK terpengaruh: lookup_fee() tidak memakai kunci_channel().
+    ("USDT", "OTHER"): "OTHERS",
 }
 
 # Channel yang TIDAK ikut di sheet 'Channel Balance'. 'J Wallet' itu dompet USDT,
@@ -4446,6 +4502,54 @@ def tulis_date_check_missing(ws, r, report, box, wrap):
     return r
 
 
+def tulis_data_tes_missing(ws, r, report, box, wrap):
+    """Bagian Missing Data 0c (v1.46): baris data tes yang dibuang otomatis.
+    Hanya muncul kalau ada baris yang dibuang di bulan ini (KVB --keep-test-rows:
+    tidak pernah)."""
+    daftar = report.get("data_tes") or []
+    if not BUANG_DATA_TES or not daftar:
+        return r                       # nothing excluded: section left out entirely
+    r += 2
+    ws.cell(r, 2, "0c. TEST DATA - ROWS EXCLUDED AUTOMATICALLY").font = \
+        Font(bold=True, size=12, color="4472C4")
+    r += 1
+    ws.cell(r, 2, "Rows with Sales Name 'Test data' or Sales Dept 'Test Department' are "
+                  "back-office test entries. They are left out of every tab (D&W Report, "
+                  "D&W Detail, Payment Channel Balance, MTOATD, totals) in Deposit, "
+                  "Withdrawal and Rebate / Wallet Withdrawal. Their calculated columns in "
+                  "D / W are left blank and shaded grey.").font = \
+        Font(italic=True, size=9, color="808080")
+    ws.row_dimensions[r].height = 30
+    ws.cell(r, 2).alignment = wrap
+    r += 1
+    _header(ws, r, ["Sheet / Source", "Date", "Currency / Gateway", "Transaction", "USD",
+                    "Reference / Status / Sales"], "4472C4")
+    for t in sorted(daftar, key=lambda x: (str(x["date"] or ""), x["sheet"], x["row"])):
+        r += 1
+        sumber = t["sheet"] + (f" / {t['source']}" if t["source"] else "")
+        ref = t["ref"]
+        if isinstance(ref, float) and ref.is_integer():
+            ref = int(ref)
+        rinci = "; ".join(x for x in (
+            f"Ref {ref}" if ref not in (None, "") else "",
+            f"status {t['status']}" if t["status"] else "status blank",
+            t["sales"]) if x)
+        isi = [sumber, t["date"], f"{t['currency']} / {t['gateway'] or '(blank)'}",
+               t["tx"], t["usd"], rinci]
+        for c, v in enumerate(isi, start=2):
+            cell = ws.cell(r, c, v)
+            cell.border = box
+            cell.alignment = wrap
+            if c == 3 and v:
+                cell.number_format = "yyyy-mm-dd"
+            if c in (5, 6) and isinstance(v, (int, float)):
+                cell.number_format = FMT_MONEY
+    r += 1
+    ws.cell(r, 2, f"TOTAL: {len(daftar):,} test rows excluded in this month.").font = \
+        Font(bold=True)
+    return r
+
+
 def write_missing_sheet(wb, report):
     """Sheet 'Missing Data': rincian tanggal kurs & rate fee yang belum ada."""
     from openpyxl.styles import Alignment, Border, Side
@@ -4543,6 +4647,7 @@ def write_missing_sheet(wb, report):
             ws.row_dimensions[r].height = 30
 
     r = tulis_date_check_missing(ws, r, report, box, wrap)
+    r = tulis_data_tes_missing(ws, r, report, box, wrap)
 
     # ---- 1. tanggal kurs yang tidak ada di XERO
     r += 2
@@ -5307,6 +5412,21 @@ def write_legend_sheet(wb, date_cols_used, report=None):
                       "Date Check).").font = Font(size=10, color="008000")
         ws.row_dimensions[r].height = 70
         r += 1
+    if BUANG_DATA_TES:
+        ws.cell(r, 2, "v1.46 (24 Nov 2026), decision of the DPM team: back-office test entries "
+                      "(Sales Name 'Test data' or Sales Dept 'Test Department') are always "
+                      "excluded from Deposit, Withdrawal and Rebate / Wallet Withdrawal, in "
+                      "every tab. Each excluded row is listed in Missing Data, section "
+                      "0c.").font = Font(size=10, color="008000")
+        ws.row_dimensions[r].height = 30
+        r += 1
+    ws.cell(r, 2, "v1.46: on Payment Channel Balance, USDT rows whose Payment Gateway is "
+                  "'Other' have their own channel row 'Other' (matched to the 'OTHERS' "
+                  "opening balance). They are no longer added to the BEP20 row. Their fee "
+                  "still comes from the USDT / Other line of the fee table.").font = \
+        Font(size=10, color="008000")
+    ws.row_dimensions[r].height = 30
+    r += 1
     ws.cell(r, 2, "CONFIRMED by the DPM Malaysia team, 3 September 2026, on the treatment of "
                   "a blank Status cell: \"Blank status is same as Refuse, hence do not "
                   "include in any calculations.\" That is exactly what this report does. "
@@ -5649,6 +5769,10 @@ def main():
                          "Completed Time -> Settlement Date (Completed Date diabaikan, v1.29) "
                          "dan status withdrawal hanya finish/success. Hanya dipasang untuk KVB; "
                          "DPM memakai Completed Date + finish/success/process.")
+    ap.add_argument("--keep-test-rows", action="store_true",
+                    help="Jangan buang baris Sales Name 'Test data' / Sales Dept 'Test "
+                         "Department' (perilaku sebelum v1.46). Hanya dipasang untuk KVB; "
+                         "DPM selalu membuangnya.")
     ap.add_argument("--cny-balance-usdt", action="store_true",
                     help="Payment Channel Balance: kolom CNY Rate | Balance (USDT) | "
                          "Rate source di baris CNY, rate dari sheet 'CNY RATE' "
@@ -5656,7 +5780,9 @@ def main():
     args = ap.parse_args()
 
     global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
-    global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT, STATUS_DIPAKAI_W
+    global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT, STATUS_DIPAKAI_W, BUANG_DATA_TES
+    if args.keep_test_rows:
+        BUANG_DATA_TES = False
     if args.legacy_withdrawal_rules:
         STATUS_DIPAKAI_W = STATUS_DIPAKAI
         tu.REBATE_PAKAI_COMPLETED_DATE = False
@@ -5819,6 +5945,7 @@ def main():
               "dibuang": Counter(), "dibuang_usd": defaultdict(float),
               "luar_periode": Counter(), "luar_periode_usd": defaultdict(float),
               "refuse_mtoatd": [], "tanggal": {}, "status_geser_dipakai": 0,
+              "data_tes": [],
               "date_check_isi": None,
               "usd_shadow_gap": [], "usd_shadow_ft": [],
               "rate_tinggi": [], "cny_check": None,
@@ -5995,6 +6122,13 @@ def main():
             usd = report["luar_periode_usd"].get((sh, bln), 0.0)
             ket = f"  USD {usd:>12,.2f}" if usd else ""
             print(f"   sheet {sh:20} {bln:10} {jml:>7,} baris{ket}")
+
+    if report.get("data_tes"):
+        print(f"\n!  DATA TES: {len(report['data_tes']):,} baris Sales Name 'Test data' / "
+              f"Sales Dept 'Test Department' dibuang otomatis (Missing Data bagian 0c)")
+        for t in report["data_tes"][:15]:
+            print(f"   sheet {t['sheet']:3} {str(t['date'] or ''):10} {t['currency']:6} "
+                  f"{t['gateway'][:18]:18} {t['tx'] or 0:>14,.2f}  status {t['status'] or '-'}")
 
     if report.get("dibuang"):
         tot = sum(report["dibuang"].values())
