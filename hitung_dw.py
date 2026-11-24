@@ -182,7 +182,8 @@ STATUS_DIPAKAI_W = ("FINISH", "SUCCESS", "PROCESS")
 # baris BEP20 1,023,835.96, seharusnya 23,835.96. Dicocokkan TEPAT (huruf besar/
 # kecil dan spasi diabaikan), bukan 'mengandung kata test', supaya sales sungguhan
 # yang namanya kebetulan memuat 'test' tidak ikut terbuang. Baris yang dibuang
-# dicantumkan di Missing Data bagian 0c. KVB memasang --keep-test-rows (perilaku lama).
+# dicantumkan di Missing Data bagian 0c. Berlaku juga untuk KVB (Bayu, 24 Nov 2026).
+# --keep-test-rows (manual saja) = perilaku lama. Tanpa kolom Sales Name/Dept: tidak ada efek.
 BUANG_DATA_TES = True
 TES_SALES_NAME = ("TEST DATA",)
 TES_SALES_DEPT = ("TEST DEPARTMENT",)
@@ -4504,7 +4505,7 @@ def tulis_date_check_missing(ws, r, report, box, wrap):
 
 def tulis_data_tes_missing(ws, r, report, box, wrap):
     """Bagian Missing Data 0c (v1.46): baris data tes yang dibuang otomatis.
-    Hanya muncul kalau ada baris yang dibuang di bulan ini (KVB --keep-test-rows:
+    Hanya muncul kalau ada baris yang dibuang di bulan ini (--keep-test-rows:
     tidak pernah)."""
     daftar = report.get("data_tes") or []
     if not BUANG_DATA_TES or not daftar:
@@ -5413,7 +5414,7 @@ def write_legend_sheet(wb, date_cols_used, report=None):
         ws.row_dimensions[r].height = 70
         r += 1
     if BUANG_DATA_TES:
-        ws.cell(r, 2, "v1.46 (24 Nov 2026), decision of the DPM team: back-office test entries "
+        ws.cell(r, 2, "v1.46 (24 Nov 2026): back-office test entries "
                       "(Sales Name 'Test data' or Sales Dept 'Test Department') are always "
                       "excluded from Deposit, Withdrawal and Rebate / Wallet Withdrawal, in "
                       "every tab. Each excluded row is listed in Missing Data, section "
@@ -5771,8 +5772,8 @@ def main():
                          "DPM memakai Completed Date + finish/success/process.")
     ap.add_argument("--keep-test-rows", action="store_true",
                     help="Jangan buang baris Sales Name 'Test data' / Sales Dept 'Test "
-                         "Department' (perilaku sebelum v1.46). Hanya dipasang untuk KVB; "
-                         "DPM selalu membuangnya.")
+                         "Department' (perilaku sebelum v1.46). Hanya untuk dijalankan manual; "
+                         "web app (DPM dan KVB) selalu membuangnya.")
     ap.add_argument("--cny-balance-usdt", action="store_true",
                     help="Payment Channel Balance: kolom CNY Rate | Balance (USDT) | "
                          "Rate source di baris CNY, rate dari sheet 'CNY RATE' "

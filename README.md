@@ -394,7 +394,9 @@ Keputusan Bayu + tim DPM (24 Nov 2026), dari selisih Oktober 2026.
   D&W Report, D&W Detail, Payment Channel Balance, MTOATD maupun total. Kolom hitung barisnya di
   D/W dikosongkan (abu-abu). Daftar barisnya (dalam bulan laporan) ada di **Missing Data bagian
   0c** dan di log. 9 Oct: deposit 1,000,000.00 dari Test data dibuang → BEP20 D 23,835.96.
-- **KVB** tetap menghitung baris tes: `app.py` memasang `--keep-test-rows` di `hitung_dw.py`.
+- **KVB juga** membuang baris tes (keputusan Bayu, 24 Nov 2026). File KVB tanpa kolom
+  `Sales Name`/`Sales Dept` tidak terpengaruh dan tidak error. `--keep-test-rows` (perilaku lama)
+  hanya untuk dijalankan manual; `app.py` tidak memasangnya.
 - Test: `test_dpm_usdt_other_test_data_v146.py` (data sintetis).
 
 #### DPM v1.44 — Withdrawal + Rebate/Wallet Withdrawal pakai `Completed Date`; status finish/success/process

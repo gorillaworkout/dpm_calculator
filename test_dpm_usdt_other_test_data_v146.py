@@ -5,7 +5,7 @@
    (USDT-BEP20 / BEP20 -> OTHER) also built the channel key.
 2. Back-office test rows (Sales Name 'Test data' or Sales Dept 'Test Department') are
    always excluded from Deposit, Withdrawal and Rebate / Wallet Withdrawal, and listed
-   in Missing Data section 0c. KVB keeps them through --keep-test-rows (app.py KVB_ARG).
+   in Missing Data section 0c. KVB too (Bayu, 24 Nov 2026); --keep-test-rows is manual only.
 
 Synthetic data only (no client data).    python3 test_dpm_usdt_other_test_data_v146.py
 """
@@ -66,18 +66,22 @@ assert hd.BUANG_DATA_TES is True                              # DPM default
 # ------------------------------------------------------------------ app wiring
 kvb_arg = app_src[app_src.index("KVB_ARG = {"):]
 kvb_arg = kvb_arg[:kvb_arg.index("\n}\n")]
-assert kvb_arg.count('"--keep-test-rows"') == 1, kvb_arg        # hitung_dw.py, KVB only
+assert '"--keep-test-rows"' not in kvb_arg, kvb_arg           # KVB drops test rows too
+import ast  # noqa: E402
+KVB_HITUNG = ast.literal_eval(kvb_arg[kvb_arg.index("{"):] + "\n}")["hitung_dw.py"]
+assert "--legacy-withdrawal-rules" in KVB_HITUNG, KVB_HITUNG
 
 # ------------------------------------------------------------------ end to end
 HDR_D = ["Source Name", "Sales UID", "Sales Name", "Sales Dept", "Currency", "Paid Date",
          "Transaction", "Payment Gateway", "USD", "Rate", "Ticket"]
 HDR_W = ["Source Name", "Sales UID", "Sales Name", "Sales Dept", "Currency", "Payment Gateway",
-         "Reference", "USD", "Rate", "Transaction", "Pay Channel", "Completed Date", "Status"]
+         "Reference", "USD", "Rate", "Transaction", "Pay Channel", "Completed Date", "Status",
+         "Settlement Date"]
 REAL = (1, "Real Sales", "Real Dept")
 TEST = (16, "Test data", "Test Department")
 
 
-def buat(tmp):
+def buat(tmp, sales=True):
     wb = Workbook()
     d = wb.active
     d.title = "D"
@@ -99,7 +103,8 @@ def buat(tmp):
         ("Wallet Withdrawal", *REAL, "USDT", "USDT-TRC20", 1007, 12, 1, 12, "USDT-TRC20", "success"),
     ]
     for (src, uid, nama, dept, cur, gw, ref, usd, rate, tx, pay, st) in rows:
-        w.append([src, uid, nama, dept, cur, gw, ref, usd, rate, tx, pay, DT(2026, 10, 9), st])
+        w.append([src, uid, nama, dept, cur, gw, ref, usd, rate, tx, pay, DT(2026, 10, 9), st,
+                  DT(2026, 10, 9)])          # Settlement Date: KVB's legacy rebate date
     x = wb.create_sheet("Xero")
     x.append(["Date", "USDT", "USD"])
     x.append([DT(2026, 10, 9), 1, 1])
@@ -110,7 +115,12 @@ def buat(tmp):
     fee.append(["USDT", "Other", 0.0, 0.0])
     fee.append(["USDT", "USDT-TRC20", 0.0, 0.0])
     fee.append(["USD", "PAY247-KH", 0.01, 0.0])
-    src = tmp / "dpm.xlsx"
+    if not sales:                       # KVB-style input without Sales Name / Sales Dept
+        for ws in (d, w):
+            for kol in sorted((i for i, c in enumerate(ws[1], 1)
+                               if c.value in ("Sales Name", "Sales Dept")), reverse=True):
+                ws.delete_cols(kol)
+    src = tmp / ("dpm.xlsx" if sales else "nosales.xlsx")
     wb.save(src)
     opening = tmp / "open.txt"
     opening.write_text("BEP20\tUSDT\t1000\nOTHERS\tUSDT\t500\n", encoding="utf-8")
@@ -118,7 +128,7 @@ def buat(tmp):
 
 
 def jalan(tmp, src, opening, *extra):
-    dst = tmp / ("out" + "".join(e.strip("-")[:4] for e in extra) + ".xlsx")
+    dst = tmp / ("out" + src.stem + "".join(e.strip("-")[:4] for e in extra) + ".xlsx")
     proc = subprocess.run([PY, str(HERE / "hitung_dw.py"), str(src), "-o", str(dst),
                            "--period", "2026-10", "--channel-opening", str(opening), *extra],
                           cwd=HERE, capture_output=True, text=True)
@@ -206,8 +216,21 @@ with tempfile.TemporaryDirectory() as t:
     assert "DATA TES: 4 baris" in log, log[-2000:]
     book.close()
 
-    # ---------------- KVB path: --keep-test-rows keeps the old behaviour for test rows
-    book, log = jalan(tmp, src, opening, "--keep-test-rows")
+    # ---------------- KVB path (app.py KVB_ARG flags): test rows are dropped too
+    book, log = jalan(tmp, src, opening, *KVB_HITUNG)
+    p = pcb(book)
+    usdt = {g.upper(): v for (c, g), v in p.items() if c == "USDT"}
+    assert abs(usdt["BEP20"]["Deposit"] - 23835.96) < 0.005, usdt["BEP20"]
+    assert abs(usdt["BEP20"]["Withdrawal"] - 59093.44) < 0.005, usdt["BEP20"]
+    assert abs(usdt["OTHER"]["Withdrawal"] - 105) < 0.005, usdt["OTHER"]
+    miss = teks(book["Missing Data"])
+    assert "TOTAL: 4 test rows excluded in this month." in miss, miss
+    assert "Ref 1005" in miss and "Real Name / Test Department" in miss, miss
+    assert "DATA TES: 4 baris" in log, log[-2000:]
+    book.close()
+
+    # ---------------- manual --keep-test-rows: old behaviour (test rows counted)
+    book, log = jalan(tmp, src, opening, *KVB_HITUNG, "--keep-test-rows")
     p = pcb(book)
     usdt = {g.upper(): v for (c, g), v in p.items() if c == "USDT"}
     assert abs(usdt["BEP20"]["Deposit"] - 1023835.96) < 0.005, usdt["BEP20"]
@@ -217,5 +240,25 @@ with tempfile.TemporaryDirectory() as t:
     assert "0c. TEST DATA" not in miss, miss
     assert "DATA TES" not in log
     book.close()
+
+    # ---------------- input WITHOUT Sales Name / Sales Dept: no crash, nothing dropped,
+    # every sheet identical to the --keep-test-rows run (the filter has no effect)
+    src2, _ = buat(tmp, sales=False)
+    b1, log1 = jalan(tmp, src2, opening, *KVB_HITUNG)
+    b2, _log2 = jalan(tmp, src2, opening, *KVB_HITUNG, "--keep-test-rows")
+    assert "DATA TES" not in log1
+    assert b1.sheetnames == b2.sheetnames
+    for nama in b1.sheetnames:
+        if nama == "Legend":            # only the v1.46 test-data note differs there
+            continue
+        r1 = [r for r in b1[nama].iter_rows(values_only=True)
+              if not any(isinstance(v, str) and v.startswith("GENERATED ") for v in r)]
+        r2 = [r for r in b2[nama].iter_rows(values_only=True)
+              if not any(isinstance(v, str) and v.startswith("GENERATED ") for v in r)]
+        assert r1 == r2, nama
+    usdt = {g.upper(): v for (c, g), v in pcb(b1).items() if c == "USDT"}
+    assert abs(usdt["BEP20"]["Deposit"] - 1023835.96) < 0.005, usdt["BEP20"]
+    b1.close()
+    b2.close()
 
 print("ok test_dpm_usdt_other_test_data_v146")
