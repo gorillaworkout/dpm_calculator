@@ -375,6 +375,30 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
+#### DPM v1.46 — USDT `Other` jadi channel sendiri; data tes selalu dibuang
+Keputusan Bayu + tim DPM (24 Nov 2026), dari selisih Oktober 2026.
+
+- **USDT `Other` (opsi a)**: di *Payment Channel Balance*, baris USDT dengan `Payment Gateway`
+  = `Other` sekarang punya baris channel sendiri (`Other`/`OTHER`), tidak lagi masuk baris
+  `BEP20`. Penyebab lama: `GATEWAY_ALIAS` (USDT-BEP20 / BEP20 → `OTHER`) hanya untuk lookup fee,
+  tapi `kunci_channel()` memakainya juga, sehingga BEP20 berkunci `OTHER` dan gateway `Other`
+  dari Pay Channel mana pun ikut BEP20 (9 Oct: BEP20 W 59,303.44 → seharusnya 59,198.44).
+  Perbaikan: `CHANNEL_ALIAS_CUR[("USDT", "OTHER")] = "OTHERS"` — kunci `OTHERS` = kolom USDT
+  `OTHERS` di sheet PCB mereka, jadi saldo pembuka `OTHERS` yang ditempel ikut ke baris ini.
+  Kunci internal BEP20 sengaja tetap `OTHER` supaya urutan baris dan angka channel lain tidak
+  berubah. Lookup fee tidak berubah (`Other` tetap baris fee USDT/Other). *D&W Report* sudah
+  memisahkan `OTHER` sejak dulu. Berlaku untuk DPM dan KVB (kode channel sama).
+- **Data tes**: baris `Sales Name` = `Test data` **atau** `Sales Dept` = `Test Department`
+  (cocok tepat; huruf besar/kecil dan spasi diabaikan) dibuang otomatis dari Deposit,
+  Withdrawal dan Rebate/Wallet Withdrawal — sebelum saringan bulan/status, jadi tidak masuk
+  D&W Report, D&W Detail, Payment Channel Balance, MTOATD maupun total. Kolom hitung barisnya di
+  D/W dikosongkan (abu-abu). Daftar barisnya (dalam bulan laporan) ada di **Missing Data bagian
+  0c** dan di log. 9 Oct: deposit 1,000,000.00 dari Test data dibuang → BEP20 D 23,835.96.
+- **KVB juga** membuang baris tes (keputusan Bayu, 24 Nov 2026). File KVB tanpa kolom
+  `Sales Name`/`Sales Dept` tidak terpengaruh dan tidak error. `--keep-test-rows` (perilaku lama)
+  hanya untuk dijalankan manual; `app.py` tidak memasangnya.
+- Test: `test_dpm_usdt_other_test_data_v146.py` (data sintetis).
+
 #### DPM v1.44 — Withdrawal + Rebate/Wallet Withdrawal pakai `Completed Date`; status finish/success/process
 Keputusan tim DPM (23 Nov 2026): *"both withdrawal & rebate withdrawal take the data based on
 completed Date (status: finish, success, process)"*. Di ekspor Oktober 2026 `Completed Time` baris

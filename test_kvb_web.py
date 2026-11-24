@@ -107,6 +107,9 @@ try:
     # v1.44: DPM uses the new withdrawal rules (Completed Date, finish/success/process)
     assert "--legacy-withdrawal-rules" not in joined
     assert "--legacy-withdrawal-rules" not in " ".join(commands[0])
+    # v1.46: DPM and KVB both drop 'Test data' rows
+    assert "--keep-test-rows" not in joined
+    assert all("--keep-test-rows" not in c for c in commands)
 
     commands.clear()
     def fail_translate(command, **_kwargs):
