@@ -375,6 +375,30 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
+#### v1.47 — Rate fee bisa berubah per tanggal (DPM + KVB)
+Permintaan Bayu (24 Nov 2026): rate yang berubah di tengah bulan, mis. sel Deposit
+BeckPay-VND `1.6%; >2026-11-22 1.2%`. Sebelumnya teks itu ditolak sebagai rate tidak terbaca
+(Handling Fee kosong/merah).
+
+- Sel Deposit / Withdrawal sheet fee (`D&W FEE` DPM, `Handling Fee` KVB) boleh berisi periode
+  tanggal. Detail sintaks: bagian **Rate per tanggal (v1.47)** di bawah.
+- Periode dipilih dengan **tanggal baris di laporan** (`tentukan_tanggal`: Paid Date deposit,
+  Completed Date withdrawal / Rebate / Wallet Withdrawal DPM) — sama dengan tanggal di
+  D&W Report dan D&W Detail.
+- Berlaku untuk deposit, withdrawal dan rebate (semua lewat `lookup_fee` + `process_sheet`), DPM
+  dan KVB. Tidak ada kolom laporan atau rumus yang berubah.
+- Sel tanpa penanda tanggal dibaca **persis seperti v1.46** (dibandingkan langsung dengan parser
+  `6bbc4ad` di `test_dated_fee_v147.py`). File Oktober asli dijalankan v1.46 vs v1.47: semua
+  sheet sama, kecuali satu kalimat contoh sintaks di Missing Data 2c.
+- Teks panduan diperbarui: komentar header Handling Fee (Legend), Missing Data 2c, halaman
+  tool (`app.py`, `templates/tool.html`), Guide `Template D&W` (`buat_template.py`), Guide +
+  kotak *How to fill rates* `Template KVB Plus.xlsx` (dibuat ulang dengan
+  `buat_template_kvb.py`). `gabung_fee.py` menyalin sel bertanggal sebagai teks.
+- Snapshot `fixtures/dpm_unchanged_baseline.json` **tidak** berubah (teks Legend yang berubah
+  adalah komentar sel, bukan nilai sel).
+- Test: `test_dated_fee_v147.py` (data sintetis); `test_kvb_template.py` menyesuaikan posisi
+  catatan kotak rate (I10 → I11).
+
 #### DPM v1.46 — USDT `Other` jadi channel sendiri; data tes selalu dibuang
 Keputusan Bayu + tim DPM (24 Nov 2026), dari selisih Oktober 2026.
 
@@ -938,6 +962,38 @@ boleh berisi rate normal plus tier, dipisah `;`:
   diam-diam memakai 3.5%: Handling Fee transaksi itu dikosongkan (merah), dengan
   catatan di Data Status dan Missing Data 2c.
 - Sel tanpa `>` / `≥` dibaca persis seperti v1.37 (dicek `test_tiered_fee.py`).
+
+## Rate per tanggal (v1.47)
+
+Rate yang berubah di tengah bulan ditulis di sel yang sama. Tanggal selalu `YYYY-MM-DD`.
+
+| Isi sel | Arti |
+|---|---|
+| `1.6%; >2026-11-22 1.2%` | s/d 22 Nov 1.6%; **mulai 23 Nov** 1.2% (`>` = sesudah tanggal itu) |
+| `1.6%; >=2026-11-23 1.2%` | sama; `>=`, `≥` atau `from 2026-11-23` = mulai tanggal itu |
+| `1.5%+50; >2026-11-10 1%,min 5; >=2026-11-21 +8` | periode sebanyak apa pun; tiap periode boleh pakai format lama |
+| `3.5%; >5000 3.8% \| >=2026-11-23 3%; >5000 3.2%` | periode dengan tier sendiri: `\|` memisah periode, `;` memisah tier |
+
+- Rate sebelum tanggal pertama wajib ditulis paling depan. Tier yang ditulis **setelah** sebuah
+  tanggal milik periode tanggal itu (`3.5%; >5000 3.8%; >=2026-11-23 3%; >5k 3.2%` sama artinya
+  dengan contoh `|` di atas; `|` lebih jelas dibaca).
+- Periode dipilih dengan tanggal baris di laporan (Paid Date deposit, Completed Date withdrawal
+  / rebate DPM, tanggal fallback `tentukan_tanggal` kalau kolom utama kosong).
+- Data Status per baris: `OK; FEE: 1.2% (rate from 2026-11-23)`, atau dengan tier
+  `OK; FEE: 3.2% (rate from 2026-11-23; tier >5,000 applied to the whole amount)`.
+- Kolom Note sheet fee hasil: `Deposit rate by date: until 2026-11-22: 1.6% | from 2026-11-23:
+  1.2% (date = the row's report date)`. Sel rate ditulis ulang sebagai teks aslinya, jadi file
+  hasil bisa diupload lagi tanpa kehilangan periode.
+- Kolom extra `Deposit Fixed` / `Deposit Min` berlaku juga untuk periode (dan tier-nya) yang
+  tidak menulis fixed/min sendiri.
+- Salah tulis → Handling Fee kosong (merah), catatan di Data Status, Note dan Missing Data 2c:
+  tanggal bukan `YYYY-MM-DD` (`22/11/2026`), tanggal tidak ada (`2026-02-30`), dua periode mulai
+  di hari yang sama (`>2026-11-22` dan `>=2026-11-23`), urutan tanggal mundur/tumpang tindih,
+  tanggal tanpa rate, atau tanggal tanpa `;`/`|` di depannya.
+- Baris tanpa tanggal tidak bisa memilih periode → Handling Fee kosong + catatan (hanya terjadi
+  tanpa `--period`; dengan `--period` baris tanpa tanggal sudah dibuang lebih dulu).
+- Penanda tanggal hanya dikenali kalau angkanya memakai `-` atau `/`; nominal tier (`>5000`,
+  `>5.000`, `>2026`) tetap dibaca sebagai nominal.
 
 ## Rate yang sudah masuk lewat EXTRA_FEES
 

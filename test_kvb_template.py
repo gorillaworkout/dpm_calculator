@@ -62,7 +62,8 @@ assert hf["I2"].value == "Write" and hf["J2"].value == "Meaning"
 assert hf["I4"].value == "+8" and "flat" in str(hf["J4"].value).lower()
 assert "3.5%; >5000 3.8%" in {hf.cell(r, 9).value for r in range(3, 12)}
 assert "WHOLE amount" in str(hf["J7"].value)
-assert "Remark is not calculated" in str(hf["I10"].value)
+assert hf["I10"].value == "1.6%; >2026-11-22 1.2%"           # v1.47: rate by date
+assert "Remark is not calculated" in str(hf["I11"].value)
 # Deposit/Withdrawal comments stay short (not the old giant paragraph).
 assert hf["C1"].comment and len(hf["C1"].comment.text) < 200
 # Same header names as the KVB Plus export (siapkan_kvb.py translates them).

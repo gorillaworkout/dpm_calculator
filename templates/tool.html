@@ -141,6 +141,9 @@
       Tiered: <code>3.5%; &gt;5000 3.8%</code> is 3.5% normally and 3.8% of the whole
       amount above 5,000 (<code>&gt;=5000</code> includes 5,000). Put tier rules in the
       rate cell, not only in Remark.
+      Rate change by date: <code>1.6%; &gt;2026-11-22 1.2%</code> is 1.6% up to 22 Nov and
+      1.2% from 23 Nov (dates as YYYY-MM-DD). With tiers, separate the date periods with
+      <code>|</code>: <code>3.5%; &gt;5000 3.8% | &gt;=2026-11-23 3%; &gt;5000 3.2%</code>.
       {% endif %}</p>
     {% endif %}
 

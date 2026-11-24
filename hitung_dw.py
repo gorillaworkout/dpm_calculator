@@ -618,7 +618,9 @@ LEGENDA = {
         "matched on Currency + Payment Gateway.\n"
         "Deposit rows use the Deposit rate, withdrawal rows the Withdrawal rate.\n"
         "Tiered rate '3.5%; >5000 3.8%': 3.8% of the WHOLE amount when the\n"
-        "transaction is above 5,000 (Data Status shows the rate used).\n\n"
+        "transaction is above 5,000 (Data Status shows the rate used).\n"
+        "Rate by date '1.6%; >2026-11-22 1.2%': 1.6% up to 22 Nov, 1.2% from\n"
+        "23 Nov, by the row's report date (Data Status shows the period).\n\n"
         "RED CELL = no fee rate exists yet for this Currency + Payment Gateway.\n"
         "The cell is deliberately left EMPTY (not 0) so the amount is never\n"
         "silently understated.\n"
@@ -647,7 +649,8 @@ LEGENDA = {
         "Per-row data quality note.\n\n"
         "OK   = fee rate and exchange rate both found exactly.\n"
         "FEE: = no fee rate for this Currency + Payment Gateway.\n"
-        "OK; FEE: = tiered rate: the rate/tier used for this row (info only).\n"
+        "OK; FEE: = tiered or dated rate: the rate/tier/period used for this\n"
+        "       row (info only).\n"
         "FX:  = the transaction date is missing from the XERO sheet, or no rate\n"
         "       exists for that currency at all.\n"
         "DATA:= the source export itself is incomplete (empty gateway, amount\n"
@@ -1070,6 +1073,15 @@ def cari_sheet(wb, kandidat):
 
 _ADA_TIER = re.compile(r"[>≥]")
 _TIER = re.compile(r"(>=|\u2265|>)\s*(\d[\d.,]*)\s*([kK])?\s+(\S.*)")
+# v1.47: rate per periode tanggal. Penanda tanggal = '>', '>=', '≥' atau 'from'
+# diikuti sesuatu yang MIRIP tanggal (angka dipisah '-' atau '/'). Nominal tier
+# tidak pernah memakai '-' / '/', jadi '>5000' / '>5.000' tidak ikut tertangkap.
+_ADA_TGL = re.compile(r"(?:>=|\u2265|>|\bfrom\b)\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", re.I)
+_KEPALA_TGL = re.compile(
+    r"(>=|\u2265|>|from)\s*(\d{1,4}[-/]\d{1,2}[-/]\d{1,4})(?:\s+(\S.*))?", re.I)
+_ISO_TGL = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+_CONTOH_TGL = "e.g. 1.6%; >2026-11-22 1.2%"
+RATE_TANPA_TGL = "the rate changes by date but this row has no date"
 
 
 def _teks_batas(b):
@@ -1099,10 +1111,128 @@ def baca_rate(v):
     menghitung; process_sheet mengosongkan Handling Fee-nya (merah) + peringatan.
     Batas dibaca dengan konvensi ribuan: 5,000 = 5.000 = 5000.
     Teks tanpa '>N' / '>=N' dibaca persis seperti sebelum v1.38 (juga kalau ada ';').
+
+    v1.47 -- rate BERUBAH PER TANGGAL (tanggal = tanggal baris di laporan):
+        1.6%; >2026-11-22 1.2%     -> s/d 22 Nov 1,6%; mulai 23 Nov 1,2%
+        1.6%; >=2026-11-23 1.2%    -> sama ('>=' / '≥' / 'from' = mulai tanggal itu)
+        3.5%; >=5000 3.8% | >=2026-11-23 3%; >=5000 3.2%
+                                   -> tiap periode boleh punya tier sendiri;
+                                      '|' memisah periode, ';' memisah tier
+    Tier yang ditulis SETELAH sebuah tanggal milik periode tanggal itu.
+    Hasilnya dict periode pertama + 'periode' [{'mulai','label',pct,fixed,min,[tiers]}].
+    Teks tanpa penanda tanggal dibaca persis seperti v1.46.
     """
+    if isinstance(v, str) and _ADA_TGL.search(v):
+        return _baca_rate_tanggal(v)
     if isinstance(v, str) and _ADA_TIER.search(v):
         return _baca_rate_tier(v)
     return _baca_rate_dasar(v)
+
+
+def _baca_rate_tanggal(v):
+    """Rate dengan periode tanggal (v1.47). Lihat baca_rate."""
+    teks = " ".join(str(v).split())
+    potong = re.split(r"\s*([;|])\s*", teks)
+    pasangan = [(None, potong[0])] + list(zip(potong[1::2], potong[2::2]))
+    while len(pasangan) > 1 and not pasangan[-1][1]:
+        pasangan.pop()                      # ';' / '|' di ujung tidak apa-apa
+    periode = []                            # [(kepala, [bagian rate])]
+    for sep, bag in pasangan:
+        if not bag:
+            return _rate_salah(teks, f"empty part between separators - {_CONTOH_TGL}")
+        m = _KEPALA_TGL.fullmatch(bag)
+        if m:
+            if sep is None:
+                return _rate_salah(teks, "the rate used before the first date must come "
+                                         f"first, {_CONTOH_TGL}")
+            periode.append((m, []))
+            if m.group(3):
+                periode[-1][1].append(m.group(3))
+            continue
+        if _ADA_TGL.search(bag):
+            return _rate_salah(teks, f"cannot read '{bag}' - start each date period with "
+                                     f"';' or '|' and write >=YYYY-MM-DD then the rate, "
+                                     f"{_CONTOH_TGL}")
+        if sep == "|":
+            return _rate_salah(teks, f"after '|' a new date period must start, e.g. "
+                                     f"3.5% | >=2026-11-23 3%")
+        if not periode:
+            periode.append((None, []))
+        periode[-1][1].append(bag)
+
+    hasil, mulai_lalu = [], None
+    for kepala, bagian in periode:
+        label = "the first period"
+        mulai = None
+        if kepala is not None:
+            op, tgl_teks = kepala.group(1).lower(), kepala.group(2)
+            op = ">=" if op in (">=", "\u2265", "from") else ">"
+            label = f"{op}{tgl_teks}"
+            mi = _ISO_TGL.fullmatch(tgl_teks)
+            if not mi:
+                return _rate_salah(teks, f"cannot read date '{tgl_teks}' - write dates as "
+                                         f"YYYY-MM-DD, {_CONTOH_TGL}")
+            try:
+                tgl = datetime.date(int(mi.group(1)), int(mi.group(2)), int(mi.group(3)))
+            except ValueError:
+                return _rate_salah(teks, f"'{tgl_teks}' is not a real date - write dates as "
+                                         f"YYYY-MM-DD, {_CONTOH_TGL}")
+            mulai = tgl + datetime.timedelta(days=1) if op == ">" else tgl
+            label = f"{op}{tgl:%Y-%m-%d}"
+            if mulai_lalu is not None and mulai == mulai_lalu:
+                return _rate_salah(teks, f"two date periods both start on {mulai:%Y-%m-%d} "
+                                         f"(>{mulai - datetime.timedelta(days=1):%Y-%m-%d} "
+                                         f"and >={mulai:%Y-%m-%d} are the same day) - "
+                                         f"keep only one")
+            if mulai_lalu is not None and mulai < mulai_lalu:
+                return _rate_salah(teks, f"date periods overlap or are out of order - "
+                                         f"{label} starts before the previous period; "
+                                         f"list them from the oldest date to the newest")
+            mulai_lalu = mulai
+        if not bagian:
+            return _rate_salah(teks, f"no rate after {label}, e.g. >=2026-11-23 1.2%")
+        isi = "; ".join(bagian)
+        komp = _baca_rate_tier(isi) if _ADA_TIER.search(isi) else _baca_rate_dasar(isi)
+        if komp is None:
+            return _rate_salah(teks, f"cannot read the rate '{isi}' of {label}")
+        if komp.get("error"):
+            return _rate_salah(teks, f"{label}: {komp['error']}")
+        komp = {k: komp[k] for k in ("pct", "fixed", "min", "tiers") if k in komp}
+        hasil.append({"mulai": mulai, "label": label, **komp})
+    if len(hasil) < 2:                       # tidak mungkin: kepala tanggal wajib ada
+        return _rate_salah(teks, f"no date period found, {_CONTOH_TGL}")
+    dasar = {k: v for k, v in hasil[0].items() if k not in ("mulai", "label")}
+    return {**dasar, "periode": hasil[1:], "teks": teks}
+
+
+def _rentang_periode(komp, i):
+    """Teks rentang tanggal periode ke-i (0 = sebelum tanggal pertama)."""
+    per = komp["periode"]
+    satu_hari = datetime.timedelta(days=1)
+    if i == 0:
+        return f"until {per[0]['mulai'] - satu_hari:%Y-%m-%d}"
+    mulai = per[i - 1]["mulai"]
+    if i < len(per):
+        return f"{mulai:%Y-%m-%d} to {per[i]['mulai'] - satu_hari:%Y-%m-%d}"
+    return f"from {mulai:%Y-%m-%d}"
+
+
+def pilih_periode(komp, tanggal):
+    """Komponen rate untuk tanggal baris `tanggal` (v1.47). -> (komp_periode, rentang).
+    Rentang None kalau rate-nya tidak berubah per tanggal. `tanggal` WAJIB tanggal
+    yang sama dengan tanggal baris di laporan (hasil tentukan_tanggal)."""
+    per = (komp or {}).get("periode")
+    if not per:
+        return komp, None
+    if isinstance(tanggal, datetime.datetime):
+        tanggal = tanggal.date()
+    i = 0
+    for j, p in enumerate(per, start=1):  # urut naik -> yang terakhir lewat berlaku
+        if tanggal >= p["mulai"]:
+            i = j
+    sumber = komp if i == 0 else per[i - 1]
+    return ({k: sumber[k] for k in ("pct", "fixed", "min", "tiers") if k in sumber},
+            _rentang_periode(komp, i))
 
 
 def _rate_salah(teks, sebab):
@@ -1150,13 +1280,15 @@ def _baca_rate_tier(v):
     return {**dasar, "tiers": tiers, "teks": teks}
 
 
-def pilih_tier(komp, jumlah):
+def pilih_tier(komp, jumlah, periode=None):
     """Komponen rate yang berlaku untuk nominal transaksi `jumlah` (mata uang
     transaksinya sendiri). -> (komp_efektif, label). Label None kalau rate-nya
-    tidak bertingkat. Rate tier berlaku untuk SELURUH nominal."""
+    tidak bertingkat. Rate tier berlaku untuk SELURUH nominal.
+    `periode` (v1.47): rentang tanggal dari pilih_periode, ikut ditulis di label."""
     tiers = (komp or {}).get("tiers")
     if not tiers or jumlah is None:
         return komp, None
+    awal = f"rate {periode}; " if periode else ""
     a = abs(jumlah)
     kena = None
     for t in tiers:                       # urut naik -> yang terakhir lewat = tertinggi
@@ -1164,11 +1296,11 @@ def pilih_tier(komp, jumlah):
             kena = t
     if kena is None:
         return ({"pct": komp["pct"], "fixed": komp["fixed"], "min": komp["min"]},
-                f"{_teks_komp(komp)} (normal rate; tier from "
+                f"{_teks_komp(komp)} ({awal}normal rate; tier from "
                 f"{tiers[0]['op']}{_teks_batas(tiers[0]['batas'])} not reached)")
     return ({"pct": kena["pct"], "fixed": kena["fixed"], "min": kena["min"]},
-            f"{_teks_komp(kena)} (tier {kena['op']}{_teks_batas(kena['batas'])} applied "
-            f"to the whole amount)")
+            f"{_teks_komp(kena)} ({awal}tier {kena['op']}{_teks_batas(kena['batas'])} "
+            f"applied to the whole amount)")
 
 
 _REMARK_TIER = re.compile(
@@ -1187,7 +1319,7 @@ def sel_rate(komp):
     (fixed/min kosong) supaya sheet itu bisa dibaca ulang tanpa kehilangan tier."""
     if not komp:
         return None, None, None
-    if komp.get("tiers") or komp.get("error"):
+    if komp.get("tiers") or komp.get("periode") or komp.get("error"):
         return komp.get("teks"), None, None
     return komp["pct"], (komp["fixed"] or None), komp["min"]
 
@@ -1200,12 +1332,26 @@ def catatan_tier(v):
         if k.get("error"):
             out.append(f"{label} rate cannot be read: {k['error']} - "
                        f"its Handling Fee is left EMPTY")
+        elif k.get("periode"):
+            def _isi(x):
+                return "; ".join([_teks_komp(x)] + [
+                    f"{t['op']}{_teks_batas(t['batas'])} {_teks_komp(t)}"
+                    for t in x.get("tiers") or ()])
+            bagian = [f"{_rentang_periode(k, 0)}: {_isi(k)}"] + [
+                f"{_rentang_periode(k, i)}: {_isi(p)}"
+                for i, p in enumerate(k["periode"], start=1)]
+            ada_tier = k.get("tiers") or any(p.get("tiers") for p in k["periode"])
+            out.append(f"{label} rate by date: " + " | ".join(bagian)
+                       + (" (tier rate on the whole amount)" if ada_tier else "")
+                       + " (date = the row's report date)")
         elif k.get("tiers"):
             out.append(f"{label} tiered: " + "; ".join(
                 [_teks_komp(k)] + [f"{t['op']}{_teks_batas(t['batas'])} {_teks_komp(t)}"
                                    for t in k["tiers"]]) + " (tier rate on the whole amount)")
     if remark_mirip_tier(v.get("remark")) and not any(
-            (v.get(s_) or {}).get("tiers") for s_ in ("deposit", "withdrawal")):
+            (v.get(s_) or {}).get("tiers") or any(
+                p.get("tiers") for p in (v.get(s_) or {}).get("periode") or ())
+            for s_ in ("deposit", "withdrawal")):
         rm = v["remark"]
         if "Remark looks like a tier rule" in rm:     # Note sheet hasil yang dibaca ulang
             out.append(rm[rm.index("Remark looks like a tier rule"):])
@@ -1221,7 +1367,7 @@ def kumpulkan_peringatan_tier(fee_table):
     hasil = []
     for (cur, _k), v in sorted(fee_table.items(), key=lambda x: (x[0][0], x[1].get("nama") or "")):
         for teks in catatan_tier(v):
-            if "tiered:" not in teks:
+            if "tiered:" not in teks and "rate by date:" not in teks:
                 hasil.append((cur, v.get("nama") or _k, teks))
     return hasil
 
@@ -1319,9 +1465,15 @@ def _baca_satu_sheet_fee(ws):
                     komp["fixed"] = f
                 if m is not None:
                     komp["min"] = m
-                for t in komp.get("tiers") or ():     # kolom terpisah berlaku juga
-                    if f and not t["fixed"]:           # untuk tier yang tidak menulis
-                        t["fixed"] = f                 # fixed/min sendiri
+                # kolom terpisah berlaku juga untuk tier / periode tanggal (v1.47)
+                # yang tidak menulis fixed/min sendiri
+                anak = list(komp.get("tiers") or ())
+                for p in komp.get("periode") or ():
+                    anak.append(p)
+                    anak.extend(p.get("tiers") or ())
+                for t in anak:
+                    if f and not t["fixed"]:
+                        t["fixed"] = f
                     if m is not None and t["min"] is None:
                         t["min"] = m
             return komp
@@ -1829,10 +1981,23 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
         komp, fixed, key, how = lookup_fee(fee_table, currency, gateway, kind)
         rate_salah = komp.get("error") if komp else None
         info_fee = None
+        # v1.47: rate per periode tanggal -> dipilih dengan tanggal baris DI LAPORAN
+        # (paid = hasil tentukan_tanggal, mis. Completed Date untuk withdrawal DPM).
+        periode_fee = None
+        if not rate_salah and komp is not None and komp.get("periode"):
+            if paid is None:
+                rate_salah = RATE_TANPA_TGL
+            else:
+                komp_tgl, periode_fee = pilih_periode(komp, paid)
         if rate_salah:
             komp_asli, komp = komp, None
-        elif komp is not None and komp.get("tiers") and tx is not None:
-            komp, info_fee = pilih_tier(komp, tx)
+        else:
+            if periode_fee:
+                komp = komp_tgl
+            if komp is not None and komp.get("tiers") and tx is not None:
+                komp, info_fee = pilih_tier(komp, tx, periode_fee)
+            elif periode_fee:
+                info_fee = f"{_teks_komp(komp)} (rate {periode_fee})"
         rate = komp["pct"] if komp else None
         fee = None
         if komp is not None and tx is not None:
@@ -1918,6 +2083,10 @@ def process_sheet(ws, fee_table, rates, xero_dates, report):
             alasan = str(ws.cell(row=row, column=c_remark).value or "").strip() if c_remark else ""
             if alasan:
                 catatan.append(f"REASON: {alasan}")
+        elif rate_salah == RATE_TANPA_TGL:
+            catatan.append(f"FEE: {kind} rate for {norm(currency)} / {norm(gateway)} "
+                           f"changes by date but this row has no date - Handling Fee "
+                           f"left empty")
         elif rate_salah:
             catatan.append(f"FEE: {kind} rate for {norm(currency)} / {norm(gateway)} "
                            f"cannot be read ({rate_salah}) - fix it in the fee sheet")
@@ -2857,16 +3026,25 @@ def kumpulkan_rate_tinggi(fee_table):
                 ("deposit", "deposit", "dep_raw"),
                 ("withdrawal", "withdrawal", "wd_raw")):
             komp = v.get(sisi)
-            if not komp or komp.get("pct") is None or komp["pct"] < 1:
+            if not komp:
                 continue
             nama = v.get("nama") or _k
-            angka = _angka_persen_polos(v.get(mentah_k))
-            if angka is None:
-                angka = komp["pct"]
-            hasil.append(
-                f"{cur}-{nama} {label} rate {angka:g} = {angka * 100:g}%. "
-                f"If this is a flat fee per transaction, write +{angka:g}."
-            )
+            if komp.get("pct") is not None and komp["pct"] >= 1:
+                angka = _angka_persen_polos(v.get(mentah_k))
+                if angka is None:
+                    angka = komp["pct"]
+                hasil.append(
+                    f"{cur}-{nama} {label} rate {angka:g} = {angka * 100:g}%. "
+                    f"If this is a flat fee per transaction, write +{angka:g}."
+                )
+            # v1.47: periode tanggal berikutnya diperiksa juga
+            for p in komp.get("periode") or ():
+                if p.get("pct") is not None and p["pct"] >= 1:
+                    hasil.append(
+                        f"{cur}-{nama} {label} rate {p['pct']:g} = {p['pct'] * 100:g}% "
+                        f"(period {p['label']}). If this is a flat fee per transaction, "
+                        f"write +{p['pct']:g}."
+                    )
     return hasil
 
 
@@ -4748,8 +4926,11 @@ def write_missing_sheet(wb, report):
             Font(bold=True, size=12, color="C00000")
         r += 1
         ws.cell(r, 2, "Tiered rate syntax: 3.5%; >5000 3.8% = 3.5% normally, 3.8% of the "
-                      "WHOLE amount when the transaction is above 5,000. Remark is never "
-                      "used in the calculation.").font = Font(italic=True, size=10)
+                      "WHOLE amount when the transaction is above 5,000. Rate by date: "
+                      "1.6%; >2026-11-22 1.2% = 1.6% up to 22 Nov, 1.2% from 23 Nov "
+                      "(dates as YYYY-MM-DD; '|' separates date periods that have their "
+                      "own tiers). Remark is never used in the calculation."
+                ).font = Font(italic=True, size=10)
         r += 1
         _header(ws, r, ["Currency", "Payment Gateway", "Rows affected", "", "",
                         "Problem -> what to do"], "C00000")
@@ -4772,9 +4953,11 @@ def write_missing_sheet(wb, report):
             if (cur, gw) in dicetak:
                 continue
             r += 1
-            for c, v in enumerate([cur, gw, n, "", "",
-                                   f"{kind} rate '{teks}' cannot be read: {err}. "
-                                   f"Handling Fee left EMPTY."], start=2):
+            pesan = (f"{kind} rate '{teks}' changes by date but these rows have no "
+                     f"date. Handling Fee left EMPTY - fix the date in the export."
+                     if err == RATE_TANPA_TGL else
+                     f"{kind} rate '{teks}' cannot be read: {err}. Handling Fee left EMPTY.")
+            for c, v in enumerate([cur, gw, n, "", "", pesan], start=2):
                 cell = ws.cell(r, c, v)
                 cell.border = box
                 cell.alignment = wrap
