@@ -203,6 +203,13 @@ def main():
         ("Tier options", ">=5000 includes 5,000 itself. Any number of tiers: "
                          "3.5%; >5k 3.8%; >20k 4% (the highest tier passed is used, 5k = "
                          "5,000). Each tier can use +fixed / min: 1.5%+50; >5000 1.2%+50."),
+        ("Rate by date", "Write 1.6%; >2026-11-22 1.2% when the rate changes mid-month: 1.6% "
+                         "up to 22 Nov, 1.2% from 23 Nov. >=2026-11-23 or from 2026-11-23 "
+                         "starts on that day. Dates are YYYY-MM-DD. The row's report date "
+                         "decides (Paid Date for deposits, Completed Date for withdrawals)."),
+        ("Date + tiers", "Separate date periods with |, tiers with ; - "
+                         "3.5%; >5000 3.8% | >=2026-11-23 3%; >5000 3.2%. Dates go from the "
+                         "oldest to the newest; two periods may not start on the same day."),
         ("Not in Remark", "Remark / Note is NOT read. Do not put a tier rule only there - "
                           "write it in the rate cell. D&W Detail 'Data Status' shows the "
                           "rate used per row."),

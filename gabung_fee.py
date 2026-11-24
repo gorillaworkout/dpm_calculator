@@ -70,8 +70,10 @@ def cari_sheet(wb, kandidat):
 
 
 def _ada_tier(v):
-    """Teks rate bertingkat ('3.5%; >5000 3.8%', lihat hitung_dw.baca_rate)?"""
-    return isinstance(v, str) and re.search(r"(>=|\u2265|>)\s*\d", v) is not None
+    """Teks rate bertingkat ('3.5%; >5000 3.8%') atau per tanggal (v1.47,
+    '1.6%; >2026-11-22 1.2%' / 'from 2026-11-23'), lihat hitung_dw.baca_rate?"""
+    return isinstance(v, str) and re.search(
+        r"(>=|\u2265|>)\s*\d|\bfrom\s*\d{1,4}[-/]\d{1,2}[-/]\d{1,4}", v, re.I) is not None
 
 
 def baca_rate(v):
@@ -209,10 +211,10 @@ def main():
         # adanya -- hitung_dw.py yang membacanya. Jangan diubah jadi angka 3,5%.
         if _ada_tier(pilih["dep"]):
             dep_p, dep_f, dep_m, dep_t = " ".join(str(pilih["dep"]).split()), 0.0, None, None
-            catatan.append("Deposit is tiered - copied as text")
+            catatan.append("Deposit is tiered or dated - copied as text")
         if _ada_tier(pilih["wd"]):
             wd_p, wd_f, wd_m, wd_t = " ".join(str(pilih["wd"]).split()), 0.0, None, None
-            catatan.append("Withdrawal is tiered - copied as text")
+            catatan.append("Withdrawal is tiered or dated - copied as text")
         if dep_t:
             catatan.append(f"Deposit ditulis: {dep_t}")
         if wd_t:

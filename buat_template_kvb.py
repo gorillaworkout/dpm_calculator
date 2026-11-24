@@ -105,6 +105,7 @@ FEE_CARA_ISI = [
     ("3.5%; >5000 3.8%", "Tier: above 5,000 = 3.8% of the WHOLE amount (5,000 itself pays 3.5%)"),
     ("3.5%; >=5000 3.8%", ">= includes 5,000 itself"),
     ("3.5%; >5k 3.8%; >20k 4%", "Any number of tiers; highest passed wins. 5k = 5,000"),
+    ("1.6%; >2026-11-22 1.2%", "Rate by date: 1.6% up to 22 Nov, 1.2% from 23 Nov (YYYY-MM-DD)"),
 ]
 FEE_CATATAN = ("Note: plain 8 = 800%. Write +8 for a flat fee. Do not put rate rules only in Remark (Remark is not calculated).")
 
@@ -215,6 +216,13 @@ def sheet_guide(ws):
          "Any number of tiers, separated by ';'. The highest tier the amount passes is "
          "used. 5k = 5,000."),
         ("1.5%+50; >5000 1.2%+50", "Each tier can use the formats above (+fixed, min)."),
+        ("1.6%; >2026-11-22 1.2%",
+         "Rate by date: 1.6% up to 22 Nov, 1.2% from 23 Nov. >=2026-11-23 or "
+         "from 2026-11-23 starts on that day. Dates are YYYY-MM-DD. The row's report date "
+         "decides (Paid Date for deposits, Completed Date for withdrawals)."),
+        ("3.5%; >5000 3.8% | >=2026-11-23 3%; >5000 3.2%",
+         "Rate by date with tiers: separate date periods with |, tiers with ;. Dates go "
+         "from the oldest to the newest; two periods may not start on the same day."),
         ("Remark", "Remark is NOT read. Do not put a tier rule only in Remark ('more than "
                    "5K, then 3.8%') - write it in the Deposit / Withdrawal cell as above."),
         ("", ""),
