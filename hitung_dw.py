@@ -356,7 +356,13 @@ def baca_tabel_saldo_channel(teks):
 
     Sel channel yang digabung di Excel jadi KOSONG waktu ditempel, jadi nama channel
     terakhir DIBAWA TURUN. Angka boleh '1.058.257,96', '(4.976,10)' (kurung = minus),
-    atau '-' (dianggap nol). Baris header dan baris tanpa angka dilewati.
+    atau '-' (dianggap nol). Saldo yang dikosongkan (sel Balance tidak diisi)
+    juga dianggap nol. Kolom kosong di belakang (Excel sering membawa kolom
+    ekstra waktu diseleksi, mis. 'RM Pay <TAB> JPY <TAB> <TAB>') dibuang,
+    tapi posisi 3 kolom tetap dipegang supaya 'JPY' tidak kebaca sebagai
+    saldo dan nama channel tidak ikut terbawa dari baris sebelumnya.
+    'RM Pay <TAB> JPY' tanpa sel ketiga diperlakukan sama (saldo = 0).
+    Baris header dan baris tanpa angka dilewati.
     """
     out = {}
     channel = ""
@@ -366,10 +372,13 @@ def baca_tabel_saldo_channel(teks):
         if not b:
             continue
         m_shadow = _RE_BARIS_USD_SHADOW.fullmatch(b)
-        if m_shadow and "\t" not in b and ";" not in b and not re.search(r"\s{2,}", b):
+        if m_shadow and "\t" not in baris and ";" not in b and not re.search(r"\s{2,}", b):
             bagian = [m_shadow.group(1).strip(),
                       f"USD({norm(m_shadow.group(2))})", m_shadow.group(3)]
-        elif "\t" in b:
+        elif "\t" in baris:
+            # Use the unstripped line: a carried-down channel with a blank
+            # balance is '\tPHP\t' or '\tPHP\t\t', and .strip() would
+            # leave only 'PHP' (no tab) so the row would be skipped.
             bagian = [x.strip() for x in baris.split("\t")]
         elif (not re.search(r"\s{2,}|;|,\s*[A-Za-z]", b)
               and (m1 := _RE_BARIS_SATU_SPASI.fullmatch(b))
@@ -381,7 +390,17 @@ def baca_tabel_saldo_channel(teks):
             bagian = [x.strip() for x in b.split(",", 2)]
         else:
             bagian = [x for x in re.split(r"\s{2,}", b) if x.strip()]
-        bagian = [x for x in bagian if x != ""] if len(bagian) > 3 else bagian
+        # v1.48: keep column positions. Trailing empty cells (extra Excel
+        # columns) are trimmed, but never below 3 parts, so a blank Balance
+        # stays in place: 'RM Pay\tJPY\t\t' -> ['RM Pay', 'JPY', ''] = 0,
+        # not ['RM Pay', 'JPY'] (which used to be read as currency 'RM Pay',
+        # saldo 'JPY', channel carried down from the previous row).
+        # If more than 3 parts remain, drop leftover empty cells the old way
+        # (an extra leading column, or a spacer in the middle).
+        while len(bagian) > 3 and bagian[-1] == "":
+            bagian.pop()
+        if len(bagian) > 3:
+            bagian = [x for x in bagian if x != ""]
         if len(bagian) >= 3:
             ch, cur, saldo = bagian[0], bagian[1], bagian[2]
             # 'USD <TAB> ChipPay <TAB> angka': currency ditulis duluan -> tukar.
@@ -390,23 +409,31 @@ def baca_tabel_saldo_channel(teks):
             if _kode(ch) and not _kode(cur) and norm(cur) not in ("CURRENCY", ""):
                 ch, cur = cur, ch
         elif len(bagian) == 2:
-            ch, cur, saldo = "", bagian[0], bagian[1]
-            # JEBAKAN 17 Sep 2026: baris 2-kolom di atas diasumsikan (currency,
-            # saldo) dengan channel DIBAWA TURUN dari baris sebelumnya -- itu
-            # untuk kasus sel Payment Channel yang digabung/kosong. Tapi kalau
-            # 'cur' ternyata "<channel> <currency>" yang menyatu (mis. tim
-            # menempel "Novolink VND" jadi satu sel karena sel Currency-nya
-            # kosong), currency ASLI tidak pernah mengandung spasi -- jadi ini
-            # salah kaprah, dan channel ikut salah (kebawa dari baris yang
-            # tidak berhubungan). Nyata terjadi 17 Sep 2026: "Novolink VND"
-            # jadi currency 'NOVOLINK VND' + channel 'BECKPAY' (baris terakhir
-            # yang channel-nya valid, padahal tidak berhubungan sama sekali).
-            # Deteksi: kata TERAKHIR di 'cur' adalah kode currency yang
-            # dikenal DAN ada kata lain sebelumnya -> itu memang channel+currency
-            # yang menyatu, pisahkan.
-            pecah = pecah_channel_currency(cur)
-            if pecah:
-                ch, cur = pecah
+            a, b2 = bagian[0], bagian[1]
+            # (currency, saldo) with channel carried down, or
+            # (channel+currency, saldo). But if the 2nd part is not an amount
+            # — 'RM Pay\tJPY' without a third cell — it is (channel, currency)
+            # with a blank balance, not currency 'RM Pay' and saldo 'JPY'.
+            if b2.strip() in ("", "-", "--") or to_float(b2) is not None:
+                ch, cur, saldo = "", a, b2
+                # JEBAKAN 17 Sep 2026: baris 2-kolom di atas diasumsikan (currency,
+                # saldo) dengan channel DIBAWA TURUN dari baris sebelumnya -- itu
+                # untuk kasus sel Payment Channel yang digabung/kosong. Tapi kalau
+                # 'cur' ternyata "<channel> <currency>" yang menyatu (mis. tim
+                # menempel "Novolink VND" jadi satu sel karena sel Currency-nya
+                # kosong), currency ASLI tidak pernah mengandung spasi -- jadi ini
+                # salah kaprah, dan channel ikut salah (kebawa dari baris yang
+                # tidak berhubungan). Nyata terjadi 17 Sep 2026: "Novolink VND"
+                # jadi currency 'NOVOLINK VND' + channel 'BECKPAY' (baris terakhir
+                # yang channel-nya valid, padahal tidak berhubungan sama sekali).
+                # Deteksi: kata TERAKHIR di 'cur' adalah kode currency yang
+                # dikenal DAN ada kata lain sebelumnya -> itu memang channel+currency
+                # yang menyatu, pisahkan.
+                pecah = pecah_channel_currency(cur)
+                if pecah:
+                    ch, cur = pecah
+            else:
+                ch, cur, saldo = a, b2, ""
         else:
             continue
         if norm(cur) in ("CURRENCY", "") or norm(ch) in ("PAYMENT CHANNEL",):
