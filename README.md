@@ -375,6 +375,28 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
+#### v1.48 — Saldo pembuka yang dikosongkan dianggap 0; kolom Excel ekstra tidak menggeser baris
+Kalau sel Balance di tempelan Payment Channel Balance dikosongkan, Excel sering
+membawa kolom kosong tambahan di belakang (mis. `RM Pay <TAB> JPY <TAB> <TAB>`).
+Sebelumnya parser membuang **semua** sel kosong bila barisnya punya lebih dari 3
+bagian, jadi baris itu jadi 2 kolom: currency `RM Pay`, saldo `JPY`, dan nama
+channel ikut terbawa dari baris sebelumnya (SojuPay) — error `Saldo channel
+SojuPay RM Pay bukan angka yang bisa dibaca: 'JPY'`. Baris kosong lain di tempelan
+yang sama (OnlinePay USD, NEPay THB, Thunder X Pay KHR, MONETIX TRY) terkena pola
+yang sama.
+
+- Posisi kolom tetap. Kolom kosong di belakang dibuang, tapi tidak sampai di
+  bawah 3 bagian, jadi saldo kosong tetap di tempatnya dan dianggap **0**.
+  `RM Pay <TAB> JPY` tanpa sel ketiga diperlakukan sama.
+- Sel channel yang digabung di Excel (kosong, dibawa turun) tetap jalan, termasuk
+  dengan kolom kosong di belakang dan dengan saldo yang dikosongkan.
+- Perilaku lama untuk kolom kosong *tambahan di depan* atau spasi di tengah
+  (lebih dari 3 bagian) tetap: sel kosong itu dibuang.
+- Tidak ada kolom laporan atau rumus yang berubah. Snapshot
+  `fixtures/dpm_unchanged_baseline.json` tidak berubah.
+- Test: `test_blank_saldo_v148.py` (data sintetis; nama channel/currency sama
+  seperti tempelan, angkanya dibuat-buat).
+
 #### v1.47 — Rate fee bisa berubah per tanggal (DPM + KVB)
 Permintaan Bayu (24 Nov 2026): rate yang berubah di tengah bulan, mis. sel Deposit
 BeckPay-VND `1.6%; >2026-11-22 1.2%`. Sebelumnya teks itu ditolak sebagai rate tidak terbaca
