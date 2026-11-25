@@ -375,6 +375,42 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
+#### v1.49 — 手续费 fund transfer dihitung di KEDUA sisi (DPM + KVB)
+Sebelumnya hanya `手续费` sisi 汇出 (kolom H, pengirim) yang dibaca. `手续费` sisi 收款
+(kolom N, penerima) diabaikan diam-diam, dan buku besar J Wallet tidak memuat fee sama
+sekali. Keputusan Bayu (25 Nov 2026):
+
+1. `手续费` sisi 收款 menambah **Fund transfer charges** channel **penerima** di
+   Payment Channel Balance, jadi saldo channel itu turun.
+2. Mata uangnya = mata uang penerima (`收入币种`).
+3. `金额` sisi 收款 itu **gross**: fee dipostkan **di atas** jumlah itu, tidak ada hitung ganda.
+4. Cold Wallet tidak diperlakukan khusus (saldonya memang tidak dilacak). **J Wallet**
+   ikut dipotong fee: fee pengirim (H) kalau J Wallet yang mengirim, fee penerima (N)
+   kalau J Wallet yang menerima. Fee sisi lawan tetap di channel lawan, jadi tidak ada
+   yang terhitung dua kali.
+5. Fee bertanda: nilai negatif dipakai apa adanya (uang kembali), sama seperti H.
+6. Blok `USD(CNY)` (KVB): fee penerima dikonversi dengan kurs sisi penerima sendiri
+   (urutan kurs sama: Xero USD, harian, bulanan, median) dan masuk ke Fund transfer
+   charges blok USD channel penerima. Dulu nilainya selalu 0.
+
+**Buku besar J Wallet.** Tidak ada kolom yang bergeser. Fee jadi baris tersendiri tepat
+di bawah transfernya: kolom `IN/OUT` = `FEE`, nilainya di `Transfer out (USD)` (negatif =
+keluar dari dompet; fee negatif muncul di `Transfer in (USD)`), `Balance (USD)` ikut turun,
+`Source` menjelaskan sisi mana, dan barisnya berwarna oranye. Sheet `Legend` mendapat
+catatan v1.49 (dengan jumlah baris) hanya di run yang memang punya fee semacam itu.
+
+**Sakelar (satu baris).** `TRANSFER_FEE_V149 = {"dpm": True, "kvb": True}` di `app.py`.
+Company yang diset `False` menjalankan `hitung_dw.py --legacy-transfer-fee` (perilaku
+v1.48 persis). Hanya KVB: `{"dpm": False, "kvb": True}`. Hanya DPM: `{"dpm": True, "kvb": False}`.
+Lewat CLI tanpa flag, kedua sisi dihitung (konstanta `TRANSFER_FEE_V149` di `hitung_dw.py`).
+
+- File yang kolom `手续费` sisi 收款-nya kosong dan tidak punya fee di baris J Wallet
+  menghasilkan file yang **sama persis** dengan v1.48 (semua sheet, termasuk Legend).
+  Snapshot `fixtures/dpm_unchanged_baseline.json` tidak berubah.
+- Test: `test_receiver_fee_v149.py` (data sintetis: 3 transfer, J Wallet kirim/terima,
+  fee negatif, blok USD, dan regresi N kosong); `test_kvb_channel_usd.py` memeriksa fee
+  penerima ada vs tidak ada.
+
 #### v1.48 — Saldo pembuka yang dikosongkan dianggap 0; kolom Excel ekstra tidak menggeser baris
 Kalau sel Balance di tempelan Payment Channel Balance dikosongkan, Excel sering
 membawa kolom kosong tambahan di belakang (mis. `RM Pay <TAB> JPY <TAB> <TAB>`).

@@ -734,6 +734,21 @@ MAKE_CHANNEL_SHEETS = True
 # sehingga tidak menggerakkan saldo channel. Menggabungkan = selisih 364.175.000.
 GABUNG_TAG_MANUAL = False
 
+# v1.49 (25 Nov 2026, decision of Bayu): the 手续费 of BOTH sides of the Fund Transfer
+# Table counts. ONE switch for the whole feature, so DPM-only / KVB-only is a one-line
+# change in app.py (TRANSFER_FEE_V149 there passes --legacy-transfer-fee, which sets this
+# to False). When True:
+#   * the receiving-side 手续费 (收款 half, column N) is added to the RECEIVING channel's
+#     'Fund transfer charges' in Payment Channel Balance, in the receiving currency
+#     (收入币种); the receiving 金额 is gross, so the fee is posted on top of it;
+#   * the same fee is converted with the receiving side's rate on the USD(CNY) block;
+#   * the J Wallet ledger gets a 'FEE' row: the sending-side fee (H) when J Wallet sends,
+#     the receiving-side fee (N) when J Wallet receives;
+#   * fees keep their sign (a negative fee gives money back), same as the sending side.
+# False = behaviour up to v1.48: only the sending-side fee, only on the sending channel,
+# and the J Wallet ledger ignores fees.
+TRANSFER_FEE_V149 = True
+
 PCB_KOLOM = ["Date", "Currency", "Payment Gateway", "Deposit", "Deposit charges",
              "Fund transfer", "Fund transfer charges", "Withdrawal",
              "Withdrawal charges", "Balance", "Status"]
@@ -2479,6 +2494,8 @@ def baca_fund_transfer(wb, rates=None, xero_dates=None, report=None):
     i_org = ci("收款人")
     i_cur = ci("收入币种", "CURRENCY")
     i_amt = ci("金额", "AMOUNT")
+    # v1.49: 手续费 of the 收款 half (column N in the KVB / DPM layout)
+    i_fee = ci("手续费", "FEE")
 
     out = []
     for row in baris[h_idx + 1:]:
@@ -2511,6 +2528,10 @@ def baca_fund_transfer(wb, rates=None, xero_dates=None, report=None):
                            if i_cur is not None and i_cur < len(row) else ""),
             "tujuan_jumlah": (to_float(row[i_amt])
                               if i_amt is not None and i_amt < len(row) else None),
+            # v1.49: receiving-side fee, in 收入币种. Read always; only used when
+            # TRANSFER_FEE_V149 is True (see the consumers below).
+            "tujuan_fee": (to_float(row[i_fee])
+                           if i_fee is not None and i_fee < len(row) else None),
         })
     # Kolom 'Xero (USD)' sisi 汇出 BUKAN data -- itu satu-satunya kolom berumus di
     # 'Fund Transfer Table':
@@ -2914,14 +2935,14 @@ def baris_legend_ft(item):
     tgl_txt = tgl.isoformat() if hasattr(tgl, "isoformat") else str(tgl)
     dasar = (f"{tgl_txt} {item.get('channel')} {item.get('currency')} "
              f"{item.get('side')} amount {_uang_ft(item.get('jumlah'))}")
-    if item.get("side") == "out":
+    if item.get("side") == "out" or item.get("fee"):
         dasar += f" fee {_uang_ft(item.get('fee') or 0)}"
     if not item.get("posted"):
         return (dasar + ": NOT posted on the USD block. This run had no Xero USD "
                 "for that currency and no USD/Transaction ratio to convert it.")
     label = _LABEL_KURS_FT.get(item.get("source"), item.get("source"))
     fee_txt = ""
-    if item.get("side") == "out":
+    if item.get("side") == "out" or item.get("fee"):
         fee_txt = f" fee {_uang_ft(item.get('fee_usd') or 0)}"
     return (f"{dasar} -> USD {_uang_ft(item.get('usd'))}{fee_txt} "
             f"at {item.get('rate'):.6f} via {label}.")
@@ -2983,8 +3004,8 @@ def tambah_usd_shadow(agg, report, ftt):
     harian, bulan, median = bangun_rasio_konversi(report.get("records"))
     catatan = report.setdefault("usd_shadow_ft", [])
     for t in (ftt or []):
-        # Keluar: jumlah + biaya transfer. Masuk: jumlah diterima. Biaya hanya
-        # ada di sisi kirim, sama seperti baris CNY.
+        # Keluar: jumlah + biaya transfer sisi kirim. Masuk: jumlah diterima + (v1.49)
+        # biaya transfer sisi terima, dikonversi dengan kurs sisi terima sendiri.
         sisi = []
         if t.get("channel") and not lewati_channel(t.get("currency"), t["channel"]):
             k_ch = channel_ada_shadow(t.get("currency"), t["channel"])
@@ -2995,10 +3016,11 @@ def tambah_usd_shadow(agg, report, ftt):
         ch_in = t.get("penerima")
         cur_in = t.get("tujuan_cur") or t.get("currency")
         jml_in = to_float(t.get("tujuan_jumlah")) if ch_in else None
-        if ch_in and jml_in and not lewati_channel(cur_in, ch_in):
+        fee_in = (to_float(t.get("tujuan_fee")) or 0.0) if (ch_in and TRANSFER_FEE_V149) else 0.0
+        if ch_in and (jml_in or fee_in) and not lewati_channel(cur_in, ch_in):
             k_ch = channel_ada_shadow(cur_in, ch_in)
             if k_ch:
-                sisi.append(("in", cur_in, ch_in, k_ch, jml_in, 0.0))
+                sisi.append(("in", cur_in, ch_in, k_ch, jml_in or 0.0, fee_in))
         for arah, cur_s, ch, k_ch, jumlah, fee in sisi:
             if not jumlah and not fee:
                 continue
@@ -3010,7 +3032,7 @@ def tambah_usd_shadow(agg, report, ftt):
                 "currency": norm(cur_s),
                 "side": arah,
                 "jumlah": jumlah,
-                "fee": fee if arah == "out" else None,
+                "fee": fee if (arah == "out" or fee) else None,
                 "rate": rate,
                 "source": sumber,
                 "posted": rate is not None,
@@ -3019,7 +3041,7 @@ def tambah_usd_shadow(agg, report, ftt):
                 catatan.append(item)
                 continue
             usd_j = jumlah * rate
-            usd_fee = fee * rate if arah == "out" else 0.0
+            usd_fee = fee * rate if fee else 0.0
             item["usd"] = usd_j
             item["fee_usd"] = usd_fee
             catatan.append(item)
@@ -3610,6 +3632,8 @@ def write_channel_sheets(wb, report, ftt):
     #   INR / Kotak Bank2 : keluar 394.100, masuk 111.849 + 1 -> mereka tulis 282.250
     #   USDT / TRC20      : keluar 0, masuk 30.000            -> mereka tulis -30.000
     # Kolom ini DIKURANGKAN dari saldo, jadi tanda positif = dana keluar channel.
+    n_fee_penerima = 0            # v1.49: baris dengan 手续费 sisi 收款 yang diposting
+    n_fee_jw = 0                  # v1.49: baris 'FEE' di J Wallet
     for t in (ftt or []):
         if t.get("channel") and not lewati_channel(t["currency"], t["channel"]):
             k = (t["tgl"], t["currency"], kunci_channel(t["currency"], t["channel"]))
@@ -3620,10 +3644,17 @@ def write_channel_sheets(wb, report, ftt):
         ch_in = t.get("penerima")
         cur_in = t.get("tujuan_cur") or t["currency"]
         jml_in = t.get("tujuan_jumlah")
-        if ch_in and not lewati_channel(cur_in, ch_in) and jml_in:
+        # v1.49: the receiving-side fee is a CHARGE of the receiving channel, in the
+        # receiving currency, on top of the (gross) receiving amount. Signed.
+        fee_in = (t.get("tujuan_fee") or None) if TRANSFER_FEE_V149 else None
+        if ch_in and not lewati_channel(cur_in, ch_in) and (jml_in or fee_in):
             k = (t["tgl"], cur_in, kunci_channel(cur_in, ch_in))
             agg[k]["_nama"] = agg[k].get("_nama") or ch_in
-            agg[k]["ft"] -= jml_in
+            if jml_in:
+                agg[k]["ft"] -= jml_in
+            if fee_in:
+                agg[k]["ft_fee"] += fee_in
+                n_fee_penerima += 1
 
     tambah_usd_shadow(agg, report, ftt)
 
@@ -3796,6 +3827,32 @@ def write_channel_sheets(wb, report, ftt):
     def sentuh_wallet(t):
         return sisi_wallet(t) is not None
 
+    def fee_wallet(t, arah):
+        """v1.49 -> (fee in the row's own currency, fee in USD) or None.
+
+        J Wallet sends (OUT): the SENDING-side fee (手续费 in the 汇出 half, column H).
+        J Wallet receives (IN): the RECEIVING-side fee (手续费 in the 收款 half, column N).
+        The other side's fee belongs to the other channel (Payment Channel Balance), so
+        nothing is counted twice. Signed: a negative fee gives money back."""
+        if not TRANSFER_FEE_V149:
+            return None
+        if arah == "IN":
+            fee = to_float(t.get("tujuan_fee"))
+            # Same reading as the receiving 金额: whatever the currency label says,
+            # the figure in the 收款 half is what the wallet actually gets.
+            return (fee, fee) if fee else None
+        fee = to_float(t.get("fee"))
+        if not fee:
+            return None
+        if norm(t.get("currency")) in KELUARGA_USD:
+            return fee, fee
+        usd, jml = to_float(t.get("usd")), to_float(t.get("jumlah"))
+        if usd and jml:                  # same conversion as the amount (Xero USD)
+            return fee, fee * usd / jml
+        WALLET_CUR_ANEH.append((t["tgl"], norm(t.get("currency")), fee,
+                                "FEE DILEWATI - tidak ada Xero USD", t.get("channel")))
+        return None
+
     # sisi_wallet() dipanggil dua kali per baris (filter lalu pakai), jadi daftar ini
     # bisa berisi duplikat -- dirapikan waktu dilaporkan.
 
@@ -3885,6 +3942,35 @@ def write_channel_sheets(wb, report, ftt):
                 sel.number_format = FMT_ACC
             if c == 8:
                 sel.fill = PatternFill("solid", fgColor="E2EFDA")
+
+        # v1.49: the transfer fee of the wallet's own side, as its own ledger row right
+        # under the transfer. No existing column moves: the fee is a movement like any
+        # other (Transfer in / out (USD)), IN/OUT says 'FEE', Balance drops with it.
+        fee_jw = fee_wallet(t, arah)
+        if fee_jw:
+            f_asli, f_usd = fee_jw
+            rr += 1
+            n_fee_jw += 1
+            bal -= f_usd
+            ket = ("Transfer fee, sending side (J Wallet sends)" if arah == "OUT"
+                   else "Transfer fee, receiving side (J Wallet receives)")
+            if t.get("dept"):
+                ket += f" - {t['dept']}"
+            baris_fee = [t["tgl"], lawan, "USDT", "FEE", None,
+                         (-f_usd if f_usd < 0 else None),      # negative fee = money back
+                         (-f_usd if f_usd > 0 else None),
+                         bal, ket]
+            for c, val in enumerate(baris_fee, start=1):
+                sel = wj.cell(rr, c, val)
+                sel.fill = PatternFill("solid", fgColor="FCE4D6")
+                if c == 1:
+                    sel.number_format = "yyyy-mm-dd"
+                elif c >= 5 and c != 9:
+                    sel.number_format = FMT_ACC
+    if n_fee_penerima or n_fee_jw:
+        report["transfer_fee_v149"] = {"penerima": n_fee_penerima, "jwallet": n_fee_jw}
+        print(f"         Transfer fee (v1.49): {n_fee_penerima} baris 手续费 sisi 收款 masuk ke "
+              f"'Fund transfer charges' channel penerima; {n_fee_jw} baris FEE di '{JW_SHEET}'")
     if WALLET_CUR_ANEH:
         unik = sorted({x for x in WALLET_CUR_ANEH})
         print(f"         J Wallet: {len(unik)} baris label mata uangnya BUKAN USD/USDT "
@@ -5638,6 +5724,23 @@ def write_legend_sheet(wb, date_cols_used, report=None):
         Font(size=10, color="008000")
     ws.row_dimensions[r].height = 30
     r += 1
+    tf = (report or {}).get("transfer_fee_v149")
+    if tf:
+        ws.cell(r, 2, "v1.49 (25 Nov 2026), decision of Bayu: the fee in the receiving "
+                      "手续费 column of the Fund Transfer Table (the 收款 half) is added to the "
+                      "RECEIVING channel's 'Fund transfer charges' on Payment Channel "
+                      "Balance, in the receiving currency (收入币种), on top of the receiving "
+                      "金额, which is gross. On J Wallet, the sending-side fee is deducted "
+                      "when J Wallet sends and the receiving-side fee when J Wallet "
+                      "receives: each is its own FEE row right under the transfer "
+                      "(orange), and the Balance column drops with it. Fees keep their sign "
+                      "(a negative fee adds money back). Cold Wallet is treated like any "
+                      "other channel. This run: "
+                      f"{tf['penerima']} receiving-side fee row(s) posted on channels, "
+                      f"{tf['jwallet']} J Wallet FEE row(s).").font = \
+            Font(size=10, color="008000")
+        ws.row_dimensions[r].height = 84
+        r += 1
     ws.cell(r, 2, "CONFIRMED by the DPM Malaysia team, 3 September 2026, on the treatment of "
                   "a blank Status cell: \"Blank status is same as Refuse, hence do not "
                   "include in any calculations.\" That is exactly what this report does. "
@@ -5792,6 +5895,11 @@ def _tulis_legend_kvb(ws, r, box, wrap, report=None):
             "channel is also posted on the USD block. The sending-side transfer fee is "
             "converted with the same rate as the sending amount and stays on the sending "
             "channel. The receiving channel is credited with the converted incoming amount. "
+            + ("A receiving-side transfer fee (v1.49) is converted with the receiving "
+               "side's own rate, the same way, and added to that channel's USD 'Fund "
+               "transfer charges'. "
+               if any(x.get("side") == "in" and x.get("fee")
+                      for x in (report or {}).get("usd_shadow_ft") or ()) else "") +
             "The rate for each side is the first one this run can supply: "
             "(1) Xero USD, when this run computed it for that currency (amount divided by "
             "the Xero rate); "
@@ -5980,6 +6088,11 @@ def main():
                          "Completed Time -> Settlement Date (Completed Date diabaikan, v1.29) "
                          "dan status withdrawal hanya finish/success. Hanya dipasang untuk KVB; "
                          "DPM memakai Completed Date + finish/success/process.")
+    ap.add_argument("--legacy-transfer-fee", action="store_true",
+                    help="Perilaku fee fund transfer sebelum v1.49: hanya 手续费 sisi 汇出 "
+                         "(pengirim), hanya di channel pengirim; 手续费 sisi 收款 diabaikan dan "
+                         "buku besar J Wallet tidak memuat fee. Default (tanpa flag): kedua "
+                         "sisi dihitung. App web memasangnya lewat TRANSFER_FEE_V149 di app.py.")
     ap.add_argument("--keep-test-rows", action="store_true",
                     help="Jangan buang baris Sales Name 'Test data' / Sales Dept 'Test "
                          "Department' (perilaku sebelum v1.46). Hanya untuk dijalankan manual; "
@@ -5992,6 +6105,9 @@ def main():
 
     global PAKAI_EXTRA_FEES, USD_SHADOW, FEE_CURRENCY_SUFFIX, WARN_HIGH_PCT, CNY_RATE_CHECK
     global SETTLEMENT_COLUMNS, CNY_BALANCE_USDT, STATUS_DIPAKAI_W, BUANG_DATA_TES
+    global TRANSFER_FEE_V149
+    if args.legacy_transfer_fee:
+        TRANSFER_FEE_V149 = False
     if args.keep_test_rows:
         BUANG_DATA_TES = False
     if args.legacy_withdrawal_rules:
