@@ -1181,6 +1181,39 @@
 </div>
 {% endif %}
 
+{% if lookup_status is defined %}
+<div class="card" id="kyc-lookup" style="margin-top:16px">
+  <h2 style="margin:0 0 8px; font-size:18px">UID / KYC lookup files</h2>
+  <p class="hint" style="margin-top:0">Both Monthly Summary sheets start with <strong>KYC Country</strong> and <strong>UID</strong>, looked up from these files stored on the server: Login &rarr; <code>account</code> &rarr; <code>user_id</code> (UID), then UID &rarr; <code>Country of KYC</code>.</p>
+  <ul style="margin:0 0 12px; padding-left:18px; line-height:1.8">
+    {% for f in lookup_status %}
+    <li>{{ f.label }} <span class="opt">(columns {{ f.columns }})</span>:
+      {% if f.present %}<strong>{{ f.name }}</strong>, updated {{ f.date }}{% else %}<strong style="color:#b00">not on the server</strong>{% endif %}</li>
+    {% endfor %}
+  </ul>
+  {% if not (lookup_status | selectattr("present") | list | length == lookup_status | length) %}
+  <div class="note bad" id="kyc-lookup-missing">The UID / KYC lookup files are not on the server yet. The Deal Segregator still runs, but the KYC Country and UID columns will be blank until they are uploaded below.</div>
+  {% endif %}
+  {% if lookup_ok %}<div class="note">{{ lookup_ok }}</div>{% endif %}
+  {% if lookup_error %}<div class="note bad">{{ lookup_error }}</div>{% endif %}
+  {% if lookup_can_upload %}
+  <details style="margin-top:8px"{% if lookup_error %} open{% endif %}>
+    <summary>Update UID / KYC lookup files <span class="opt">— optional</span></summary>
+    <form method="post" action="/tool/segregate/lookup" enctype="multipart/form-data" style="margin-top:8px">
+      <label for="lookup-account">Account file <span class="opt">— .xlsx or .csv with columns user_id, account</span></label>
+      <input id="lookup-account" type="file" name="account_file" accept=".xlsx,.xlsm,.csv">
+      <label for="lookup-kyc">KYC file <span class="opt">— .xlsx or .csv with columns user_id, Country of KYC</span></label>
+      <input id="lookup-kyc" type="file" name="kyc_file" accept=".xlsx,.xlsm,.csv">
+      <p class="hint">Upload one or both. A file replaces the stored one only when its header is right; otherwise the stored file is kept.</p>
+      <button type="submit">Save lookup files</button>
+    </form>
+  </details>
+  {% else %}
+  <p class="hint">Only DPM users can replace these files.</p>
+  {% endif %}
+</div>
+{% endif %}
+
 {% if slug == "segregated" %}
 <div class="card" style="margin-top:16px">
   <h2 style="margin:0 0 8px; font-size:18px">Templates &amp; format guide</h2>

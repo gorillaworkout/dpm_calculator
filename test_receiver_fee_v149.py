@@ -22,6 +22,7 @@ Run: python3 test_receiver_fee_v149.py
 import datetime
 import itertools
 import subprocess
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -446,7 +447,9 @@ assert h.TRANSFER_FEE_V149 is True                            # default: both si
 
 # ============================================================ 6. version
 ver = (ROOT / "VERSION").read_text(encoding="utf-8")
-assert "version=1.49" in ver and "build=2026-11-25" in ver, ver
+# later PRs keep bumping VERSION (1.50 = DPM Deal Segregator KYC Country / UID)
+_m = re.search(r"^version=1\.(\d+)$", ver, re.M)
+assert _m and int(_m.group(1)) >= 49, ver
 assert "v1.49" in (ROOT / "README.md").read_text(encoding="utf-8")
 
 print("test_receiver_fee_v149: ok")

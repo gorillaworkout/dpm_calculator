@@ -41,6 +41,8 @@ def hermetic_env(admin_user="tester", admin_pass="tester-password-1", admin=True
     # DPM Invitation: own DB + image folder in the temp dir too.
     os.environ["DW_INVITATION_DB"] = str(root / "invitation.db")
     os.environ["DW_INVITATION_DIR"] = str(root / "invitation_files")
+    # DPM Deal Segregator UID / KYC lookup files (v1.50): empty temp folder.
+    os.environ["DW_DSEG_LOOKUP_DIR"] = str(root / "dseg_lookup")
     for name in ("DW_APPROVAL_TEMPLATES", "DW_SIGN_LINK_DAYS", "DW_PUBLIC_BASE_URL",
                  "DW_SOFFICE", "DW_SMTP_HOST", "DW_SMTP_PORT", "DW_SMTP_USER",
                  "DW_SMTP_PASSWORD", "DW_SMTP_FROM", "DW_SMTP_TLS"):

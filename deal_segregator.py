@@ -126,6 +126,7 @@ LABEL_RINGKASAN = {
     "harian_in": "Daily 'in' rows",
     "bulanan_in": "Monthly Summary 'in' rows",
     "dipakai_in": "'in' rows kept",
+    "kyc_lookup": "UID / KYC lookup (Monthly Summary)",
 }
 
 ENTRY_DIPAKAI = ("out", "in")
@@ -1797,6 +1798,9 @@ class IngestSession:
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.allow_mt4 = bool(allow_mt4)
+        # v1.50: folder with the UID / KYC lookup files ("" = default folder),
+        # None = do not add KYC Country / UID / Total Volume. Not saved in the state.
+        self.kyc_lookup = None
         self.fx = {}
         self.fx_names = []
         self.akun = {}
@@ -2212,15 +2216,31 @@ class IngestSession:
                 "The files on your computer are not changed."
             )
 
+        # v1.50: DPM only (never with --allow-mt4 / KVB), and only when the caller
+        # asked for it (the web app passes --kyc-lookup on the DPM page).
+        kyc = self.kyc_lookup is not None and not self.allow_mt4
+        # v1.50 (Bayu): DPM Login is a number with General format ("no format"), not
+        # text. KVB (--allow-mt4) keeps text Logins.
+        login_angka = not self.allow_mt4
+        if kyc:
+            import dseg_lookup
+            tambahan, kuning = dseg_lookup.enrich(b_out, b_in, self.kyc_lookup or None)
+            ringkasan.update(tambahan)
+            yellow_labels = set(yellow_labels) | set(kuning)
+            if "Logins matched to a UID" in tambahan:
+                kyc_log = f"Logins matched to a UID: {tambahan['Logins matched to a UID']}"
+            else:
+                kyc_log = next(iter(tambahan.values()))
+
         path_out.parent.mkdir(parents=True, exist_ok=True)
         if path_out.suffix.lower() == ".zip":
             _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
-                       pakai_platform=ada_mt4)
+                       pakai_platform=ada_mt4, kyc=kyc, login_angka=login_angka)
         elif pakai_fx:
             sys.exit("STOP: Client Equity FX output must use a .zip filename.")
         else:
             _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
-                            pakai_platform=ada_mt4)
+                            pakai_platform=ada_mt4, kyc=kyc, login_angka=login_angka)
 
         if hapus_remaining:
             for path in hapus_remaining:
@@ -2238,6 +2258,8 @@ class IngestSession:
             result.update(pakai_fx=True, kurs_kurang=sum(kurs_kurang.values()))
         if ada_mt4:
             result.update(mt4_dipakai=dipakai_mt4["out"])
+        if kyc:
+            result.update(kyc_lookup=kyc_log)
         return result
 
 
@@ -2444,7 +2466,7 @@ def _ringkasan_dari_session(sess, berkas_mt5, berkas_mt4, ada_mt5, ada_mt4,
 
 @_jaga
 def proses(paths_in, path_out: Path, allow_mt4=False,
-           mt4_accounts=None, hapus_sumber=False) -> dict:
+           mt4_accounts=None, hapus_sumber=False, kyc_lookup=None) -> dict:
     """Process Deals History plus optional Client Equity FX into two XLSX files in ZIP.
 
     Uses IngestSession so multi-part runs (and the web interleaved upload path)
@@ -2503,6 +2525,7 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
     path_out.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=path_out.parent) as state_dir:
         sess = IngestSession(state_dir, allow_mt4=allow_mt4)
+        sess.kyc_lookup = kyc_lookup
         # Known MT4 in this batch → Platform column from the first MT5 row.
         if mt4_paths:
             sess.gabung = True
@@ -2533,28 +2556,48 @@ def proses(paths_in, path_out: Path, allow_mt4=False,
 
 # ------------------------------------------------------------------------ tulis
 KUNING = PatternFill("solid", fgColor="FFFF00")
+# v1.50 (DPM only): Monthly Summary gets KYC Country + UID in front; the out sheet
+# also gets Total Volume last. Daily / Daily - In are not changed.
+KOLOM_KYC_DEPAN = ("KYC Country", "UID")
+KOLOM_TOTAL_VOLUME = ("Total Volume",)
+KOLOM_TEKS_KYC = {"KYC Country", "UID"}
+WARNA_KOLOM_BARU = "FFC000"
 
 
 def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
-                 kolom_hasil=None, kolom_usd=None):
-    """Stream rows into a write-only sheet so memory does not scale with row count."""
+                 kolom_hasil=None, kolom_usd=None, kolom_depan=(), kolom_akhir=(),
+                 login_angka=False):
+    """Stream rows into a write-only sheet so memory does not scale with row count.
+
+    kolom_depan / kolom_akhir (v1.50, DPM Monthly Summary only): extra columns before
+    and after the usual layout, e.g. KYC Country + UID in front and Total Volume last.
+    Their headers are FFC000 so they stand out from the 1F4E78 ones.
+
+    login_angka (v1.50, DPM only): a numeric Login is written as an integer with the
+    General ("no format") number format instead of text. Rows are grouped and
+    sorted on the text Login before this, so order and lookups do not change.
+    """
     if kolom_hasil is None:
         kolom_hasil = KOLOM_HASIL
     if kolom_usd is None:
         kolom_usd = KOLOM_USD
     kolom = [kolom_periode if k == "{PERIODE}" else k
-             for k in kolom_hasil + (kolom_usd if pakai_fx else [])]
+             for k in list(kolom_depan) + kolom_hasil + (kolom_usd if pakai_fx else [])
+             + list(kolom_akhir)]
     usd_indexes = {kolom.index(k) + 1 for k in kolom_usd} if pakai_fx else set()
+    baru = set(kolom_depan) | set(kolom_akhir)
     header_fill = PatternFill("solid", fgColor="1F4E78")
     header_font = Font(color="FFFFFF", bold=True)
+    header_fill_baru = PatternFill("solid", fgColor=WARNA_KOLOM_BARU)
+    header_font_baru = Font(color="000000", bold=True)
     for j, name in enumerate(kolom, start=1):
         ws.column_dimensions[get_column_letter(j)].width = max(10, len(name) + 2) + 4
     ws.freeze_panes = "A2"
     header = []
     for j, name in enumerate(kolom, start=1):
         c = WriteOnlyCell(ws, value=name)
-        c.fill = header_fill
-        c.font = header_font
+        c.fill = header_fill_baru if name in baru else header_fill
+        c.font = header_font_baru if name in baru else header_font
         if j in usd_indexes:
             c.comment = Comment("Yellow means this row has no matching date/currency rate in the Client Equity FX file.",
                                 "Deal Segregator")
@@ -2565,7 +2608,7 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
         linha = []
         for j, name in enumerate(kolom, start=1):
             key = "Periode" if name == kolom_periode else name
-            nilai = d[key]
+            nilai = d.get(key) if key in baru else d[key]
             missing_fx = j in usd_indexes and d.get("_kurs_kurang")
             if missing_fx:
                 nilai = None
@@ -2573,11 +2616,18 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
             if key in KOLOM_UANG or key in kolom_usd:
                 if isinstance(nilai, float):
                     nilai = round(nilai, 2)
-            elif key in KOLOM_TEKS and isinstance(nilai, str) and nilai.startswith(("=", "+", "-", "@")):
+            elif (key in KOLOM_TEKS or key in KOLOM_TEKS_KYC) and isinstance(nilai, str) and nilai.startswith(("=", "+", "-", "@")):
                 # quotePrefix marks the cell literal in Excel. data_type "s" is
                 # required as well: quotePrefix alone still serializes '=...' as <f>.
                 teks_tidak_aman = True
+            login_jadi_angka = False
+            if login_angka and key == "Login":
+                nilai_angka = login_sebagai_angka(nilai)
+                if nilai_angka is not nilai:
+                    nilai, login_jadi_angka = nilai_angka, True
             sel = WriteOnlyCell(ws, value=nilai)
+            if login_jadi_angka:
+                sel.number_format = "General"
             if teks_tidak_aman:
                 sel.data_type = "s"
                 sel.quotePrefix = True
@@ -2640,16 +2690,36 @@ def _catat_batas_excel(ringkasan, pasangan):
     )
 
 
-def _tambah_tabel(wb, judul, baris, periode, fmt, pakai_fx, kolom):
+def _tambah_tabel(wb, judul, baris, periode, fmt, pakai_fx, kolom, depan=(), akhir=(),
+                  login_angka=False):
     potongan = _potongan_excel(baris)
     jumlah = len(potongan)
     for indeks, bagian in enumerate(potongan):
         ws = wb.create_sheet(_nama_lembar(judul, indeks, jumlah))
-        _tulis_sheet(ws, bagian, periode, fmt, pakai_fx, kolom)
+        _tulis_sheet(ws, bagian, periode, fmt, pakai_fx, kolom,
+                     kolom_depan=depan, kolom_akhir=akhir, login_angka=login_angka)
+
+
+def login_sebagai_angka(v):
+    """'503617' -> 503617. Anything else (letters, a leading 0, > 15 digits) unchanged."""
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isdigit() and t.isascii() and len(t) <= 15 and (t == "0" or not t.startswith("0")):
+            return int(t)
+    return v
+
+
+def _kolom_kyc(judul, kyc):
+    """(front, last) extra columns for one table. Only the Monthly Summary sheets."""
+    if not kyc or not judul.startswith("Monthly Summary"):
+        return (), ()
+    if judul == "Monthly Summary":
+        return KOLOM_KYC_DEPAN, KOLOM_TOTAL_VOLUME
+    return KOLOM_KYC_DEPAN, ()
 
 
 def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict,
-                    pakai_platform=False):
+                    pakai_platform=False, kyc=False, login_angka=False):
     """Legacy one-workbook writer kept for direct callers."""
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
     _catat_batas_excel(ringkasan, (
@@ -2657,10 +2727,13 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
         ("Monthly Summary", bulanan), ("Monthly Summary - In", bulanan_in),
     ))
     wb = Workbook(write_only=True)
-    _tambah_tabel(wb, "Daily", harian, "Date", "dd mmm yyyy", False, kolom)
-    _tambah_tabel(wb, "Daily - In", harian_in, "Date", "dd mmm yyyy", False, kolom)
-    _tambah_tabel(wb, "Monthly Summary", bulanan, "Month", "mmm yyyy", False, kolom)
-    _tambah_tabel(wb, "Monthly Summary - In", bulanan_in, "Month", "mmm yyyy", False, kolom)
+    la = {"login_angka": login_angka}
+    _tambah_tabel(wb, "Daily", harian, "Date", "dd mmm yyyy", False, kolom, **la)
+    _tambah_tabel(wb, "Daily - In", harian_in, "Date", "dd mmm yyyy", False, kolom, **la)
+    _tambah_tabel(wb, "Monthly Summary", bulanan, "Month", "mmm yyyy", False, kolom,
+                  *_kolom_kyc("Monthly Summary", kyc), **la)
+    _tambah_tabel(wb, "Monthly Summary - In", bulanan_in, "Month", "mmm yyyy", False, kolom,
+                  *_kolom_kyc("Monthly Summary - In", kyc), **la)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -2670,12 +2743,15 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
 
 
 def _write_split_workbook(path, title, rows, rows_in, period_name, period_format, summary,
-                          pakai_fx, yellow_labels, pakai_platform=False):
+                          pakai_fx, yellow_labels, pakai_platform=False, kyc=False,
+                          login_angka=False):
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
     _catat_batas_excel(summary, ((title, rows), (f"{title} - In", rows_in)))
     wb = Workbook(write_only=True)
-    _tambah_tabel(wb, title, rows, period_name, period_format, pakai_fx, kolom)
-    _tambah_tabel(wb, f"{title} - In", rows_in, period_name, period_format, pakai_fx, kolom)
+    _tambah_tabel(wb, title, rows, period_name, period_format, pakai_fx, kolom,
+                  *_kolom_kyc(title, kyc), login_angka=login_angka)
+    _tambah_tabel(wb, f"{title} - In", rows_in, period_name, period_format, pakai_fx, kolom,
+                  *_kolom_kyc(f"{title} - In", kyc), login_angka=login_angka)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:
         wb.save(path)
@@ -2684,7 +2760,7 @@ def _write_split_workbook(path, title, rows, rows_in, period_name, period_format
 
 
 def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels,
-               pakai_platform=False):
+               pakai_platform=False, kyc=False, login_angka=False):
     """One workbook at a time. Each temp file is removed as soon as it is in the zip."""
     _catat_batas_excel(summary, (
         ("Daily", harian), ("Daily - In", harian_in),
@@ -2701,7 +2777,8 @@ def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_
             ):
                 jalur = folder / nama
                 _write_split_workbook(jalur, judul, baris, baris_in, periode, fmt,
-                                      summary, pakai_fx, yellow_labels, pakai_platform)
+                                      summary, pakai_fx, yellow_labels, pakai_platform, kyc,
+                                      login_angka)
                 archive.write(jalur, nama)
                 jalur.unlink()
     finally:
@@ -2720,6 +2797,11 @@ def main():
                          "MT4 Raw Report is given. CentAccount or a GROUP containing cent/cents/USC "
                          "is USC (÷100); everything else and unknown logins are USD. "
                          "Used only with --allow-mt4.")
+    ap.add_argument("--kyc-lookup", nargs="?", const="", default=None, metavar="DIR",
+                    help="DPM only (v1.50): add KYC Country + UID in front of both Monthly "
+                         "Summary sheets and Total Volume on Monthly Summary, from the stored "
+                         "account / KYC files in DIR (no DIR = the server default folder). "
+                         "Ignored with --allow-mt4.")
     ap.add_argument("--delete-input", action="store_true",
                     help="After the result is written, delete the input files. "
                          "The web app passes this. Omit it to leave the files in place.")
@@ -2736,6 +2818,7 @@ def main():
             sys.exit(f"STOP: session directory not found: {state}")
         path_out = Path(args.output) if args.output else state / "hasil.zip"
         sess = IngestSession.load(state, allow_mt4=args.allow_mt4)
+        sess.kyc_lookup = args.kyc_lookup
         ringkasan = sess.finalize(path_out)
         print("=== STAGE 1 DONE ===")
         for k, v in ringkasan.items():
@@ -2757,7 +2840,8 @@ def main():
 
     ringkasan = proses(paths_in, path_out, allow_mt4=args.allow_mt4,
                        mt4_accounts=args.mt4_accounts,
-                       hapus_sumber=args.delete_input)
+                       hapus_sumber=args.delete_input,
+                       kyc_lookup=args.kyc_lookup)
     print("=== STAGE 1 DONE ===")
     for k, v in ringkasan.items():
         print(f"  {LABEL_RINGKASAN.get(k, k)}: {v}")

@@ -170,8 +170,14 @@ print("OK MT5 fixture already parsed (USC kept, footer dropped, no Platform colu
 _, dengan_flag, _ = run([MT5_FIXTURE], allow_mt4=True)
 assert dengan_flag["Deals - Daily.xlsx"]["Verifikasi"] == daily["Verifikasi"]
 assert dengan_flag["Deals - Daily.xlsx"]["__sheets__"] == daily["__sheets__"]
-assert dengan_flag["Deals - Daily.xlsx"]["Daily"] == daily["Daily"]
-assert dengan_flag["Deals - Daily.xlsx"]["Daily - In"] == daily["Daily - In"]
+# v1.50: the only difference is the Login type. DPM writes a numeric Login as an
+# integer (General format); KVB (--allow-mt4) keeps it as text.
+def _login_teks(rows):
+    return [rows[0]] + [[str(r[0])] + list(r[1:]) for r in rows[1:]]
+for _s in ("Daily", "Daily - In"):
+    assert all(isinstance(r[0], int) for r in daily[_s][1:]), _s
+    assert all(isinstance(r[0], str) for r in dengan_flag["Deals - Daily.xlsx"][_s][1:]), _s
+    assert _login_teks(dengan_flag["Deals - Daily.xlsx"][_s]) == _login_teks(daily[_s]), _s
 assert dengan_flag["Deals - Monthly Summary.xlsx"]["__sheets__"] == [
     "Monthly Summary", "Monthly Summary - In", "Verifikasi"]
 print("OK MT5-only output unchanged when MT4 is allowed")
@@ -192,7 +198,7 @@ with tempfile.TemporaryDirectory() as tmp:
         raise AssertionError("DPM accepted an MT4 Raw Report")
     summary, hasil, _ = run([mt5], allow_mt4=False)
     assert hasil["Deals - Daily.xlsx"]["__sheets__"] == SHEETS
-    assert hasil["Deals - Daily.xlsx"]["Daily"][1][0] == "100"
+    assert hasil["Deals - Daily.xlsx"]["Daily"][1][0] == 100   # v1.50: DPM Login is a number
 print("OK DPM rejects MT4 by content and still reads a misnamed MT5 file")
 
 # Closed buy/sell -> out at Close Time only. Taxes land in Fee. Agent is not a

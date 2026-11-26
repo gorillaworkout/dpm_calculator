@@ -42,3 +42,7 @@ approval_files/
 invitation.db
 invitation.db-*
 invitation_files/
+
+# DPM Deal Segregator UID / KYC lookup files (v1.50): client ids and countries
+dseg_lookup/
+.lookup_cache.pkl

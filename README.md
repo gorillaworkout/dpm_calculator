@@ -375,6 +375,42 @@ jalur KVB karena KVB menjalankan script yang sama). Urutan per baris, sheet `W`:
    itu hanya boleh diselamatkan lewat `Completed Time`.
 4. `Apply Date` **tidak pernah** dipakai (bisa jatuh di bulan yang salah).
 
+#### v1.50 — DPM Deal Segregator: KYC Country + UID di Monthly Summary, Total Volume
+Permintaan tim DPM Malaysia (Bayu, 26 Nov 2026). **Hanya DPM Deal Segregator**; KVB,
+sheet `Daily` / `Daily - In` dan tool lain tidak berubah.
+
+- `Monthly Summary - In`: kolom baru **A = KYC Country**, **B = UID**; kolom lama
+  (Login, Month, …) bergeser mulai C, nilainya sama persis.
+- `Monthly Summary` (out): A/B yang sama, plus kolom terakhir **Total Volume** =
+  `Volume / 100` kalau `Currency = USC`, selain itu `Volume` apa adanya (USD, JPY, …).
+  Dengan Client Equity FX: 18 kolom, Total Volume = **R** (setelah Profit (USD)).
+- Header kolom baru berwarna `FFC000`; header lama tetap `1F4E78`. Isinya **nilai**,
+  bukan rumus XLOOKUP ke file luar.
+- Lookup (sama seperti XLOOKUP tim): `Login` → kolom `account` → `user_id` = UID, lalu
+  UID → `user_id` → `Country of KYC`. Baris pertama yang cocok dipakai. Login tanpa UID:
+  dua kolom kosong; UID tanpa baris KYC: KYC Country kosong. Keduanya didaftar (kuning)
+  di Verifikasi, bersama jumlah login yang cocok dan tanggal file lookup.
+
+- **Login tanpa format** (Bayu, 26 Nov 2026): di semua sheet DPM (`Daily`, `Daily - In`,
+  `Monthly Summary`, `Monthly Summary - In`) Login yang berupa angka ditulis sebagai
+  **angka bulat** dengan number format `General`, bukan teks. Login yang bukan angka (atau
+  diawali 0, atau > 15 digit) tetap apa adanya. Pengelompokan, urutan dan lookup tetap
+  memakai Login teks di dalam, jadi hasilnya tidak berubah. KVB tetap teks.
+
+**File lookup disimpan di server** (jarang berubah, tidak di-upload tiap kali, tidak
+pernah masuk git): folder `dseg_lookup/` di sebelah `users.db` (atau `DW_DSEG_LOOKUP_DIR`),
+berisi `account_uid.xlsx` (`user_id`, `account`) dan `uid_kyc_country.xlsx`
+(`user_id`, `Country of KYC`); `.csv` juga boleh. Hasil parse (107k + 374k baris, ±5 detik)
+di-cache di `.lookup_cache.pkl` per ukuran+mtime file, jadi run berikutnya <1 detik.
+**Setiap user DPM** (bukan hanya admin) bisa mengganti file lewat **Update UID / KYC lookup files** di halaman DPM Deal
+Segregator (header divalidasi; file lama tetap kalau header salah; tanggal file tampil).
+Kalau file belum ada, segregator tetap jalan: kolom KYC Country / UID kosong, dengan
+catatan di halaman, di log job dan di Verifikasi.
+
+Teknis: `dseg_lookup.py`; `deal_segregator.py --kyc-lookup DIR` (web app memberi flag ini
+hanya untuk DPM; diabaikan bersama `--allow-mt4`; run CLI tanpa flag = layout lama).
+Tes: `test_deal_seg_kyc_v150.py`.
+
 #### v1.49 — 手续费 fund transfer dihitung di KEDUA sisi (DPM + KVB)
 Sebelumnya hanya `手续费` sisi 汇出 (kolom H, pengirim) yang dibaca. `手续费` sisi 收款
 (kolom N, penerima) diabaikan diam-diam, dan buku besar J Wallet tidak memuat fee sama

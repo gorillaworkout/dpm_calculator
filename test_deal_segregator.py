@@ -78,7 +78,9 @@ with TemporaryDirectory() as tmp:
     wb = load_workbook(out, read_only=True, data_only=True)
     try:
         assert values(wb["Daily"])[0] == tuple(RESULT_HEADERS)
-        assert values(wb["Daily"])[1][0] == "100"
+        # v1.50 (Bayu): DPM Login is a number in General ("no format"), not text.
+        assert values(wb["Daily"])[1][0] == 100
+        assert next(wb["Daily"].iter_rows(min_row=2, max_row=2))[0].number_format == "General"
         assert "Country" not in RESULT_HEADERS and "Desk" not in RESULT_HEADERS
     finally:
         wb.close()
@@ -127,16 +129,17 @@ with TemporaryDirectory() as tmp:
         monthly = values(wb["Monthly Summary"])
         assert daily[0] == tuple(RESULT_HEADERS)
         assert monthly[0] == tuple("Month" if h == "Date" else h for h in RESULT_HEADERS)
+        # v1.50: DPM Login is an integer in General format, not text.
         assert daily[1:] == [
-            ("100", datetime.datetime(2026, 7, 1), "buy", "EURUSD", 2, 2, -3, -0.3, -0.5, 15, "USD"),
-            ("100", datetime.datetime(2026, 7, 2), "buy", "EURUSD", 1, 1, -1, -0.3, -0.4, 20, "USD"),
-            ("100", datetime.datetime(2026, 8, 4), "buy", "EURUSD", 1, 0.5, -0.5, -0.05, -0.1, 7, "USD"),
-            ("200", datetime.datetime(2026, 8, 3), "sell", "XAUUSD", 1, 2, -4, -0.4, -0.5, 30, "USD"),
+            (100, datetime.datetime(2026, 7, 1), "buy", "EURUSD", 2, 2, -3, -0.3, -0.5, 15, "USD"),
+            (100, datetime.datetime(2026, 7, 2), "buy", "EURUSD", 1, 1, -1, -0.3, -0.4, 20, "USD"),
+            (100, datetime.datetime(2026, 8, 4), "buy", "EURUSD", 1, 0.5, -0.5, -0.05, -0.1, 7, "USD"),
+            (200, datetime.datetime(2026, 8, 3), "sell", "XAUUSD", 1, 2, -4, -0.4, -0.5, 30, "USD"),
         ]
         assert monthly[1:] == [
-            ("100", datetime.datetime(2026, 7, 1), "buy", "EURUSD", 3, 3, -4, -0.6, -0.9, 35, "USD"),
-            ("100", datetime.datetime(2026, 8, 1), "buy", "EURUSD", 1, 0.5, -0.5, -0.05, -0.1, 7, "USD"),
-            ("200", datetime.datetime(2026, 8, 1), "sell", "XAUUSD", 1, 2, -4, -0.4, -0.5, 30, "USD"),
+            (100, datetime.datetime(2026, 7, 1), "buy", "EURUSD", 3, 3, -4, -0.6, -0.9, 35, "USD"),
+            (100, datetime.datetime(2026, 8, 1), "buy", "EURUSD", 1, 0.5, -0.5, -0.05, -0.1, 7, "USD"),
+            (200, datetime.datetime(2026, 8, 1), "sell", "XAUUSD", 1, 2, -4, -0.4, -0.5, 30, "USD"),
         ]
         verification = dict(values(wb["Verifikasi"])[2:])
         assert wb["Verifikasi"]["A1"].value == "Summary - Deal Segregator"
@@ -149,7 +152,7 @@ with TemporaryDirectory() as tmp:
         # The 'in' row lives on its own sheet, with its own values as in MT5.
         assert values(wb["Daily - In"])[0] == tuple(RESULT_HEADERS)
         assert values(wb["Daily - In"])[1:] == [
-            ("100", datetime.datetime(2026, 7, 1), "buy", "EURUSD", 1, 1.25, -1, -0.1, -0.2, 999, "USD"),
+            (100, datetime.datetime(2026, 7, 1), "buy", "EURUSD", 1, 1.25, -1, -0.1, -0.2, 999, "USD"),
         ]
         assert len(values(wb["Monthly Summary - In"])) == 2
         # The label must state every grouping dimension actually used.
