@@ -321,6 +321,13 @@ CHANNEL_ARG = {"hitung_dw.py": "--channel-opening"}
 # v1.46: baris Sales Name 'Test data' / Sales Dept 'Test Department' dibuang otomatis di
 # DPM DAN KVB (keputusan Bayu, 24 Nov 2026). --keep-test-rows (hitung_dw.py) hanya untuk
 # dijalankan manual; TIDAK dipasang di sini.
+# v1.49 (25 Nov 2026): the 手续费 of both sides of a fund transfer counts (receiving-side fee
+# on the receiving channel, J Wallet fee rows). DPM vs KVB is still being decided with the
+# DPM team, so it is ON for both. To restrict it, flip ONE value here:
+#   KVB only  -> {"dpm": False, "kvb": True}
+#   DPM only  -> {"dpm": True,  "kvb": False}
+# A company set to False runs hitung_dw.py with --legacy-transfer-fee (the v1.48 behaviour).
+TRANSFER_FEE_V149 = {"dpm": True, "kvb": True}
 KVB_ARG = {
     "isi_template.py": ("--tanpa-extra-fees", "--settlement-rows", "--legacy-withdrawal-rules"),
     "hitung_dw.py": (
@@ -652,7 +659,10 @@ KVB_DOC = {
         "CNY gateways ChipPay, EP, UPay and ZPay also get a USD block directly under "
         "the CNY block on <code>Payment Channel Balance</code>. Deposit and Withdrawal "
         "on that block come from the USD column. Charges are Handling Fee × (USD ÷ Transaction). "
-        "CNY fund transfers, outgoing and incoming, and the sending-side transfer fee, "
+        "CNY fund transfers, outgoing and incoming, and "
+        + ("the transfer fee of each side (the sending fee on the sending channel, the "
+           "receiving fee on the receiving channel), "
+           if TRANSFER_FEE_V149["kvb"] else "the sending-side transfer fee, ") +
         "are converted onto that USD block. The rate is the Xero USD when this run "
         "computed it, otherwise that gateway's same-day weighted USD/Transaction, "
         "otherwise its monthly weighted ratio, otherwise the run's CNY median ratio. "
@@ -1324,6 +1334,8 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
             if company == "kvb" and KVB_ARG.get(script):
                 tambahan = KVB_ARG[script]
                 perintah.extend(tambahan if isinstance(tambahan, (list, tuple)) else [tambahan])
+            if script == "hitung_dw.py" and not TRANSFER_FEE_V149.get(company, True):
+                perintah.append("--legacy-transfer-fee")
             if script in ("deal_segregator.py", "dpm_segregated.py"):
                 # The workbook says so on Verifikasi. The CLI does not pass this,
                 # so a command-line run leaves the source files where they are.

@@ -130,6 +130,7 @@ def _tf(**kw):
         "penerima": None,
         "tujuan_cur": "",
         "tujuan_jumlah": None,
+        "tujuan_fee": None,
     }
     dasar.update(kw)
     return dasar
@@ -159,10 +160,36 @@ def test_cny_transfer_rate_sources():
         assert abs(agg[out_k]["ft"] - 145.0) < 1e-9, agg[out_k]
         assert abs(agg[out_k]["ft_fee"] - 1.45) < 1e-9, agg[out_k]
         assert abs(agg[in_k]["ft"] - -130.5) < 1e-9, agg[in_k]
+        # v1.49: no receiving-side fee in the row -> the incoming side carries no fee
+        # (this is the old behaviour, unchanged); see the next block for a fee present.
         assert not agg[in_k]["ft_fee"]
         sumber = {(x["channel"], x["side"]): x["source"] for x in report["usd_shadow_ft"]}
         assert sumber == {("ChipPay", "out"): "xero", ("EP", "in"): "xero"}, sumber
         assert all(x["posted"] for x in report["usd_shadow_ft"])
+        assert "fee" not in h.baris_legend_ft(
+            next(x for x in report["usd_shadow_ft"] if x["side"] == "in"))
+
+        # v1.49: receiving-side fee present (20 CNY) -> converted with the receiving
+        # side's own rate (Xero 145 / 1000 = 0.145 -> USD 2.90) onto the receiving
+        # channel's USD 'Fund transfer charges'. The sending side is unchanged.
+        agg = defaultdict(lambda: defaultdict(float))
+        report = {"records": list(records)}
+        h.tambah_usd_shadow(agg, report, [dict(xero, tujuan_fee=20.0)])
+        assert abs(agg[out_k]["ft_fee"] - 1.45) < 1e-9, agg[out_k]
+        assert abs(agg[in_k]["ft"] - -130.5) < 1e-9, agg[in_k]
+        assert abs(agg[in_k]["ft_fee"] - 2.9) < 1e-9, agg[in_k]
+        in_item = next(x for x in report["usd_shadow_ft"] if x["side"] == "in")
+        assert in_item["fee"] == 20.0 and abs(in_item["fee_usd"] - 2.9) < 1e-9, in_item
+        assert "fee 20.00" in h.baris_legend_ft(in_item), h.baris_legend_ft(in_item)
+        # the same row with the v1.49 switch off behaves like v1.48 again
+        h.TRANSFER_FEE_V149 = False
+        try:
+            agg = defaultdict(lambda: defaultdict(float))
+            report = {"records": list(records)}
+            h.tambah_usd_shadow(agg, report, [dict(xero, tujuan_fee=20.0)])
+            assert not agg[in_k]["ft_fee"], agg[in_k]
+        finally:
+            h.TRANSFER_FEE_V149 = True
 
         agg = defaultdict(lambda: defaultdict(float))
         report = {"records": list(records)}

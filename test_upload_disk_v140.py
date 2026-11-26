@@ -262,7 +262,7 @@ assert "/upload/preflight" in html
 print("OK tool.html gating + UI hints")
 
 # VERSION
-# v1.40 shipped this; later PRs keep bumping VERSION (1.48 = blank opening-balance cells).
+# v1.40 shipped this; later PRs keep bumping VERSION (1.49 = fund transfer fee on both sides).
 _ver = re.search(r"^version=1\.(\d+)$", Path("VERSION").read_text(), re.M)
 assert _ver and int(_ver.group(1)) >= 40, Path("VERSION").read_text()
 print("OK VERSION 1." + _ver.group(1))
