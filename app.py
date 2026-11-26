@@ -881,17 +881,18 @@ def _lookup_ctx(company, slug):
     """DPM Deal Segregator only: the stored UID / KYC lookup files (v1.50)."""
     if company != "dpm" or slug != "segregate":
         return {}
-    user = getattr(request, "user", None) or {}
-    try:
-        is_admin = bool(user["is_admin"])
-    except (KeyError, IndexError, TypeError):
-        is_admin = False
-    return {"lookup_status": dseg_lookup.status(), "lookup_admin": is_admin}
+    # Bayu (26 Nov 2026): every DPM user may replace the files, not only admins.
+    user = getattr(request, "user", None)
+    boleh = bool(user) and auth.has_company(user, "dpm")
+    return {"lookup_status": dseg_lookup.status(), "lookup_can_upload": boleh}
 
 
 @app.post("/tool/segregate/lookup")
 def segregate_lookup_upload():
-    """Admin replaces the stored account / KYC lookup files of the DPM Deal Segregator."""
+    """A DPM user replaces the stored account / KYC lookup files of the DPM Deal Segregator.
+
+    /tool/* already requires DPM access (_require_login); the check below repeats it.
+    """
     request.company = "dpm"
     registry = _tools_for("dpm")
     hint, doc = _copy_for("dpm", "segregate")
@@ -902,8 +903,8 @@ def segregate_lookup_upload():
         return render_template("tool.html", slug="segregate", tool=registry["segregate"],
                                hint=hint, doc=doc, **ctx2, **kw), code
 
-    if not ctx.get("lookup_admin"):
-        return _page(403, lookup_error="Only an admin can replace the UID / KYC lookup files.")
+    if not ctx.get("lookup_can_upload"):
+        return _page(403, lookup_error="Only DPM users can replace the UID / KYC lookup files.")
     files = {"account": request.files.get("account_file"), "kyc": request.files.get("kyc_file")}
     files = {k: f for k, f in files.items() if f and f.filename}
     if not files:

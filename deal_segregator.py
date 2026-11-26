@@ -2219,6 +2219,9 @@ class IngestSession:
         # v1.50: DPM only (never with --allow-mt4 / KVB), and only when the caller
         # asked for it (the web app passes --kyc-lookup on the DPM page).
         kyc = self.kyc_lookup is not None and not self.allow_mt4
+        # v1.50 (Bayu): DPM Login is a number with General format ("no format"), not
+        # text. KVB (--allow-mt4) keeps text Logins.
+        login_angka = not self.allow_mt4
         if kyc:
             import dseg_lookup
             tambahan, kuning = dseg_lookup.enrich(b_out, b_in, self.kyc_lookup or None)
@@ -2232,12 +2235,12 @@ class IngestSession:
         path_out.parent.mkdir(parents=True, exist_ok=True)
         if path_out.suffix.lower() == ".zip":
             _tulis_zip(h_out, b_out, h_in, b_in, path_out, ringkasan, pakai_fx, yellow_labels,
-                       pakai_platform=ada_mt4, kyc=kyc)
+                       pakai_platform=ada_mt4, kyc=kyc, login_angka=login_angka)
         elif pakai_fx:
             sys.exit("STOP: Client Equity FX output must use a .zip filename.")
         else:
             _tulis_workbook(h_out, b_out, h_in, b_in, path_out, ringkasan,
-                            pakai_platform=ada_mt4, kyc=kyc)
+                            pakai_platform=ada_mt4, kyc=kyc, login_angka=login_angka)
 
         if hapus_remaining:
             for path in hapus_remaining:
@@ -2562,12 +2565,17 @@ WARNA_KOLOM_BARU = "FFC000"
 
 
 def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
-                 kolom_hasil=None, kolom_usd=None, kolom_depan=(), kolom_akhir=()):
+                 kolom_hasil=None, kolom_usd=None, kolom_depan=(), kolom_akhir=(),
+                 login_angka=False):
     """Stream rows into a write-only sheet so memory does not scale with row count.
 
     kolom_depan / kolom_akhir (v1.50, DPM Monthly Summary only): extra columns before
     and after the usual layout, e.g. KYC Country + UID in front and Total Volume last.
     Their headers are FFC000 so they stand out from the 1F4E78 ones.
+
+    login_angka (v1.50, DPM only): a numeric Login is written as an integer with the
+    General ("no format") number format instead of text. Rows are grouped and
+    sorted on the text Login before this, so order and lookups do not change.
     """
     if kolom_hasil is None:
         kolom_hasil = KOLOM_HASIL
@@ -2612,7 +2620,14 @@ def _tulis_sheet(ws, hasil, kolom_periode, fmt_periode, pakai_fx=False,
                 # quotePrefix marks the cell literal in Excel. data_type "s" is
                 # required as well: quotePrefix alone still serializes '=...' as <f>.
                 teks_tidak_aman = True
+            login_jadi_angka = False
+            if login_angka and key == "Login":
+                nilai_angka = login_sebagai_angka(nilai)
+                if nilai_angka is not nilai:
+                    nilai, login_jadi_angka = nilai_angka, True
             sel = WriteOnlyCell(ws, value=nilai)
+            if login_jadi_angka:
+                sel.number_format = "General"
             if teks_tidak_aman:
                 sel.data_type = "s"
                 sel.quotePrefix = True
@@ -2675,13 +2690,23 @@ def _catat_batas_excel(ringkasan, pasangan):
     )
 
 
-def _tambah_tabel(wb, judul, baris, periode, fmt, pakai_fx, kolom, depan=(), akhir=()):
+def _tambah_tabel(wb, judul, baris, periode, fmt, pakai_fx, kolom, depan=(), akhir=(),
+                  login_angka=False):
     potongan = _potongan_excel(baris)
     jumlah = len(potongan)
     for indeks, bagian in enumerate(potongan):
         ws = wb.create_sheet(_nama_lembar(judul, indeks, jumlah))
         _tulis_sheet(ws, bagian, periode, fmt, pakai_fx, kolom,
-                     kolom_depan=depan, kolom_akhir=akhir)
+                     kolom_depan=depan, kolom_akhir=akhir, login_angka=login_angka)
+
+
+def login_sebagai_angka(v):
+    """'503617' -> 503617. Anything else (letters, a leading 0, > 15 digits) unchanged."""
+    if isinstance(v, str):
+        t = v.strip()
+        if t.isdigit() and t.isascii() and len(t) <= 15 and (t == "0" or not t.startswith("0")):
+            return int(t)
+    return v
 
 
 def _kolom_kyc(judul, kyc):
@@ -2694,7 +2719,7 @@ def _kolom_kyc(judul, kyc):
 
 
 def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ringkasan: dict,
-                    pakai_platform=False, kyc=False):
+                    pakai_platform=False, kyc=False, login_angka=False):
     """Legacy one-workbook writer kept for direct callers."""
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
     _catat_batas_excel(ringkasan, (
@@ -2702,12 +2727,13 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
         ("Monthly Summary", bulanan), ("Monthly Summary - In", bulanan_in),
     ))
     wb = Workbook(write_only=True)
-    _tambah_tabel(wb, "Daily", harian, "Date", "dd mmm yyyy", False, kolom)
-    _tambah_tabel(wb, "Daily - In", harian_in, "Date", "dd mmm yyyy", False, kolom)
+    la = {"login_angka": login_angka}
+    _tambah_tabel(wb, "Daily", harian, "Date", "dd mmm yyyy", False, kolom, **la)
+    _tambah_tabel(wb, "Daily - In", harian_in, "Date", "dd mmm yyyy", False, kolom, **la)
     _tambah_tabel(wb, "Monthly Summary", bulanan, "Month", "mmm yyyy", False, kolom,
-                  *_kolom_kyc("Monthly Summary", kyc))
+                  *_kolom_kyc("Monthly Summary", kyc), **la)
     _tambah_tabel(wb, "Monthly Summary - In", bulanan_in, "Month", "mmm yyyy", False, kolom,
-                  *_kolom_kyc("Monthly Summary - In", kyc))
+                  *_kolom_kyc("Monthly Summary - In", kyc), **la)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), ringkasan)
     path_out.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -2717,14 +2743,15 @@ def _tulis_workbook(harian, bulanan, harian_in, bulanan_in, path_out: Path, ring
 
 
 def _write_split_workbook(path, title, rows, rows_in, period_name, period_format, summary,
-                          pakai_fx, yellow_labels, pakai_platform=False, kyc=False):
+                          pakai_fx, yellow_labels, pakai_platform=False, kyc=False,
+                          login_angka=False):
     kolom = KOLOM_HASIL_PLATFORM if pakai_platform else None
     _catat_batas_excel(summary, ((title, rows), (f"{title} - In", rows_in)))
     wb = Workbook(write_only=True)
     _tambah_tabel(wb, title, rows, period_name, period_format, pakai_fx, kolom,
-                  *_kolom_kyc(title, kyc))
+                  *_kolom_kyc(title, kyc), login_angka=login_angka)
     _tambah_tabel(wb, f"{title} - In", rows_in, period_name, period_format, pakai_fx, kolom,
-                  *_kolom_kyc(f"{title} - In", kyc))
+                  *_kolom_kyc(f"{title} - In", kyc), login_angka=login_angka)
     _tulis_verifikasi(wb.create_sheet("Verifikasi"), summary, yellow_labels)
     try:
         wb.save(path)
@@ -2733,7 +2760,7 @@ def _write_split_workbook(path, title, rows, rows_in, period_name, period_format
 
 
 def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_fx, yellow_labels,
-               pakai_platform=False, kyc=False):
+               pakai_platform=False, kyc=False, login_angka=False):
     """One workbook at a time. Each temp file is removed as soon as it is in the zip."""
     _catat_batas_excel(summary, (
         ("Daily", harian), ("Daily - In", harian_in),
@@ -2750,7 +2777,8 @@ def _tulis_zip(harian, bulanan, harian_in, bulanan_in, path_out, summary, pakai_
             ):
                 jalur = folder / nama
                 _write_split_workbook(jalur, judul, baris, baris_in, periode, fmt,
-                                      summary, pakai_fx, yellow_labels, pakai_platform, kyc)
+                                      summary, pakai_fx, yellow_labels, pakai_platform, kyc,
+                                      login_angka)
                 archive.write(jalur, nama)
                 jalur.unlink()
     finally:

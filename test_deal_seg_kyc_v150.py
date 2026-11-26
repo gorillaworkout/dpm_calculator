@@ -10,8 +10,10 @@ Synthetic data only: made-up logins (9001..9004), user_ids (70001..) and countri
 2. missing lookup files: still runs, both columns blank, note on Verifikasi.
 3. KVB (--allow-mt4) and a plain CLI run (no --kyc-lookup) are not changed.
 4. lookup module: header validation, xlsx/csv, cache by mtime, first match wins.
-5. web: page status + note, admin upload (bad header rejected, good one saved and
-   dated), non-admin refused, KVB page has no lookup card, DPM web job fills the columns.
+5. web: page status + note, upload by any DPM user (bad header rejected, good one saved
+   and dated), KVB-only user refused, KVB page has no lookup card, DPM job fills the columns.
+6. Login: integer with General ("no format") number format on all four DPM sheets;
+   KVB keeps text; non-numeric Logins unchanged.
 """
 import base64
 import csv
@@ -141,22 +143,35 @@ for sheet in ("Daily", "Daily - In"):
     assert kyc[DD][sheet] == base[DD][sheet], sheet
 
 rows = {r[2]: dict(zip(out_h, r)) for r in kyc[MS]["Monthly Summary"][1:]}
-assert rows["9001"]["UID"] == 70001 and rows["9001"]["KYC Country"] == "zz"   # match; first dup wins
-assert rows["9002"]["UID"] == 70002 and rows["9002"]["KYC Country"] == "yy"
-assert rows["9003"]["UID"] == 70003 and rows["9003"]["KYC Country"] is None   # UID, no KYC row
-assert rows["9004"]["UID"] is None and rows["9004"]["KYC Country"] is None    # no UID
+assert rows[9001]["UID"] == 70001 and rows[9001]["KYC Country"] == "zz"   # match; first dup wins
+assert rows[9002]["UID"] == 70002 and rows[9002]["KYC Country"] == "yy"
+assert rows[9003]["UID"] == 70003 and rows[9003]["KYC Country"] is None   # UID, no KYC row
+assert rows[9004]["UID"] is None and rows[9004]["KYC Country"] is None    # no UID
 # Total Volume: USC / 100, USD and JPY exact (2 out deals per login)
-assert rows["9002"]["Volume"] == 100 and rows["9002"]["Total Volume"] == 1.0, rows["9002"]
-assert rows["9001"]["Total Volume"] == rows["9001"]["Volume"] == 1.0
-assert rows["9003"]["Total Volume"] == rows["9003"]["Volume"] == 4
-assert rows["9004"]["Total Volume"] == rows["9004"]["Volume"] == 2
+assert rows[9002]["Volume"] == 100 and rows[9002]["Total Volume"] == 1.0, rows[9002]
+assert rows[9001]["Total Volume"] == rows[9001]["Volume"] == 1.0
+assert rows[9003]["Total Volume"] == rows[9003]["Volume"] == 4
+assert rows[9004]["Total Volume"] == rows[9004]["Volume"] == 2
 ins = {r[2]: r for r in kyc[MS]["Monthly Summary - In"][1:]}
-assert ins["9001"][:2] == ["zz", 70001] and ins["9004"][:2] == [None, None]
+assert ins[9001][:2] == ["zz", 70001] and ins[9004][:2] == [None, None]
 v = verif(kyc[MS])
 assert v["Logins matched to a UID"] == "3 of 4", v
 assert v["Logins with no UID (KYC Country and UID left blank)"] == "1: 9004", v
 assert v["UIDs with no KYC row (KYC Country left blank)"] == "1: 70003", v
 assert "updated " in v["UID / KYC lookup (KYC Country, UID columns)"]
+# Login: integer + General ("no format") on every sheet, DPM only (Bayu, 26 Nov 2026)
+for name, sheets in (("Daily", ("Daily", "Daily - In")),
+                     ("Monthly", ("Monthly Summary", "Monthly Summary - In"))):
+    wbk = kwb[DD if name == "Daily" else MS]
+    for sheet in sheets:
+        hdr = [c.value for c in wbk[sheet][1]]
+        col = hdr.index("Login") + 1
+        cells = [r[0] for r in wbk[sheet].iter_rows(min_row=2, min_col=col, max_col=col)]
+        assert cells and all(isinstance(c.value, int) for c in cells), sheet
+        assert all(c.number_format == "General" for c in cells), sheet
+assert ds.login_sebagai_angka("503617") == 503617
+for keep in ("A123", "0123", "1" * 16, "", None, 7):
+    assert ds.login_sebagai_angka(keep) == keep
 print("OK engine: match / no match / no KYC, USC/USD/JPY, shift-only, Daily unchanged")
 
 # with Client Equity FX: USD columns stay, Total Volume after them (column R)
@@ -216,6 +231,8 @@ ds.proses([deals], work / "kvb0.zip", allow_mt4=True)
 ds.proses([deals], work / "kvb1.zip", allow_mt4=True, kyc_lookup=str(lk1))
 assert books(work / "kvb0.zip")[0][MS]["Monthly Summary"] == books(work / "kvb1.zip")[0][MS]["Monthly Summary"]
 assert "KYC Country" not in books(work / "kvb1.zip")[0][MS]["Monthly Summary"][0]
+kvb_daily = books(work / "kvb1.zip")[0][DD]["Daily"]
+assert all(isinstance(r[0], str) for r in kvb_daily[1:])          # KVB Login stays text
 assert "KYC Country" not in base[MS]["Monthly Summary"][0]
 print("OK KVB and a CLI run without --kyc-lookup unchanged")
 
@@ -282,19 +299,37 @@ assert 'id="kyc-lookup-missing"' not in html
 assert re.search(r"account_uid\.xlsx</strong>, updated \d{4}-\d{2}-\d{2} \d{2}:\d{2}", html)
 assert (LOOKUP / "account_uid.xlsx").is_file() and (LOOKUP / "uid_kyc_country.xlsx").is_file()
 
-# non-admin: sees the status, cannot replace the files
-r = c.post("/admin/users", data={"username": "ops1", "password": "ops-password-1", "can_dpm": "1"})
-assert r.status_code in (302, 303), r.status_code
-c2 = A.app.test_client()
-c2.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(b"ops1:ops-password-1").decode()
-c2.environ_base["HTTP_ACCEPT"] = "text/html"
+# every DPM user (not only admins) may replace the files (Bayu, 26 Nov 2026)
+def user_client(name, **access):
+    r = c.post("/admin/users", data={"username": name, "password": "ops-password-1", **access})
+    assert r.status_code in (302, 303), r.status_code
+    cl = A.app.test_client()
+    cl.environ_base["HTTP_AUTHORIZATION"] = "Basic " + base64.b64encode(
+        f"{name}:ops-password-1".encode()).decode()
+    cl.environ_base["HTTP_ACCEPT"] = "text/html"
+    return cl
+
+c2 = user_client("ops1", can_dpm="1")
 p2 = c2.get("/tool/segregate").data.decode()
-assert "UID / KYC lookup files" in p2 and "Only an admin can replace" in p2
-assert 'action="/tool/segregate/lookup"' not in p2
-r = c2.post("/tool/segregate/lookup", data={"kyc_file": (io.BytesIO(b"user_id,Country of KYC\n1,aa\n"), "k.csv")},
+assert "UID / KYC lookup files" in p2 and 'action="/tool/segregate/lookup"' in p2
+r = c2.post("/tool/segregate/lookup", data={"kyc_file": (io.BytesIO(b"user_id,acct\n1,aa\n"), "k.csv")},
             content_type="multipart/form-data")
-assert r.status_code == 403
+assert r.status_code == 400 and b"user_id, Country of KYC" in r.data      # header still checked
 assert L.load(LOOKUP)["data"]["kyc"]["map"]["70001"] == "zz"
+kyc_csv = b"user_id,Country of KYC\n70001,zz\n70002,yy\n70009,ww\n"
+r = c2.post("/tool/segregate/lookup", data={"kyc_file": (io.BytesIO(kyc_csv), "k.csv")},
+            content_type="multipart/form-data")
+assert r.status_code == 200 and b"Lookup files updated" in r.data, r.data[-600:]
+assert (LOOKUP / "uid_kyc_country.csv").is_file() and not (LOOKUP / "uid_kyc_country.xlsx").exists()
+assert L.load(LOOKUP)["data"]["kyc"]["map"]["70002"] == "yy"
+
+# a KVB-only user has no DPM access: no page, no upload
+c3 = user_client("kvbops", can_kvb="1")
+assert c3.get("/tool/segregate").status_code in (302, 303, 401, 403)
+r = c3.post("/tool/segregate/lookup", data={"kyc_file": (io.BytesIO(kyc_csv), "x.csv")},
+            content_type="multipart/form-data")
+assert r.status_code in (302, 303, 401, 403), r.status_code
+assert (LOOKUP / "uid_kyc_country.csv").read_bytes() == kyc_csv
 
 # DPM web job: the runner passes --kyc-lookup with the server folder
 r = c.post("/tool/segregate", data={"file": (deals.open("rb"), "deals.csv")},
@@ -312,12 +347,12 @@ wz = work / "web.zip"
 wz.write_bytes(dl.data)
 wb_, _ = books(wz)
 web_rows = {r[2]: r for r in wb_[MS]["Monthly Summary"][1:]}
-assert web_rows["9001"][:2] == ["zz", 70001] and web_rows["9002"][-1] == 1.0
+assert web_rows[9001][:2] == ["zz", 70001] and web_rows[9002][-1] == 1.0
 assert wb_[DD]["Daily"] == base[DD]["Daily"]
 assert "UID / KYC lookup (Monthly Summary): Logins matched to a UID: 3 of 4" in (info.get("log") or ""), info.get("log")
 src = (ROOT / "app.py").read_text(encoding="utf-8")
 assert src.count('["--kyc-lookup", str(dseg_lookup.lookup_dir())]') == 2
-print("OK web: status, admin upload, non-admin 403, KVB page unchanged, DPM job filled")
+print("OK web: status, upload by any DPM user, KVB-only user refused, KVB page unchanged, DPM job filled")
 
 # ------------------------------------------------------------ version
 ver = (ROOT / "VERSION").read_text(encoding="utf-8")

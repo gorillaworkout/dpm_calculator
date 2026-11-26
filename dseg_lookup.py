@@ -324,7 +324,7 @@ def enrich(rows_out, rows_in, folder=None):
         names = " and the ".join(f"{LABEL[k]} ({SHOW[k]})" for k in lk["missing"])
         verb = "are" if len(lk["missing"]) > 1 else "is"
         note = (f"NOT AVAILABLE: the {names} {verb} not stored on the server, so the KYC Country "
-                "and UID columns are blank. An admin can upload it on the DPM Deal "
+                "and UID columns are blank. Upload it on the DPM Deal "
                 "Segregator page (Update UID / KYC lookup files).")
         return {label: note}, {label}
     acc = lk["data"][KIND_ACCOUNT]["map"]

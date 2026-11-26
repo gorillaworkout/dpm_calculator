@@ -391,12 +391,18 @@ sheet `Daily` / `Daily - In` dan tool lain tidak berubah.
   dua kolom kosong; UID tanpa baris KYC: KYC Country kosong. Keduanya didaftar (kuning)
   di Verifikasi, bersama jumlah login yang cocok dan tanggal file lookup.
 
+- **Login tanpa format** (Bayu, 26 Nov 2026): di semua sheet DPM (`Daily`, `Daily - In`,
+  `Monthly Summary`, `Monthly Summary - In`) Login yang berupa angka ditulis sebagai
+  **angka bulat** dengan number format `General`, bukan teks. Login yang bukan angka (atau
+  diawali 0, atau > 15 digit) tetap apa adanya. Pengelompokan, urutan dan lookup tetap
+  memakai Login teks di dalam, jadi hasilnya tidak berubah. KVB tetap teks.
+
 **File lookup disimpan di server** (jarang berubah, tidak di-upload tiap kali, tidak
 pernah masuk git): folder `dseg_lookup/` di sebelah `users.db` (atau `DW_DSEG_LOOKUP_DIR`),
 berisi `account_uid.xlsx` (`user_id`, `account`) dan `uid_kyc_country.xlsx`
 (`user_id`, `Country of KYC`); `.csv` juga boleh. Hasil parse (107k + 374k baris, ±5 detik)
 di-cache di `.lookup_cache.pkl` per ukuran+mtime file, jadi run berikutnya <1 detik.
-Admin bisa mengganti file lewat **Update UID / KYC lookup files** di halaman DPM Deal
+**Setiap user DPM** (bukan hanya admin) bisa mengganti file lewat **Update UID / KYC lookup files** di halaman DPM Deal
 Segregator (header divalidasi; file lama tetap kalau header salah; tanggal file tampil).
 Kalau file belum ada, segregator tetap jalan: kolom KYC Country / UID kosong, dengan
 catatan di halaman, di log job dan di Verifikasi.

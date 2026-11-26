@@ -1192,13 +1192,13 @@
     {% endfor %}
   </ul>
   {% if not (lookup_status | selectattr("present") | list | length == lookup_status | length) %}
-  <div class="note bad" id="kyc-lookup-missing">The UID / KYC lookup files are not on the server yet. The Deal Segregator still runs, but the KYC Country and UID columns will be blank until an admin uploads them below.</div>
+  <div class="note bad" id="kyc-lookup-missing">The UID / KYC lookup files are not on the server yet. The Deal Segregator still runs, but the KYC Country and UID columns will be blank until they are uploaded below.</div>
   {% endif %}
   {% if lookup_ok %}<div class="note">{{ lookup_ok }}</div>{% endif %}
   {% if lookup_error %}<div class="note bad">{{ lookup_error }}</div>{% endif %}
-  {% if lookup_admin %}
+  {% if lookup_can_upload %}
   <details style="margin-top:8px"{% if lookup_error %} open{% endif %}>
-    <summary>Update UID / KYC lookup files <span class="opt">— admin, optional</span></summary>
+    <summary>Update UID / KYC lookup files <span class="opt">— optional</span></summary>
     <form method="post" action="/tool/segregate/lookup" enctype="multipart/form-data" style="margin-top:8px">
       <label for="lookup-account">Account file <span class="opt">— .xlsx or .csv with columns user_id, account</span></label>
       <input id="lookup-account" type="file" name="account_file" accept=".xlsx,.xlsm,.csv">
@@ -1209,7 +1209,7 @@
     </form>
   </details>
   {% else %}
-  <p class="hint">Only an admin can replace these files.</p>
+  <p class="hint">Only DPM users can replace these files.</p>
   {% endif %}
 </div>
 {% endif %}
