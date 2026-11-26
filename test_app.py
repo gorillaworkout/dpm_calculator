@@ -112,6 +112,11 @@ class FilePickerParser(HTMLParser):
         if tag == "input" and a.get("type") == "file": self.pickers.append(a)
 file_picker_parser = FilePickerParser()
 file_picker_parser.feed(halaman_segregate.data.decode())
+# v1.50: the admin-only "Update UID / KYC lookup files" form has its own two pickers
+# (name account_file / kyc_file), outside the upload form. Check the upload form's.
+assert [p.get("id") for p in file_picker_parser.pickers if p.get("name") != "file"] == \
+    ["lookup-account", "lookup-kyc"]
+file_picker_parser.pickers = [p for p in file_picker_parser.pickers if p.get("name") == "file"]
 assert [p.get("id") for p in file_picker_parser.pickers] == ["deals-file", "equity-file"], \
     "Deals History and Client Equity FX need separate file pickers"
 assert "multiple" in file_picker_parser.pickers[0]

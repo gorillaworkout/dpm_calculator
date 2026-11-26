@@ -31,6 +31,7 @@ import angka
 import auth
 import chunked
 import cleanup
+import dseg_lookup
 import invitation
 import partner_approval
 
@@ -537,10 +538,16 @@ DOC = {
             "Repeated non-empty Deal IDs are removed, then Daily and Monthly Summary totals are grouped by account, period, type, symbol and currency. Group and Country are deliberately ignored.",
             "When Client Equity FX is included, Commission, Fee, Swap and Profit are converted "
             "to USD by exact Date + Currency. Missing rates stay blank and are highlighted yellow.",
+            "On both Monthly Summary sheets each Login is looked up in the stored account file "
+            "(<code>account</code> &rarr; <code>user_id</code> = UID), then the UID in the KYC file "
+            "(<code>user_id</code> &rarr; <code>Country of KYC</code>). A Login or UID that is not found "
+            "leaves the cell blank and is listed on Verifikasi. Daily sheets are not changed.",
         ],
         "hasil": "One <code>.zip</code> containing two workbooks:",
         "sheets": [("Deals - Daily.xlsx", "<code>Daily</code> (out rows), <code>Daily - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi."),
-                   ("Deals - Monthly Summary.xlsx", "<code>Monthly Summary</code> (out rows), <code>Monthly Summary - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi.")],
+                   ("Deals - Monthly Summary.xlsx", "<code>Monthly Summary</code> (out rows), <code>Monthly Summary - In</code> (in rows), USD columns when FX is supplied, plus Verifikasi. "
+                    "Both sheets start with <code>KYC Country</code> and <code>UID</code> (from the stored UID / KYC lookup files); "
+                    "<code>Monthly Summary</code> ends with <code>Total Volume</code> (Volume ÷ 100 for USC, otherwise Volume).")],
         "catatan": ["Review the <strong>Verifikasi</strong> sheet before using the totals.",
                     "After a successful run the uploaded file is deleted from the server. "
                     "The file on your computer is not changed. Verifikasi records this.",
@@ -867,7 +874,53 @@ def tool(slug, company="dpm"):
     pilihan = _pilihan_bulan() if slug == "dw" else {}
     hint, doc = _copy_for(company, slug)
     return render_template("tool.html", slug=slug, tool=registry[slug],
-                           hint=hint, doc=doc, **pilihan)
+                           hint=hint, doc=doc, **pilihan, **_lookup_ctx(company, slug))
+
+
+def _lookup_ctx(company, slug):
+    """DPM Deal Segregator only: the stored UID / KYC lookup files (v1.50)."""
+    if company != "dpm" or slug != "segregate":
+        return {}
+    user = getattr(request, "user", None) or {}
+    try:
+        is_admin = bool(user["is_admin"])
+    except (KeyError, IndexError, TypeError):
+        is_admin = False
+    return {"lookup_status": dseg_lookup.status(), "lookup_admin": is_admin}
+
+
+@app.post("/tool/segregate/lookup")
+def segregate_lookup_upload():
+    """Admin replaces the stored account / KYC lookup files of the DPM Deal Segregator."""
+    request.company = "dpm"
+    registry = _tools_for("dpm")
+    hint, doc = _copy_for("dpm", "segregate")
+    ctx = _lookup_ctx("dpm", "segregate")
+
+    def _page(code, **kw):
+        ctx2 = _lookup_ctx("dpm", "segregate")
+        return render_template("tool.html", slug="segregate", tool=registry["segregate"],
+                               hint=hint, doc=doc, **ctx2, **kw), code
+
+    if not ctx.get("lookup_admin"):
+        return _page(403, lookup_error="Only an admin can replace the UID / KYC lookup files.")
+    files = {"account": request.files.get("account_file"), "kyc": request.files.get("kyc_file")}
+    files = {k: f for k, f in files.items() if f and f.filename}
+    if not files:
+        return _page(400, lookup_error="Choose the account file, the KYC file, or both.")
+    done, errors = [], []
+    for kind, f in files.items():
+        try:
+            stats = dseg_lookup.save(kind, f, f.filename)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        done.append(f"{dseg_lookup.LABEL[kind]}: {stats['rows']:,} rows saved")
+    if errors:
+        msg = " ".join(errors) + (" Saved: " + "; ".join(done) + "." if done else
+                                  " Nothing was changed.")
+        return _page(400, lookup_error=msg)
+    return _page(200, lookup_ok="Lookup files updated. " + "; ".join(done) + ".")
 
 
 @app.get("/kvb/tool/<slug>")
@@ -892,7 +945,7 @@ def run(slug, company="dpm"):
         hint, doc = _copy_for(company, slug)
         return render_template("tool.html", slug=slug, tool=registry[slug],
                                hint=hint, doc=doc,
-                               error=pesan, **pilihan), 400
+                               error=pesan, **pilihan, **_lookup_ctx(company, slug)), 400
 
     uploads = [u for u in request.files.getlist("file") if u and u.filename]
     # Large batches arrive in pieces via /upload/chunk and are already on disk by
@@ -1303,6 +1356,9 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
                         "--from-session", str(session_path), "-o", str(dst)]
             if company == "kvb":
                 perintah.append("--allow-mt4")
+            else:
+                # v1.50: DPM only -- KYC Country + UID (+ Total Volume) on Monthly Summary.
+                perintah += ["--kyc-lookup", str(dseg_lookup.lookup_dir())]
             r = subprocess.run(perintah, capture_output=True, text=True, cwd=BASE)
             pengguna, jejak = _pisah_traceback(r.stderr or "")
             if jejak:
@@ -1340,6 +1396,9 @@ def _jalankan_job(job_id, company, slug, job, src, dst, periode=None, saldo_jw=N
                 # The workbook says so on Verifikasi. The CLI does not pass this,
                 # so a command-line run leaves the source files where they are.
                 perintah.append("--delete-input")
+            if company == "dpm" and script == "deal_segregator.py":
+                # v1.50: KYC Country + UID (+ Total Volume) from the stored lookup files.
+                perintah += ["--kyc-lookup", str(dseg_lookup.lookup_dir())]
             if company == "kvb" and script == "deal_segregator.py":
                 perintah.append("--allow-mt4")
                 if mt4_accounts:
@@ -1404,7 +1463,7 @@ def job_status(job_id):
                                error=info["error"],
                                log=info["log"] or "Failed with no message.",
                                job_version=info.get("version"),
-                               **pilihan), 422
+                               **pilihan, **_lookup_ctx(company, slug)), 422
     elapsed = int(time.time() - info["started"])
     return render_template("job.html", job_id=job_id, info=info, elapsed=elapsed,
                            tool=registry[slug])
